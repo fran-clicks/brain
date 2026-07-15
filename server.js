@@ -59,6 +59,9 @@ async function initDb() {
       attachment_name TEXT, attachment_type TEXT, attachment_data TEXT,
       created_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS sync_state (k TEXT PRIMARY KEY, v JSONB NOT NULL DEFAULT '{}');
+    CREATE TABLE IF NOT EXISTS connector_types (
+      slug TEXT PRIMARY KEY, label TEXT NOT NULL, fields JSONB NOT NULL,
+      notes TEXT DEFAULT '', created_by TEXT DEFAULT 'assistant', created_at TIMESTAMPTZ DEFAULT now());
   `);
 }
 
@@ -97,6 +100,15 @@ const CONNECTOR_TYPES = {
   }
 };
 
+async function getAllConnectorTypes() {
+  const dyn = (await pool.query('SELECT slug, label, fields, notes FROM connector_types ORDER BY created_at')).rows;
+  const merged = { ...CONNECTOR_TYPES };
+  for (const d of dyn) {
+    if (!merged[d.slug]) merged[d.slug] = { label: d.label, fields: d.fields, notes: d.notes, dynamic: true };
+  }
+  return merged;
+}
+
 async function getConnector(type) {
   const { rows } = await pool.query(
     'SELECT * FROM connectors WHERE type=$1 AND active=true ORDER BY created_at DESC LIMIT 1', [type]);
@@ -105,7 +117,7 @@ async function getConnector(type) {
   catch { return null; }
 }
 
-app.get('/api/connector-types', (_req, res) => res.json(CONNECTOR_TYPES));
+app.get('/api/connector-types', async (_req, res) => res.json(await getAllConnectorTypes()));
 
 app.get('/api/connectors', async (_req, res) => {
   const { rows } = await pool.query(
@@ -115,7 +127,8 @@ app.get('/api/connectors', async (_req, res) => {
 
 app.post('/api/connectors', async (req, res) => {
   const { type, name, config, added_by } = req.body || {};
-  const def = CONNECTOR_TYPES[type];
+  const types = await getAllConnectorTypes();
+  const def = types[type];
   if (!def) return res.status(400).json({ error: 'unknown connector type' });
   for (const f of def.fields) {
     if (!config?.[f.key]) return res.status(400).json({ error: `missing field: ${f.key}` });
@@ -128,6 +141,11 @@ app.post('/api/connectors', async (req, res) => {
     } else if (type === 'anthropic') {
       await anthropic(config.api_key, { messages: [{ role: 'user', content: 'ping' }], system: 'Reply "pong".', max_tokens: 8 });
       meta = { model: ASSISTANT_MODEL };
+    } else {
+      // dynamic connector: store credentials now, integration wired later.
+      // Non-secret fields go into visible meta; secrets never do.
+      for (const f of def.fields) if (!f.secret) meta[f.key] = config[f.key];
+      meta.integration = 'pending';
     }
   } catch (e) {
     return res.status(400).json({ error: `Connection test failed: ${e.message}. Credentials were NOT saved.` });
@@ -407,6 +425,31 @@ const TOOLS = [
     name: 'query_sales',
     description: 'Sales/orders data (deliveries, revenue by country/product, etc).',
     input_schema: { type: 'object', properties: { question: { type: 'string' } } }
+  },
+  {
+    name: 'create_connector_type',
+    description: 'Create a new connector type so a member can securely submit credentials for a service via the Connectors form (never via chat). Use after you understand what service they want to connect and what its API needs (base URL, key, account id, etc). The form appears immediately in the "New connector" type dropdown. Mark every credential-like field secret:true.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        slug: { type: 'string', description: 'lowercase identifier, e.g. "shopify", "klaviyo", "custom-erp"' },
+        label: { type: 'string', description: 'human name shown in the dropdown, e.g. "Shopify store"' },
+        fields: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              key: { type: 'string', description: 'lowercase field id, e.g. "api_key"' },
+              label: { type: 'string', description: 'help text incl. where to find it' },
+              secret: { type: 'boolean' }
+            },
+            required: ['key', 'label', 'secret']
+          }
+        },
+        notes: { type: 'string', description: 'what data this will provide and any integration notes' }
+      },
+      required: ['slug', 'label', 'fields']
+    }
   }
 ];
 
@@ -435,7 +478,23 @@ async function runTool(name, input) {
     return (await pool.query('SELECT id, title, description, event_date, added_by, attachment_name FROM events ORDER BY event_date DESC LIMIT 50')).rows;
   }
   if (name === 'query_sales') {
-    return { error: 'No sales source is connected to the brain yet. Sales, delivery and order data (by country, product, delivery status) will become available once a store/sales connector is added. Suggest the team connects their sales platform via the Connectors tab (ask the admins which platform: Shopify, WooCommerce, custom API...).' };
+    return { error: 'No sales source is connected to the brain yet. Sales, delivery and order data (by country, product, delivery status) will become available once a store/sales connector is added. Offer to set one up right now: ask which platform they use, then use create_connector_type to build the credentials form.' };
+  }
+  if (name === 'create_connector_type') {
+    const slug = String(input.slug || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40);
+    const label = String(input.label || '').slice(0, 80);
+    const fields = (Array.isArray(input.fields) ? input.fields : []).slice(0, 12).map(f => ({
+      key: String(f.key || '').toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 40),
+      label: String(f.label || '').slice(0, 200),
+      secret: !!f.secret
+    })).filter(f => f.key && f.label);
+    if (!slug || !label || !fields.length) return { error: 'slug, label and at least one field are required' };
+    if (CONNECTOR_TYPES[slug]) return { error: `"${slug}" is a built-in connector type — it already exists in the dropdown` };
+    await pool.query(
+      `INSERT INTO connector_types (slug, label, fields, notes) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (slug) DO UPDATE SET label=$2, fields=$3, notes=$4`,
+      [slug, label, JSON.stringify(fields), String(input.notes || '').slice(0, 1000)]);
+    return { ok: true, slug, label, fields, message: `Connector form "${label}" created. Tell the user to pick "${label}" in the New connector form on this page and fill it in — credentials go into the form, never into this chat. Data sync for this source will be wired by the dev team once credentials are saved.` };
   }
   return { error: 'unknown tool' };
 }
@@ -452,15 +511,22 @@ app.post('/api/assistant', async (req, res) => {
   if (!messages.length) return res.status(400).json({ error: 'messages required' });
 
   const conns = await pool.query('SELECT type, name, meta, active FROM connectors WHERE active=true');
+  const knownTypes = await getAllConnectorTypes();
   const system = `You are the built-in assistant of "clicks brain", an internal team dashboard. Today is ${new Date().toISOString().slice(0, 10)}.
 Tabs: Overview (period stats 7d/1m/3m/6m/1y with event markers), Sales & Dates, Gorgias Stats, Knowledge Bases, Connectors (the ＋ button in the nav).
 Product specs are not shown yet — they will be captured automatically from sources (Shopify product list, website) once those connectors are added.
 House rules:
 - Data flows in from sources; nothing is deletable/editable here. Wrong data → fix at the source, re-import.
-- Credentials go ONLY in Connectors → ＋ Add connector (encrypted, write-only). NEVER ask for or accept credentials in chat; if a user posts one, tell them to rotate it and use the Connectors form.
-- Connector types available: gorgias (Gorgias helpdesk: subdomain, account email, REST API key from Gorgias Settings → Account → REST API), anthropic (Claude assistant: API key from console.anthropic.com).
+- Credentials go ONLY into the New connector form on the ＋ page (encrypted, write-only). NEVER ask for or accept credentials in chat; if a user posts one, tell them to rotate it immediately and use the form instead.
+- Connector types currently in the dropdown: ${JSON.stringify(Object.fromEntries(Object.entries(knownTypes).map(([k, v]) => [k, { label: v.label, fields: v.fields.map(f => f.key), dynamic: !!v.dynamic }])))}.
 - Active connectors right now: ${JSON.stringify(conns.rows)}.
 - Team events (campaigns, launches) are logged on the Overview tab with optional attachments and appear as 📌 markers on charts to show their influence.
+Adding NEW kinds of connectors is a core part of your job. When a member wants to connect something not in the dropdown (Shopify, Klaviyo, a shipping provider, a custom internal API...):
+1. Ask what service it is and what data they want from it.
+2. Work out what its API needs for server-to-server auth (base URL/store domain, API key/token, account id...). Ask if unsure — the member may need to check with whoever admins that service.
+3. Call create_connector_type with clear field labels that say exactly where to find each value. Mark every credential secret:true.
+4. Tell them the form is now in the dropdown on this page; after they save, the integration gets wired by the dev team (status shows "pending" until then).
+gorgias and anthropic connectors are fully wired: they test the connection and sync data immediately.
 Use your tools to answer data questions with real numbers. If a question needs sales/order/delivery data, use query_sales and relay its guidance. Be concise. Answer in the user's language.`;
 
   try {

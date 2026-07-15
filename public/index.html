@@ -239,17 +239,27 @@ footer{color:rgba(16,17,20,.45)}
 <!-- CONNECTORS -->
 <div class="section" id="s-conn">
   <div class="card">
-    <h2>Connectors <button class="btn" style="float:right;margin:0;padding:5px 12px" onclick="toggleConnForm()">＋ Add connector</button></h2>
+    <h2>Connectors</h2>
     <table id="connTable"><thead><tr><th>Type</th><th>Name</th><th>Info</th><th>Status</th><th>Added by</th></tr></thead><tbody></tbody></table>
-    <div class="note">Credentials are encrypted at rest and write-only — once saved they are never shown again, to anyone. Adding a connector of the same type replaces the previous one. Not sure how to do it? <a href="#" onclick="aiAsk('How do I add a connector? Walk me through it.');return false">Ask the assistant</a>.</div>
+    <div class="note">Credentials are encrypted at rest and write-only — once saved they are never shown again, to anyone. Adding a connector of the same type replaces the previous one.</div>
   </div>
-  <div class="card" id="connForm" style="display:none">
+  <div class="card">
+    <h2>💬 Want to connect something? Talk to the brain</h2>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:8px">Tell it what you want to connect — Shopify, Klaviyo, a shipping provider, a custom API, anything. It will figure out what's needed and build the form for you below. Never paste credentials in the chat.</p>
+    <div id="connLog" style="max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:4px 0"></div>
+    <div style="display:flex;gap:6px;margin-top:8px">
+      <input id="connInput" placeholder='e.g. "I want to connect our Shopify store" or "add our shipping provider"'>
+      <button class="btn" style="margin:0" onclick="connSend()">Send</button>
+    </div>
+  </div>
+  <div class="card" id="connForm">
     <h2>New connector</h2>
     <label>Type</label>
     <select id="cType"></select>
+    <div class="note" id="cNotes" style="display:none;margin-top:6px"></div>
     <div id="cFields"></div>
     <label>Your name</label><input id="cBy">
-    <button class="btn" onclick="addConnector()">Test &amp; save</button>
+    <button class="btn" onclick="addConnector()">Save connector</button>
     <div class="err" id="cErr"></div>
   </div>
 </div>
@@ -476,7 +486,9 @@ let connTypes = {};
 async function loadConnectorTypes() {
   connTypes = await api('/api/connector-types');
   const sel = document.getElementById('cType');
+  const prev = sel.value;
   sel.innerHTML = Object.entries(connTypes).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('');
+  if (prev && connTypes[prev]) sel.value = prev;
   sel.onchange = renderConnFields;
   renderConnFields();
 }
@@ -484,13 +496,9 @@ function renderConnFields() {
   const t = connTypes[document.getElementById('cType').value];
   document.getElementById('cFields').innerHTML = (t?.fields || []).map(f =>
     `<label>${esc(f.label)}</label><input id="cf_${esc(f.key)}" type="${f.secret ? 'password' : 'text'}" autocomplete="off">`).join('');
-}
-function toggleConnForm() {
-  const f = document.getElementById('connForm');
-  f.style.display = f.style.display === 'none' ? 'block' : 'none';
-  if (f.style.display === 'block') {
-    aiAsk('I\'m adding a new connector — stay with me and help if I get stuck. What do I need for each type?');
-  }
+  const n = document.getElementById('cNotes');
+  if (t?.notes) { n.textContent = t.notes + (t.dynamic ? ' (integration wired after credentials are saved)' : ''); n.style.display = 'block'; }
+  else { n.style.display = 'none'; }
 }
 async function loadConnectors() {
   const conns = await api('/api/connectors');
@@ -506,11 +514,47 @@ async function addConnector() {
   const config = {};
   for (const f of connTypes[type].fields) config[f.key] = el('cf_' + f.key).value.trim();
   try {
-    await api('/api/connectors', {method:'POST', body: JSON.stringify({ type, config, added_by: el('cBy').value.trim() || 'anonymous' })});
+    const saved = await api('/api/connectors', {method:'POST', body: JSON.stringify({ type, config, added_by: el('cBy').value.trim() || 'anonymous' })});
     connTypes[type].fields.forEach(f => el('cf_' + f.key).value = '');
-    toggleConnForm(); loadConnectors(); loadGorgias(); loadOverview();
+    loadConnectors(); loadGorgias(); loadOverview();
+    connAppend('assistant', saved.meta?.integration === 'pending'
+      ? `✅ "${connTypes[type].label}" credentials saved (encrypted). Integration status: pending — data sync will be wired next.`
+      : `✅ "${connTypes[type].label}" connected and working.`);
   } catch (e) { el('cErr').textContent = e.message; }
 }
+
+// inline connector chat (same assistant, own thread)
+const connHistory = [];
+function connAppend(role, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + role;
+  d.textContent = text;
+  const log = document.getElementById('connLog');
+  log.appendChild(d);
+  log.scrollTop = 1e9;
+  return d;
+}
+let connBusy = false;
+async function connSend() {
+  if (connBusy) return;
+  const input = document.getElementById('connInput');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  connAppend('user', text);
+  connHistory.push({ role: 'user', content: text });
+  const thinking = connAppend('assistant', '…');
+  connBusy = true;
+  try {
+    const r = await api('/api/assistant', {method:'POST', body: JSON.stringify({ messages: connHistory })});
+    thinking.textContent = r.reply;
+    if (r.configured !== false) connHistory.push({ role: 'assistant', content: r.reply });
+    await loadConnectorTypes(); // the assistant may have created a new form
+    loadConnectors();
+  } catch (e) { thinking.textContent = '⚠️ ' + e.message; }
+  finally { connBusy = false; }
+}
+document.getElementById('connInput').addEventListener('keydown', e => { if (e.key === 'Enter') connSend(); });
 
 // ---------- assistant ----------
 const aiHistory = [];
