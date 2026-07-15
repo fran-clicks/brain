@@ -62,6 +62,9 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS connector_types (
       slug TEXT PRIMARY KEY, label TEXT NOT NULL, fields JSONB NOT NULL,
       notes TEXT DEFAULT '', created_by TEXT DEFAULT 'assistant', created_at TIMESTAMPTZ DEFAULT now());
+    ALTER TABLE connectors ADD COLUMN IF NOT EXISTS approval_status TEXT DEFAULT 'approved';
+    ALTER TABLE connectors ADD COLUMN IF NOT EXISTS approved_by TEXT;
+    ALTER TABLE connectors ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
   `);
 }
 
@@ -121,8 +124,40 @@ app.get('/api/connector-types', async (_req, res) => res.json(await getAllConnec
 
 app.get('/api/connectors', async (_req, res) => {
   const { rows } = await pool.query(
-    'SELECT id, type, name, meta, active, added_by, created_at FROM connectors ORDER BY created_at DESC');
+    'SELECT id, type, name, meta, active, added_by, approval_status, approved_by, created_at FROM connectors ORDER BY created_at DESC');
   res.json(rows);
+});
+
+// ---------- pending integrations + admin approval ----------
+const adminOk = (pw) => {
+  const admin = process.env.ADMIN_PASSWORD;
+  if (!admin || !pw) return false;
+  const a = Buffer.from(String(pw)), b = Buffer.from(admin);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+};
+
+app.get('/api/integrations/pending', async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, type, name, meta, added_by, created_at FROM connectors
+     WHERE approval_status='pending' AND active=true ORDER BY created_at`);
+  res.json(rows);
+});
+
+app.post('/api/connectors/:id/decision', async (req, res) => {
+  const { decision, admin_password, decided_by } = req.body || {};
+  if (!process.env.ADMIN_PASSWORD)
+    return res.status(400).json({ error: 'No ADMIN_PASSWORD is set on the server. Set it in Render → Environment to enable approvals.' });
+  if (!adminOk(admin_password))
+    return res.status(403).json({ error: 'Wrong admin password. Only authorized members can approve or reject integrations.' });
+  if (!['approved', 'rejected'].includes(decision))
+    return res.status(400).json({ error: 'decision must be "approved" or "rejected"' });
+  const { rows } = await pool.query(
+    `UPDATE connectors SET approval_status=$1, approved_by=$2, approved_at=now(), active=(CASE WHEN $1='approved' THEN active ELSE false END)
+     WHERE id=$3 AND approval_status='pending'
+     RETURNING id, type, name, meta, approval_status, approved_by`,
+    [decision, String(decided_by || 'admin').slice(0, 100), req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'not found or already decided' });
+  res.json(rows[0]);
 });
 
 app.post('/api/connectors', async (req, res) => {
@@ -151,10 +186,11 @@ app.post('/api/connectors', async (req, res) => {
     return res.status(400).json({ error: `Connection test failed: ${e.message}. Credentials were NOT saved.` });
   }
   await pool.query('UPDATE connectors SET active=false WHERE type=$1', [type]);
+  const approval = CONNECTOR_TYPES[type] ? 'approved' : 'pending'; // built-ins auto-approved; dynamic need admin sign-off
   const { rows } = await pool.query(
-    `INSERT INTO connectors (type, name, config_encrypted, meta, added_by) VALUES ($1,$2,$3,$4,$5)
-     RETURNING id, type, name, meta, active, added_by, created_at`,
-    [type, name || def.label, encrypt(config), meta, added_by || 'anonymous']);
+    `INSERT INTO connectors (type, name, config_encrypted, meta, added_by, approval_status) VALUES ($1,$2,$3,$4,$5,$6)
+     RETURNING id, type, name, meta, active, added_by, approval_status, created_at`,
+    [type, name || def.label, encrypt(config), meta, added_by || 'anonymous', approval]);
   if (type === 'gorgias') syncGorgias(15).catch(e => console.error('initial sync:', e.message));
   res.status(201).json(rows[0]);
 });
@@ -427,6 +463,11 @@ const TOOLS = [
     input_schema: { type: 'object', properties: { question: { type: 'string' } } }
   },
   {
+    name: 'list_pending_integrations',
+    description: 'List connector integrations that are pending admin approval, rejected, or approved but not yet wired. Use when someone asks about pending integrations or the status of a connector they added.',
+    input_schema: { type: 'object', properties: {} }
+  },
+  {
     name: 'create_connector_type',
     description: 'Create a new connector type so a member can securely submit credentials for a service via the Connectors form (never via chat). Use after you understand what service they want to connect and what its API needs (base URL, key, account id, etc). The form appears immediately in the "New connector" type dropdown. Mark every credential-like field secret:true.',
     input_schema: {
@@ -480,6 +521,13 @@ async function runTool(name, input) {
   if (name === 'query_sales') {
     return { error: 'No sales source is connected to the brain yet. Sales, delivery and order data (by country, product, delivery status) will become available once a store/sales connector is added. Offer to set one up right now: ask which platform they use, then use create_connector_type to build the credentials form.' };
   }
+  if (name === 'list_pending_integrations') {
+    const { rows } = await pool.query(
+      `SELECT id, type, name, meta, added_by, approval_status, approved_by, created_at FROM connectors
+       WHERE approval_status IN ('pending','rejected') OR (approval_status='approved' AND meta->>'integration'='pending')
+       ORDER BY created_at DESC LIMIT 50`);
+    return { integrations: rows, note: 'pending = waiting for an authorized member to approve/reject on the ＋ page. approved with integration:pending = authorized, sync code still being wired by the dev team.' };
+  }
   if (name === 'create_connector_type') {
     const slug = String(input.slug || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40);
     const label = String(input.label || '').slice(0, 80);
@@ -525,8 +573,9 @@ Adding NEW kinds of connectors is a core part of your job. When a member wants t
 1. Ask what service it is and what data they want from it.
 2. Work out what its API needs for server-to-server auth (base URL/store domain, API key/token, account id...). Ask if unsure — the member may need to check with whoever admins that service.
 3. Call create_connector_type with clear field labels that say exactly where to find each value. Mark every credential secret:true.
-4. Tell them the form is now in the dropdown on this page; after they save, the integration gets wired by the dev team (status shows "pending" until then).
-gorgias and anthropic connectors are fully wired: they test the connection and sync data immediately.
+4. Tell them the form is now in the dropdown on this page; after they save, an AUTHORIZED member must approve it in the "Pending integrations" list on this page (requires the admin password, entered in that list — never in chat). Once approved, the dev team wires the data sync.
+gorgias and anthropic connectors are fully wired and auto-approved: they test the connection and sync data immediately.
+Use list_pending_integrations to report what's waiting for approval or wiring. You cannot approve anything yourself.
 Use your tools to answer data questions with real numbers. If a question needs sales/order/delivery data, use query_sales and relay its guidance. Be concise. Answer in the user's language.`;
 
   try {

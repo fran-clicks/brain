@@ -243,6 +243,16 @@ footer{color:rgba(16,17,20,.45)}
     <table id="connTable"><thead><tr><th>Type</th><th>Name</th><th>Info</th><th>Status</th><th>Added by</th></tr></thead><tbody></tbody></table>
     <div class="note">Credentials are encrypted at rest and write-only — once saved they are never shown again, to anyone. Adding a connector of the same type replaces the previous one.</div>
   </div>
+  <div class="card" id="pendingCard" style="display:none">
+    <h2>🕐 Pending integrations — authorization required</h2>
+    <div id="pendingList"></div>
+    <div class="grid two" style="margin-top:10px">
+      <div><label>Your name</label><input id="apBy"></div>
+      <div><label>Admin password</label><input type="password" id="apPw" autocomplete="off"></div>
+    </div>
+    <div class="err" id="apErr"></div>
+    <div class="note">Only authorized members have the admin password. Approving accepts the source into the brain (data sync is then wired by the dev team); rejecting deactivates it.</div>
+  </div>
   <div class="card">
     <h2>💬 Want to connect something? Talk to the brain</h2>
     <p style="font-size:13px;color:var(--muted);margin-bottom:8px">Tell it what you want to connect — Shopify, Klaviyo, a shipping provider, a custom API, anything. It will figure out what's needed and build the form for you below. Never paste credentials in the chat.</p>
@@ -500,12 +510,43 @@ function renderConnFields() {
   if (t?.notes) { n.textContent = t.notes + (t.dynamic ? ' (integration wired after credentials are saved)' : ''); n.style.display = 'block'; }
   else { n.style.display = 'none'; }
 }
+function connStatus(c) {
+  if (!c.active) return `<span class="tag src">${c.approval_status === 'rejected' ? 'rejected' : 'replaced'}</span>`;
+  if (c.approval_status === 'pending') return '<span class="tag pending">awaiting approval</span>';
+  if (c.meta?.integration === 'pending') return '<span class="tag pending">approved · wiring sync</span>';
+  return '<span class="tag approved">active</span>';
+}
 async function loadConnectors() {
   const conns = await api('/api/connectors');
   document.querySelector('#connTable tbody').innerHTML = conns.length ? conns.map(c =>
-    `<tr><td><b>${esc(c.type)}</b></td><td>${esc(c.name)}</td><td><span class="tag src">${esc(Object.values(c.meta || {}).join(' · '))}</span></td>
-     <td><span class="tag ${c.active ? 'approved' : 'pending'}">${c.active ? 'active' : 'replaced'}</span></td><td>${esc(c.added_by)}</td></tr>`).join('')
-    : '<tr><td colspan="5" class="empty">No connectors yet — add one with ＋</td></tr>';
+    `<tr><td><b>${esc(c.type)}</b></td><td>${esc(c.name)}</td><td><span class="tag src">${esc(Object.entries(c.meta || {}).filter(([k]) => k !== 'integration').map(([,v]) => v).join(' · '))}</span></td>
+     <td>${connStatus(c)}</td><td>${esc(c.added_by)}</td></tr>`).join('')
+    : '<tr><td colspan="5" class="empty">No connectors yet — ask the brain below</td></tr>';
+  loadPending();
+}
+async function loadPending() {
+  const pend = await api('/api/integrations/pending');
+  const card = document.getElementById('pendingCard');
+  card.style.display = pend.length ? 'block' : 'none';
+  document.getElementById('pendingList').innerHTML = pend.map(p => `
+    <div class="evt"><div class="pin">🕐</div><div style="flex:1">
+      <div class="t">${esc(p.name)} <span class="tag src">${esc(p.type)}</span></div>
+      <div class="m">requested by ${esc(p.added_by)} · ${esc(String(p.created_at).slice(0, 10))}</div>
+    </div>
+    <div>
+      <button class="btn" style="margin:0;padding:5px 12px" onclick="decide(${p.id},'approved')">Approve</button>
+      <button class="btn" style="margin:0;padding:5px 12px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="decide(${p.id},'rejected')">Reject</button>
+    </div></div>`).join('');
+}
+async function decide(id, decision) {
+  const el = i => document.getElementById(i);
+  el('apErr').textContent = '';
+  try {
+    await api(`/api/connectors/${id}/decision`, {method:'POST', body: JSON.stringify({
+      decision, admin_password: el('apPw').value, decided_by: el('apBy').value.trim() || 'admin'
+    })});
+    loadConnectors();
+  } catch (e) { el('apErr').textContent = e.message; }
 }
 async function addConnector() {
   const el = id => document.getElementById(id);
