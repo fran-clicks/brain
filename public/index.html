@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clicks Brain</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.js"></script>
+<style>
+:root{color-scheme:light;
+  --bg:#f6f7f9;--card:#fff;--ink:#1a1d21;--muted:#6b7280;--line:#e5e7eb;
+  --accent:#4f46e5;--accent-soft:#eef2ff;--green:#059669;--amber:#d97706;--red:#dc2626}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:20px;max-width:1100px;margin:0 auto}
+header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:16px}
+h1{font-size:20px;font-weight:700}h1 span{color:var(--accent)}
+.badge{font-size:11px;background:var(--accent-soft);color:var(--accent);padding:3px 10px;border-radius:999px;font-weight:600}
+nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
+nav button{border:1px solid var(--line);background:var(--card);color:var(--muted);padding:8px 14px;border-radius:8px;cursor:pointer;font-weight:600;font-size:13px}
+nav button.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
+.card h2{font-size:15px;margin-bottom:10px}
+.grid{display:grid;gap:12px}
+.grid.kpis{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+.kpi .v{font-size:22px;font-weight:700}.kpi .l{font-size:12px;color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em;padding:8px;border-bottom:1px solid var(--line)}
+td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:last-child td{border-bottom:none}
+input,textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:inherit;background:#fff;color:var(--ink)}
+label{font-size:12px;font-weight:600;color:var(--muted);display:block;margin:10px 0 4px}
+.btn{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:9px 16px;font-weight:600;cursor:pointer;font-size:13px;margin-top:12px}
+.tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px}
+.tag.pending{background:#fef3c7;color:var(--amber)}
+.tag.approved{background:#d1fae5;color:var(--green)}
+.tag.date{background:var(--accent-soft);color:var(--accent)}
+.tag.src{background:#f3f4f6;color:var(--muted);font-weight:500}
+.note{font-size:12px;color:var(--muted);background:var(--bg);border:1px dashed var(--line);border-radius:8px;padding:10px;margin-top:10px}
+.search{max-width:320px;margin-bottom:10px}
+.two{grid-template-columns:1fr 1fr}
+@media(max-width:700px){.two{grid-template-columns:1fr}}
+.empty{color:var(--muted);font-size:13px;padding:12px;text-align:center}
+.chart-wrap{position:relative;height:220px}
+footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
+.section{display:none}.section.active{display:block}
+.err{color:var(--red);font-size:12px;margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🧠 clicks <span>brain</span></h1>
+  <span class="badge">🔒 Internal · data flows in from sources · fix errors at the source, not here</span>
+</header>
+
+<nav>
+  <button data-s="specs" class="active">📦 Product Specs</button>
+  <button data-s="sales">📈 Sales &amp; Dates</button>
+  <button data-s="gorgias">🎧 Gorgias Stats</button>
+  <button data-s="kb">💡 Knowledge Bases</button>
+</nav>
+
+<div class="section active" id="s-specs">
+  <div class="card">
+    <h2>Product Specifications</h2>
+    <input class="search" id="specSearch" placeholder="Search products, SKUs, specs…">
+    <table id="specTable"><thead><tr><th>Product</th><th>SKU</th><th>Key specs</th><th>Warranty</th><th>Source</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card">
+    <h2>Import product</h2>
+    <div class="grid two">
+      <div><label>Product name</label><input id="pName"></div>
+      <div><label>SKU</label><input id="pSku"></div>
+    </div>
+    <label>Key specs</label><input id="pSpecs" placeholder="e.g. 65W GaN, USB-C PD 3.1, 2-port">
+    <div class="grid two">
+      <div><label>Warranty</label><input id="pWarranty" placeholder="e.g. 2 years"></div>
+      <div><label>Source</label><input id="pSource" placeholder="e.g. product catalog v3"></div>
+    </div>
+    <button class="btn" onclick="addProduct()">Import</button>
+    <div class="err" id="pErr"></div>
+    <div class="note">Entries can't be removed here. If something is wrong, fix it in the source system and re-import.</div>
+  </div>
+</div>
+
+<div class="section" id="s-sales">
+  <div class="card">
+    <h2>Sales</h2>
+    <div class="note">No sales source connected yet — connect your store/analytics API and this section will populate automatically.</div>
+  </div>
+  <div class="card">
+    <h2>Key dates</h2>
+    <table id="datesTable"><thead><tr><th>Date</th><th>Event</th><th>Source</th></tr></thead><tbody></tbody></table>
+    <div class="grid two" style="margin-top:8px">
+      <div><label>Date</label><input type="date" id="dDate"></div>
+      <div><label>Event</label><input id="dEvent" placeholder="e.g. Summer sale launch"></div>
+    </div>
+    <label>Source</label><input id="dSource" placeholder="e.g. marketing calendar">
+    <button class="btn" onclick="addDate()">Import</button>
+    <div class="err" id="dErr"></div>
+  </div>
+</div>
+
+<div class="section" id="s-gorgias">
+  <div class="grid kpis" id="gorgiasKpis"></div>
+  <div class="card" style="margin-top:14px">
+    <h2>Tickets created — last 7 days</h2>
+    <div class="chart-wrap"><canvas id="gorgiasChart"></canvas></div>
+    <div class="note" id="gorgiasNote">Loading live data from Gorgias…</div>
+  </div>
+</div>
+
+<div class="section" id="s-kb">
+  <div class="card">
+    <h2>Knowledge bases</h2>
+    <table id="kbTable"><thead><tr><th>Name</th><th>Description</th><th>Suggested by</th><th>Status</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card">
+    <h2>💡 Suggest a new knowledge base</h2>
+    <p style="font-size:13px;color:var(--muted)">Any team member can propose a database, doc set, or source to enrich the brain.</p>
+    <div class="grid two">
+      <div><label>Name</label><input id="kName" placeholder="e.g. Returns policy FAQ"></div>
+      <div><label>Your name</label><input id="kBy"></div>
+    </div>
+    <label>What is it &amp; why add it?</label>
+    <textarea id="kDesc" rows="3" placeholder="Describe the source and how it helps. Do NOT paste API keys or passwords — the server rejects them."></textarea>
+    <button class="btn" onclick="addKb()">Submit suggestion</button>
+    <div class="err" id="kErr"></div>
+  </div>
+</div>
+
+<footer>clicks brain · internal use only · no credentials are stored or displayed anywhere in this dashboard</footer>
+
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const api = async (p, opts) => {
+  const r = await fetch(p, opts ? {headers:{'Content-Type':'application/json'}, ...opts} : undefined);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+};
+
+// tabs
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.section').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  document.getElementById('s-' + b.dataset.s).classList.add('active');
+});
+
+// products
+let products = [];
+async function loadProducts() {
+  products = await api('/api/products');
+  renderProducts();
+}
+function renderProducts() {
+  const q = document.getElementById('specSearch').value.toLowerCase();
+  const rows = products.filter(p => JSON.stringify(p).toLowerCase().includes(q));
+  document.querySelector('#specTable tbody').innerHTML = rows.length ? rows.map(p =>
+    `<tr><td><b>${esc(p.name)}</b></td><td>${esc(p.sku)}</td><td>${esc(p.specs)}</td><td>${esc(p.warranty)}</td><td><span class="tag src">${esc(p.source)}</span></td></tr>`).join('')
+    : '<tr><td colspan="5" class="empty">No products yet — import from a source below</td></tr>';
+}
+async function addProduct() {
+  const el = id => document.getElementById(id);
+  el('pErr').textContent = '';
+  try {
+    await api('/api/products', {method:'POST', body: JSON.stringify({
+      name: el('pName').value.trim(), sku: el('pSku').value.trim(),
+      specs: el('pSpecs').value.trim(), warranty: el('pWarranty').value.trim(),
+      source: el('pSource').value.trim() || 'manual import'
+    })});
+    ['pName','pSku','pSpecs','pWarranty','pSource'].forEach(id => el(id).value = '');
+    loadProducts();
+  } catch (e) { el('pErr').textContent = e.message; }
+}
+document.getElementById('specSearch').oninput = renderProducts;
+
+// dates
+async function loadDates() {
+  const dates = await api('/api/dates');
+  document.querySelector('#datesTable tbody').innerHTML = dates.length ? dates.map(d =>
+    `<tr><td><span class="tag date">${esc(String(d.date).slice(0,10))}</span></td><td>${esc(d.event)}</td><td><span class="tag src">${esc(d.source)}</span></td></tr>`).join('')
+    : '<tr><td colspan="3" class="empty">No dates yet</td></tr>';
+}
+async function addDate() {
+  const el = id => document.getElementById(id);
+  el('dErr').textContent = '';
+  try {
+    await api('/api/dates', {method:'POST', body: JSON.stringify({
+      date: el('dDate').value, event: el('dEvent').value.trim(),
+      source: el('dSource').value.trim() || 'manual import'
+    })});
+    el('dEvent').value = ''; el('dSource').value = '';
+    loadDates();
+  } catch (e) { el('dErr').textContent = e.message; }
+}
+
+// gorgias
+let gChart;
+async function loadGorgias() {
+  const note = document.getElementById('gorgiasNote');
+  try {
+    const g = await api('/api/gorgias/stats');
+    if (!g.configured) { note.textContent = g.message; return; }
+    const frt = g.avg_first_response_seconds != null ? (g.avg_first_response_seconds/3600).toFixed(1) + 'h' : '—';
+    const kpis = [
+      {l:'Total tickets', v: g.total_tickets ?? '—'},
+      {l:`Open (last ${g.sample_size})`, v: g.open_in_recent ?? '—'},
+      {l:'Created last 7d', v: g.created_last_7d ?? '—'},
+      {l:'Closed last 7d', v: g.closed_last_7d ?? '—'},
+      {l:'Avg first response', v: frt},
+      {l:`CSAT (${g.csat_responses ?? 0} responses)`, v: g.csat_avg_5 != null ? g.csat_avg_5 + '/5' : '—'}
+    ];
+    document.getElementById('gorgiasKpis').innerHTML = kpis.map(k =>
+      `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    const days = g.created_per_day || {};
+    if (gChart) gChart.destroy();
+    gChart = new Chart(document.getElementById('gorgiasChart'), {
+      type:'bar',
+      data:{labels:Object.keys(days), datasets:[{label:'Tickets created', data:Object.values(days), backgroundColor:'#4f46e5', borderRadius:6}]},
+      options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true, ticks:{precision:0}}}}
+    });
+    note.textContent = 'Live from Gorgias · fetched ' + new Date(g.fetched_at).toLocaleString()
+      + (g.errors?.length ? ' · some metrics unavailable: ' + g.errors.join('; ') : '');
+  } catch (e) { note.textContent = 'Could not reach Gorgias: ' + e.message; }
+}
+
+// knowledge bases
+async function loadKbs() {
+  const kbs = await api('/api/kb');
+  document.querySelector('#kbTable tbody').innerHTML = kbs.length ? kbs.map(k =>
+    `<tr><td><b>${esc(k.name)}</b></td><td>${esc(k.description)}</td><td>${esc(k.suggested_by)}</td><td><span class="tag ${esc(k.status)}">${esc(k.status)}</span></td></tr>`).join('')
+    : '<tr><td colspan="4" class="empty">No knowledge bases yet — suggest one below</td></tr>';
+}
+async function addKb() {
+  const el = id => document.getElementById(id);
+  el('kErr').textContent = '';
+  try {
+    await api('/api/kb', {method:'POST', body: JSON.stringify({
+      name: el('kName').value.trim(), description: el('kDesc').value.trim(),
+      suggested_by: el('kBy').value.trim() || 'anonymous'
+    })});
+    ['kName','kBy','kDesc'].forEach(id => el(id).value = '');
+    loadKbs();
+  } catch (e) { el('kErr').textContent = e.message; }
+}
+
+loadProducts(); loadDates(); loadGorgias(); loadKbs();
+</script>
+</body>
+</html>

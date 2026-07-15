@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: clicks-brain
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: clicks-brain-db
+          property: connectionString
+      - key: GORGIAS_DOMAIN
+        sync: false
+      - key: GORGIAS_EMAIL
+        sync: false
+      - key: GORGIAS_API_KEY
+        sync: false
+      - key: DASHBOARD_PASSWORD
+        sync: false
+
+databases:
+  - name: clicks-brain-db
+    plan: free
