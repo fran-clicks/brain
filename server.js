@@ -457,16 +457,24 @@ app.get('/api/gorgias/stats', async (_req, res) => {
   const out = { configured: true, fetched_at: new Date().toISOString(), errors: [] };
   const now = Date.now(), weekAgo = now - 7 * 864e5;
   try {
-    const t = await gorgiasRequest(cfg, '/api/tickets?limit=100&order_by=created_datetime:desc&trashed=false');
-    const tickets = t.data || [];
+    const t = await gorgiasRequest(cfg, '/api/tickets?limit=1&trashed=false');
     out.total_tickets = t.meta?.total_resources ?? null;
-    out.sample_size = tickets.length;
-    out.open_in_recent = tickets.filter(x => x.status === 'open').length;
-    out.created_last_7d = tickets.filter(x => Date.parse(x.created_datetime) >= weekAgo).length;
-    out.closed_last_7d = tickets.filter(x => x.closed_datetime && Date.parse(x.closed_datetime) >= weekAgo).length;
+  } catch (e) { out.errors.push(String(e.message)); }
+  try {
+    // weekly counts from the synced cache (complete), not from a 100-ticket sample
+    const c = await pool.query(`SELECT
+      count(*) FILTER (WHERE status='open')::int open_total,
+      count(*) FILTER (WHERE created_datetime >= now()-interval '7 days')::int created_7d,
+      count(*) FILTER (WHERE closed_datetime >= now()-interval '7 days')::int closed_7d
+      FROM tickets_cache`);
+    out.open_total = c.rows[0].open_total;
+    out.created_last_7d = c.rows[0].created_7d;
+    out.closed_last_7d = c.rows[0].closed_7d;
+    const perDay = await pool.query(`SELECT created_datetime::date d, count(*)::int c FROM tickets_cache
+      WHERE created_datetime >= now()-interval '7 days' GROUP BY 1 ORDER BY 1`);
     const days = {};
     for (let i = 6; i >= 0; i--) days[new Date(now - i * 864e5).toISOString().slice(0, 10)] = 0;
-    tickets.forEach(x => { const d = (x.created_datetime || '').slice(0, 10); if (d in days) days[d]++; });
+    perDay.rows.forEach(r => { const d = String(r.d).slice(0, 10); if (d in days) days[d] = r.c; });
     out.created_per_day = days;
   } catch (e) { out.errors.push(String(e.message)); }
   try {

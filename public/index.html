@@ -519,8 +519,8 @@ async function loadGorgias() {
     if (!g.configured) { note.textContent = g.message; return; }
     const frt = g.avg_first_response_seconds != null ? (g.avg_first_response_seconds/3600).toFixed(1) + 'h' : '—';
     document.getElementById('gorgiasKpis').innerHTML = [
-      {l:'Total tickets', v: g.total_tickets ?? '—'},
-      {l:`Open (last ${g.sample_size})`, v: g.open_in_recent ?? '—'},
+      {l:'Total tickets (all time)', v: g.total_tickets ?? '—'},
+      {l:'Open now', v: g.open_total ?? '—'},
       {l:'Created last 7d', v: g.created_last_7d ?? '—'},
       {l:'Closed last 7d', v: g.closed_last_7d ?? '—'},
       {l:'Avg first response', v: frt},
