@@ -67,10 +67,77 @@ a{color:var(--accent)}
 .msg.assistant{align-self:flex-start;background:var(--bg);border:1px solid var(--line);border-bottom-left-radius:4px}
 #aiBar{display:flex;gap:6px;padding:10px;border-top:1px solid var(--line)}
 </style>
+<style>
+/* ===== clicks brand theme — liquid glass ===== */
+:root{
+  --yellow:#ffc800; --yellow-deep:#f0b400; --ink:#101114; --muted:#5f6368;
+  --line:rgba(16,17,20,.08); --card:rgba(255,255,255,.62); --bg:transparent;
+  --accent:#101114; --accent-soft:rgba(255,200,0,.18);
+}
+body{
+  background:
+    radial-gradient(700px 460px at 88% -8%, rgba(255,200,0,.28), transparent 62%),
+    radial-gradient(560px 400px at -8% 34%, rgba(255,200,0,.14), transparent 60%),
+    radial-gradient(500px 380px at 55% 108%, rgba(16,17,20,.10), transparent 60%),
+    linear-gradient(180deg,#f7f7f8 0%,#ececef 100%);
+  background-attachment:fixed;
+  letter-spacing:.005em;
+}
+h1{font-weight:800;letter-spacing:-.02em}
+h1 span{color:var(--ink);background:var(--yellow);padding:1px 10px;border-radius:999px}
+.badge, .card, .kpi, nav button, .periods button, #aiPanel{
+  background:var(--card);
+  backdrop-filter:blur(18px) saturate(1.6);
+  -webkit-backdrop-filter:blur(18px) saturate(1.6);
+  border:1px solid rgba(255,255,255,.65);
+  box-shadow:0 8px 28px rgba(16,17,20,.09), inset 0 1px 0 rgba(255,255,255,.85);
+}
+.badge{color:var(--ink);font-weight:600}
+.card{border-radius:16px}
+.kpi{border-radius:16px}
+.kpi .v{letter-spacing:-.02em}
+nav button, .periods button{color:var(--ink);border-radius:999px;transition:transform .06s ease, box-shadow .06s ease}
+nav button:hover, .periods button:hover{transform:translateY(-1px)}
+nav button:active, .periods button:active{transform:translateY(1px)}
+nav button.active, .periods button.active{
+  background:var(--ink);border-color:var(--ink);color:var(--yellow);
+  box-shadow:0 4px 14px rgba(16,17,20,.35), inset 0 1px 0 rgba(255,255,255,.12);
+}
+.btn{
+  background:linear-gradient(180deg,#ffd83e,var(--yellow));
+  color:var(--ink);border:1px solid rgba(16,17,20,.15);border-radius:12px;
+  box-shadow:0 3px 0 rgba(16,17,20,.28), inset 0 1px 0 rgba(255,255,255,.7);
+  transition:transform .06s ease, box-shadow .06s ease;
+}
+.btn:hover{filter:brightness(1.04)}
+.btn:active{transform:translateY(2px);box-shadow:0 1px 0 rgba(16,17,20,.28)}
+input,textarea,select{
+  background:rgba(255,255,255,.72);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  border:1px solid rgba(16,17,20,.12);border-radius:10px;
+}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--yellow-deep);box-shadow:0 0 0 3px var(--accent-soft)}
+.askbox input{box-shadow:0 8px 28px rgba(16,17,20,.08), inset 0 1px 0 rgba(255,255,255,.85)}
+.tag.date{background:var(--accent-soft);color:#7a5c00}
+.note{background:rgba(255,255,255,.4);border:1px dashed rgba(16,17,20,.15)}
+a{color:#8a6800;font-weight:600}
+#aiFab{
+  background:linear-gradient(180deg,#ffd83e,var(--yellow));
+  border:1px solid rgba(16,17,20,.15);
+  box-shadow:0 4px 0 rgba(16,17,20,.28), 0 10px 30px rgba(255,200,0,.45);
+  transition:transform .06s ease, box-shadow .06s ease;
+}
+#aiFab:active{transform:translateY(2px);box-shadow:0 1px 0 rgba(16,17,20,.28)}
+#aiPanel{border-radius:18px}
+#aiHead{background:var(--ink);color:var(--yellow)}
+.msg.user{background:var(--ink);color:#fff}
+.msg.assistant{background:rgba(255,255,255,.7);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+footer{color:rgba(16,17,20,.45)}
+</style>
 </head>
 <body>
 <header>
-  <h1>🧠 clicks <span>brain</span></h1>
+  <h1><img src="https://cdn.prod.website-files.com/66f575e72f06b9820f448d43/66fbda43f42a9d6f770bbae4_clicks-logo.svg" alt="clicks" style="height:22px;vertical-align:-3px" onerror="this.outerHTML='clicks'"> <span>brain</span></h1>
   <span class="badge">🔒 Internal · data flows in from sources · fix errors at the source, not here</span>
 </header>
 
@@ -304,8 +371,8 @@ async function loadOverview() {
     homeChart = new Chart(document.getElementById('homeChart'), {
       type: 'line',
       data: { labels: m.labels, datasets: [
-        {label:'Created', data:m.created, borderColor:'#4f46e5', backgroundColor:'#4f46e522', tension:.25, fill:true},
-        {label:'Closed', data:m.closed, borderColor:'#059669', tension:.25},
+        {label:'Created', data:m.created, borderColor:'#101114', backgroundColor:'rgba(16,17,20,.06)', tension:.25, fill:true},
+        {label:'Closed', data:m.closed, borderColor:'#f0b400', backgroundColor:'rgba(255,200,0,.15)', tension:.25},
         {label:'Cancel/refund', data:m.cancel, borderColor:'#dc2626', tension:.25}
       ]},
       options: { responsive:true, maintainAspectRatio:false,
@@ -426,7 +493,7 @@ async function loadGorgias() {
     if (gChart) gChart.destroy();
     gChart = new Chart(document.getElementById('gorgiasChart'), {
       type:'bar',
-      data:{labels:Object.keys(days), datasets:[{label:'Tickets created', data:Object.values(days), backgroundColor:'#4f46e5', borderRadius:6}]},
+      data:{labels:Object.keys(days), datasets:[{label:'Tickets created', data:Object.values(days), backgroundColor:'#ffc800', borderColor:'rgba(16,17,20,.2)', borderWidth:1, borderRadius:6}]},
       options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true, ticks:{precision:0}}}}
     });
     note.textContent = 'Live from Gorgias · fetched ' + new Date(g.fetched_at).toLocaleString()
