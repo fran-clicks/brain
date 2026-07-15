@@ -646,7 +646,7 @@ app.post('/api/slack/events', async (req, res) => {
   if (!conn) return res.sendStatus(200);
   if (!slackSigValid(conn.config, req)) return res.sendStatus(401);
   res.sendStatus(200); // ack within 3s; process async
-  if (req.headers['x-slack-retry-num']) return;
+  // retries are processed too (service may have been asleep on first delivery); seenSlackEvents dedupes
   const ev = req.body?.event;
   if (!ev || ev.bot_id) return;
   const isMention = ev.type === 'app_mention';
