@@ -349,7 +349,25 @@ function mergeSeries(series) {
     const m = Object.fromEntries(rows.map(r => [String(r.d).slice(0,10), r.c]));
     return labels.map(l => m[l] ?? 0);
   };
-  return { labels, created: line(series.created), closed: line(series.closed), cancel: line(series.cancel_refund) };
+  return { labels, created: line(series.created), open: line(series.still_open), closed: line(series.closed) };
+}
+
+const CAT_LABELS = {
+  cancel_refund: 'cancel/refund', troubleshoot: 'troubleshoot', shipping: 'shipping/delivery',
+  returns_warranty: 'returns/warranty', product_question: 'product questions'
+};
+function buildBreakdownMap(s) {
+  const map = {};
+  (s.tickets.breakdown || []).forEach(r => {
+    const d = String(r.d).slice(0,10);
+    map[d] = { cats: Object.entries(CAT_LABELS).map(([k, l]) => [l, r[k]]).filter(([, v]) => v > 0), tags: [] };
+  });
+  (s.tickets.tags || []).forEach(r => {
+    const d = String(r.d).slice(0,10);
+    map[d] = map[d] || { cats: [], tags: [] };
+    if (map[d].tags.length < 5) map[d].tags.push([r.tag, r.c]);
+  });
+  return map;
 }
 
 async function loadOverview() {
@@ -365,16 +383,40 @@ async function loadOverview() {
       {l:`Events (${curDays}d)`, v:s.events.length}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
     const m = mergeSeries(s.tickets.series);
+    const bd = buildBreakdownMap(s);
     if (homeChart) homeChart.destroy();
     homeChart = new Chart(document.getElementById('homeChart'), {
       type: 'line',
       data: { labels: m.labels, datasets: [
-        {label:'Created', data:m.created, borderColor:'#101114', backgroundColor:'rgba(16,17,20,.06)', tension:.25, fill:true},
-        {label:'Closed', data:m.closed, borderColor:'#f0b400', backgroundColor:'rgba(255,200,0,.15)', tension:.25},
-        {label:'Cancel/refund', data:m.cancel, borderColor:'#dc2626', tension:.25}
+        {label:'Created', data:m.created, borderColor:'#101114', backgroundColor:'rgba(16,17,20,.06)', tension:.25, fill:true, pointRadius:3, pointHoverRadius:6},
+        {label:'Still open', data:m.open, borderColor:'#dc2626', tension:.25, pointRadius:3, pointHoverRadius:6},
+        {label:'Closed', data:m.closed, borderColor:'#f0b400', backgroundColor:'rgba(255,200,0,.15)', tension:.25, pointRadius:3, pointHoverRadius:6}
       ]},
       options: { responsive:true, maintainAspectRatio:false,
-        plugins:{ legend:{position:'bottom'}, eventMarkers:{ events: s.events } },
+        interaction: { mode: 'index', intersect: false },
+        plugins:{
+          legend:{position:'bottom'},
+          eventMarkers:{ events: s.events },
+          tooltip: {
+            callbacks: {
+              afterBody(items) {
+                const d = items[0]?.label;
+                const b = bd[d];
+                if (!b) return '';
+                const lines = [];
+                if (b.cats.length) {
+                  lines.push('', 'Created that day, by category:');
+                  b.cats.forEach(([l, v]) => lines.push(`  ${l}: ${v}`));
+                }
+                if (b.tags.length) {
+                  lines.push('', 'Top tags:');
+                  b.tags.forEach(([t, v]) => lines.push(`  ${t}: ${v}`));
+                }
+                return lines;
+              }
+            }
+          }
+        },
         scales:{ y:{beginAtZero:true, ticks:{precision:0}} } }
     });
     document.getElementById('syncInfo').textContent = s.last_sync

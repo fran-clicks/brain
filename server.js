@@ -383,14 +383,27 @@ async function overviewStats(days) {
   days = Math.min(Math.max(parseInt(days) || 7, 1), 366);
   const bucket = days <= 31 ? 'day' : 'week';
   const params = [`${days} days`];
-  const [created, closed, cancels, totals, events, st] = await Promise.all([
+  const CATS = {
+    cancel_refund: "subject ~* 'cancel|refund|chargeback' OR tags::text ~* 'cancel|refund|chargeback'",
+    troubleshoot: "subject ~* 'trouble|not work|broken|defect|faulty|error|bug|stopped|repair' OR tags::text ~* 'troubleshoot|defect|bug'",
+    shipping: "subject ~* 'ship|deliver|tracking|arriv|customs|where.*order' OR tags::text ~* 'shipping|delivery|wismo'",
+    returns_warranty: "subject ~* 'return|warranty|replac|exchange' OR tags::text ~* 'return|warranty|exchange'",
+    product_question: "subject ~* 'compatib|fit|work with|which model|pre.?order|available' OR tags::text ~* 'presales|product'"
+  };
+  const catSelects = Object.entries(CATS)
+    .map(([k, cond]) => `count(*) FILTER (WHERE ${cond})::int ${k}`).join(', ');
+  const [created, opened, closed, breakdown, tagRows, totals, events, st] = await Promise.all([
     pool.query(`SELECT date_trunc('${bucket}', created_datetime)::date d, count(*)::int c FROM tickets_cache
                 WHERE created_datetime >= now()-$1::interval GROUP BY 1 ORDER BY 1`, params),
+    pool.query(`SELECT date_trunc('${bucket}', created_datetime)::date d, count(*)::int c FROM tickets_cache
+                WHERE created_datetime >= now()-$1::interval AND status='open' GROUP BY 1 ORDER BY 1`, params),
     pool.query(`SELECT date_trunc('${bucket}', closed_datetime)::date d, count(*)::int c FROM tickets_cache
                 WHERE closed_datetime >= now()-$1::interval GROUP BY 1 ORDER BY 1`, params),
-    pool.query(`SELECT date_trunc('${bucket}', created_datetime)::date d, count(*)::int c FROM tickets_cache
-                WHERE created_datetime >= now()-$1::interval AND (subject ~* '${CANCEL_RX}' OR tags::text ~* '${CANCEL_RX}')
-                GROUP BY 1 ORDER BY 1`, params),
+    pool.query(`SELECT date_trunc('${bucket}', created_datetime)::date d, ${catSelects} FROM tickets_cache
+                WHERE created_datetime >= now()-$1::interval GROUP BY 1 ORDER BY 1`, params),
+    pool.query(`SELECT date_trunc('${bucket}', created_datetime)::date d, t.tag, count(*)::int c
+                FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
+                WHERE created_datetime >= now()-$1::interval GROUP BY 1, 2 ORDER BY 1, 3 DESC`, params),
     pool.query(`SELECT count(*)::int total,
                 count(*) FILTER (WHERE status='open')::int open,
                 count(*) FILTER (WHERE created_datetime >= now()-$1::interval)::int created,
@@ -403,7 +416,12 @@ async function overviewStats(days) {
   ]);
   return {
     days, bucket,
-    tickets: { series: { created: created.rows, closed: closed.rows, cancel_refund: cancels.rows }, totals: totals.rows[0] },
+    tickets: {
+      series: { created: created.rows, still_open: opened.rows, closed: closed.rows },
+      breakdown: breakdown.rows,
+      tags: tagRows.rows,
+      totals: totals.rows[0]
+    },
     sales: null, // no sales source connected yet
     events: events.rows,
     last_sync: st.rows[0]?.v?.last_run || null,
