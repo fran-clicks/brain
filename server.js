@@ -11,12 +11,14 @@ const crypto = require('crypto');
 const { Pool } = require('pg');
 
 const app = express();
-app.use(express.json({ limit: '8mb' }));
+app.use(express.json({ limit: '8mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 // ---------- optional site-wide protection ----------
+// /api/slack/* is exempt (Slack signs its own requests); /api/health is exempt for Render's health checker.
 const SITE_PW = process.env.DASHBOARD_PASSWORD;
 if (SITE_PW) {
   app.use((req, res, next) => {
+    if (req.path.startsWith('/api/slack/') || req.path === '/api/health') return next();
     const [, b64] = (req.headers.authorization || '').split(' ');
     const pw = b64 ? Buffer.from(b64, 'base64').toString().split(':').slice(1).join(':') : '';
     if (pw === SITE_PW) return next();
@@ -100,6 +102,13 @@ const CONNECTOR_TYPES = {
   anthropic: {
     label: 'Claude assistant',
     fields: [{ key: 'api_key', label: 'Anthropic API key (console.anthropic.com)', secret: true }]
+  },
+  slack: {
+    label: 'Slack bot (@clicksbot)',
+    fields: [
+      { key: 'bot_token', label: 'Bot User OAuth Token, starts with xoxb- (api.slack.com/apps → your app → OAuth & Permissions)', secret: true },
+      { key: 'signing_secret', label: 'Signing Secret (api.slack.com/apps → your app → Basic Information)', secret: true }
+    ]
   }
 };
 
@@ -176,6 +185,12 @@ app.post('/api/connectors', async (req, res) => {
     } else if (type === 'anthropic') {
       await anthropic(config.api_key, { messages: [{ role: 'user', content: 'ping' }], system: 'Reply "pong".', max_tokens: 8 });
       meta = { model: ASSISTANT_MODEL };
+    } else if (type === 'slack') {
+      const t = await (await fetch('https://slack.com/api/auth.test', {
+        method: 'POST', headers: { Authorization: `Bearer ${config.bot_token}` }
+      })).json();
+      if (!t.ok) throw new Error(`Slack auth.test: ${t.error}`);
+      meta = { team: t.team, bot: t.user };
     } else {
       // dynamic connector: store credentials now, integration wired later.
       // Non-secret fields go into visible meta; secrets never do.
@@ -547,16 +562,16 @@ async function runTool(name, input) {
   return { error: 'unknown tool' };
 }
 
-app.post('/api/assistant', async (req, res) => {
+async function runAssistant(inputMessages, opts = {}) {
   const conn = await getConnector('anthropic');
   const apiKey = conn?.config?.api_key || process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return res.json({ configured: false, reply: 'The assistant isn\'t connected yet. Go to Connectors → ＋ Add connector → "Claude assistant" and paste an Anthropic API key from console.anthropic.com.' });
+    return { configured: false, reply: 'The assistant isn\'t connected yet. Go to Connectors (＋) → "Claude assistant" and add an Anthropic API key from console.anthropic.com.' };
   }
-  let messages = (req.body?.messages || []).slice(-12)
+  let messages = inputMessages.slice(-12)
     .filter(m => ['user', 'assistant'].includes(m.role) && typeof m.content === 'string')
     .map(m => ({ role: m.role, content: m.content }));
-  if (!messages.length) return res.status(400).json({ error: 'messages required' });
+  if (!messages.length) throw new Error('messages required');
 
   const conns = await pool.query('SELECT type, name, meta, active FROM connectors WHERE active=true');
   const knownTypes = await getAllConnectorTypes();
@@ -574,29 +589,80 @@ Adding NEW kinds of connectors is a core part of your job. When a member wants t
 2. Work out what its API needs for server-to-server auth (base URL/store domain, API key/token, account id...). Ask if unsure — the member may need to check with whoever admins that service.
 3. Call create_connector_type with clear field labels that say exactly where to find each value. Mark every credential secret:true.
 4. Tell them the form is now in the dropdown on this page; after they save, an AUTHORIZED member must approve it in the "Pending integrations" list on this page (requires the admin password, entered in that list — never in chat). Once approved, the dev team wires the data sync.
-gorgias and anthropic connectors are fully wired and auto-approved: they test the connection and sync data immediately.
+gorgias, anthropic and slack connectors are fully wired and auto-approved: they test the connection and work immediately.
 Use list_pending_integrations to report what's waiting for approval or wiring. You cannot approve anything yourself.
-Use your tools to answer data questions with real numbers. If a question needs sales/order/delivery data, use query_sales and relay its guidance. Be concise. Answer in the user's language.`;
+Use your tools to answer data questions with real numbers. If a question needs sales/order/delivery data, use query_sales and relay its guidance. Be concise. Answer in the user's language.${opts.slack ? '\nYou are replying inside Slack: use Slack formatting (*bold*, bullet lines with •), keep replies short, no markdown headers or tables.' : ''}`;
 
+  let reply = '';
+  for (let round = 0; round < 5; round++) {
+    const j = await anthropic(apiKey, { system, messages, tools: TOOLS });
+    const toolUses = (j.content || []).filter(b => b.type === 'tool_use');
+    const text = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+    if (j.stop_reason !== 'tool_use') { reply = text; break; }
+    messages = [...messages, { role: 'assistant', content: j.content }, {
+      role: 'user',
+      content: await Promise.all(toolUses.map(async tu => ({
+        type: 'tool_result', tool_use_id: tu.id,
+        content: JSON.stringify(await runTool(tu.name, tu.input || {})).slice(0, 8000)
+      })))
+    }];
+    reply = text; // fallback if rounds exhausted
+  }
+  return { configured: true, reply: reply || '(no reply)' };
+}
+
+app.post('/api/assistant', async (req, res) => {
   try {
-    let reply = '';
-    for (let round = 0; round < 5; round++) {
-      const j = await anthropic(apiKey, { system, messages, tools: TOOLS });
-      const toolUses = (j.content || []).filter(b => b.type === 'tool_use');
-      const text = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
-      if (j.stop_reason !== 'tool_use') { reply = text; break; }
-      messages = [...messages, { role: 'assistant', content: j.content }, {
-        role: 'user',
-        content: await Promise.all(toolUses.map(async tu => ({
-          type: 'tool_result', tool_use_id: tu.id,
-          content: JSON.stringify(await runTool(tu.name, tu.input || {})).slice(0, 8000)
-        })))
-      }];
-      reply = text; // fallback if rounds exhausted
-    }
-    res.json({ configured: true, reply: reply || '(no reply)' });
+    res.json(await runAssistant(req.body?.messages || []));
   } catch (e) {
     res.status(502).json({ error: `Assistant error: ${e.message}` });
+  }
+});
+
+// ---------- Slack bot (@clicksbot) ----------
+function slackSigValid(cfg, req) {
+  const ts = req.headers['x-slack-request-timestamp'];
+  const sig = req.headers['x-slack-signature'];
+  if (!ts || !sig || Math.abs(Date.now() / 1000 - ts) > 300) return false;
+  const base = `v0:${ts}:${req.rawBody}`;
+  const mine = 'v0=' + crypto.createHmac('sha256', cfg.signing_secret).update(base).digest('hex');
+  const a = Buffer.from(mine), b = Buffer.from(String(sig));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+async function slackPost(token, channel, text, thread_ts) {
+  const r = await (await fetch('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ channel, text, thread_ts })
+  })).json();
+  if (!r.ok) console.error('slack post failed:', r.error);
+}
+
+const seenSlackEvents = new Set();
+app.post('/api/slack/events', async (req, res) => {
+  if (req.body?.type === 'url_verification') return res.json({ challenge: req.body.challenge });
+  const conn = await getConnector('slack');
+  if (!conn) return res.sendStatus(200);
+  if (!slackSigValid(conn.config, req)) return res.sendStatus(401);
+  res.sendStatus(200); // ack within 3s; process async
+  if (req.headers['x-slack-retry-num']) return;
+  const ev = req.body?.event;
+  if (!ev || ev.bot_id) return;
+  const isMention = ev.type === 'app_mention';
+  const isDm = ev.type === 'message' && ev.channel_type === 'im' && !ev.subtype;
+  if (!isMention && !isDm) return;
+  if (seenSlackEvents.has(ev.ts)) return;
+  seenSlackEvents.add(ev.ts);
+  if (seenSlackEvents.size > 500) seenSlackEvents.clear();
+  const text = String(ev.text || '').replace(/<@[^>]+>/g, '').trim();
+  if (!text) return;
+  try {
+    const { reply } = await runAssistant([{ role: 'user', content: text }], { slack: true });
+    await slackPost(conn.config.bot_token, ev.channel, reply, ev.thread_ts || ev.ts);
+  } catch (e) {
+    console.error('slack assistant error:', e.message);
+    await slackPost(conn.config.bot_token, ev.channel, `⚠️ Couldn't answer that: ${e.message}`, ev.thread_ts || ev.ts);
   }
 });
 
