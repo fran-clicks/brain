@@ -164,7 +164,10 @@ footer{color:rgba(16,17,20,.45)}
   </div>
   <div class="grid kpis" id="homeKpis"></div>
   <div class="card" style="margin-top:14px">
-    <h2>Tickets &amp; events <span style="font-weight:400;color:var(--muted);font-size:12px" id="syncInfo"></span></h2>
+    <h2>Tickets &amp; events
+      <span style="font-weight:400;color:var(--muted);font-size:12px" id="syncInfo"></span>
+      <button class="btn" style="float:right;margin:0;padding:5px 12px" id="syncBtn" onclick="syncNow()">🔄 Sync now</button>
+    </h2>
     <div class="chart-wrap"><canvas id="homeChart"></canvas></div>
     <div class="note" id="homeNote"></div>
   </div>
@@ -374,13 +377,29 @@ async function loadOverview() {
         plugins:{ legend:{position:'bottom'}, eventMarkers:{ events: s.events } },
         scales:{ y:{beginAtZero:true, ticks:{precision:0}} } }
     });
-    document.getElementById('syncInfo').textContent = s.last_sync ? '· synced ' + new Date(s.last_sync).toLocaleString() : '';
-    document.getElementById('homeNote').textContent = s.last_sync
-      ? `Ticket data from the local Gorgias sync (${s.bucket} buckets). Sales appears once a sales source is connected — ask the assistant. 📌 = team events.`
-      : 'No ticket data yet — add the Gorgias connector (Connectors tab) and stats will start syncing.';
+    document.getElementById('syncInfo').textContent = s.last_sync
+      ? `· synced ${new Date(s.last_sync).toLocaleString()} · ${s.sync?.cached ?? '?'} tickets cached` : '';
+    document.getElementById('homeNote').textContent =
+      s.sync?.last_error ? `⚠️ Last sync failed: ${s.sync.last_error} — hit Sync now to retry.`
+      : s.last_sync
+        ? `Ticket data from the local Gorgias sync (${s.bucket} buckets). Sales appears once a sales source is connected — ask the assistant. 📌 = team events.`
+        : 'No ticket data yet — if Gorgias is connected, hit 🔄 Sync now (first sync pulls up to 2,000 recent tickets).';
   } catch (e) {
     document.getElementById('homeNote').textContent = 'Overview error: ' + e.message;
   }
+}
+async function syncNow() {
+  const b = document.getElementById('syncBtn');
+  b.disabled = true; b.textContent = '⏳ Syncing…';
+  try {
+    const r = await api('/api/gorgias/sync', {method:'POST', body: '{}'});
+    document.getElementById('homeNote').textContent = r.configured === false
+      ? 'Gorgias is not connected — add it via the ＋ page first.'
+      : r.error ? `⚠️ Sync error: ${r.error}` : `Synced ${r.upserts} tickets across ${r.pages} pages.`;
+    loadOverview();
+  } catch (e) {
+    document.getElementById('homeNote').textContent = '⚠️ Sync failed: ' + e.message;
+  } finally { b.disabled = false; b.textContent = '🔄 Sync now'; }
 }
 
 // events

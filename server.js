@@ -308,10 +308,10 @@ async function syncGorgias(maxPages = 5) {
   const cfg = await getGorgiasConfig();
   if (!cfg) return { configured: false };
   syncRunning = true;
+  const st = (await pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)).rows[0]?.v || {};
+  const lastSync = st.last_updated ? Date.parse(st.last_updated) : 0;
+  let cursor = null, pages = 0, upserts = 0, done = false, newest = null, lastError = null;
   try {
-    const st = (await pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)).rows[0]?.v || {};
-    const lastSync = st.last_updated ? Date.parse(st.last_updated) : 0;
-    let cursor = null, pages = 0, upserts = 0, done = false, newest = st.last_updated || null;
     while (pages < maxPages && !done) {
       const q = `/api/tickets?limit=100&order_by=updated_datetime:desc&trashed=false${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
       const t = await gorgiasRequest(cfg, q);
@@ -324,7 +324,7 @@ async function syncGorgias(maxPages = 5) {
            ON CONFLICT (gorgias_id) DO UPDATE SET status=$2, subject=$3, channel=$4, tags=$5,
              created_datetime=$6, closed_datetime=$7, updated_datetime=$8, synced_at=now()`,
           [x.id, x.status || '', (x.subject || '').slice(0, 500), x.channel || '',
-           JSON.stringify((x.tags || []).map(g => g.name)),
+           JSON.stringify((x.tags || []).map(g => g?.name).filter(Boolean)),
            x.created_datetime || null, x.closed_datetime || null, x.updated_datetime || null]);
         upserts++;
       }
@@ -335,12 +335,23 @@ async function syncGorgias(maxPages = 5) {
       if (!cursor) done = true;
       pages++;
     }
+  } catch (e) {
+    lastError = String(e.message);
+    console.error('gorgias sync error:', lastError);
+  } finally {
+    // always record the attempt so failures are visible in the UI
+    const cached = (await pool.query('SELECT count(*)::int c FROM tickets_cache')).rows[0].c;
     await pool.query(
       `INSERT INTO sync_state (k, v) VALUES ('gorgias', $1)
        ON CONFLICT (k) DO UPDATE SET v=$1`,
-      [JSON.stringify({ last_updated: newest || new Date().toISOString(), last_run: new Date().toISOString(), upserts })]);
-    return { configured: true, pages, upserts };
-  } finally { syncRunning = false; }
+      [JSON.stringify({
+        last_updated: newest || st.last_updated || null,
+        last_run: new Date().toISOString(),
+        upserts, pages, cached, last_error: lastError
+      })]).catch(e => console.error('sync_state write:', e.message));
+    syncRunning = false;
+  }
+  return { configured: true, pages, upserts, error: lastError };
 }
 
 async function maybeSync() {
@@ -348,6 +359,17 @@ async function maybeSync() {
   const stale = !st?.last_run || Date.now() - Date.parse(st.last_run) > 15 * 60 * 1000;
   if (stale) syncGorgias(5).catch(e => console.error('sync:', e.message));
   return st;
+}
+
+// keep the cache warm while the service is awake; deep-sync on boot if cache is empty
+setInterval(() => syncGorgias(5).catch(e => console.error('interval sync:', e.message)), 60 * 60 * 1000);
+async function bootSync() {
+  const c = (await pool.query('SELECT count(*)::int c FROM tickets_cache')).rows[0].c;
+  if (c === 0) {
+    console.log('tickets_cache empty — running deep initial sync');
+    const r = await syncGorgias(20);
+    console.log('initial sync:', JSON.stringify(r));
+  }
 }
 
 app.post('/api/gorgias/sync', async (_req, res) => {
@@ -384,7 +406,8 @@ async function overviewStats(days) {
     tickets: { series: { created: created.rows, closed: closed.rows, cancel_refund: cancels.rows }, totals: totals.rows[0] },
     sales: null, // no sales source connected yet
     events: events.rows,
-    last_sync: st.rows[0]?.v?.last_run || null
+    last_sync: st.rows[0]?.v?.last_run || null,
+    sync: st.rows[0]?.v || null
   };
 }
 
@@ -670,5 +693,8 @@ app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;
 initDb()
-  .then(() => app.listen(PORT, () => console.log(`clicks brain on :${PORT}`)))
+  .then(() => {
+    app.listen(PORT, () => console.log(`clicks brain on :${PORT}`));
+    bootSync().catch(e => console.error('boot sync:', e.message));
+  })
   .catch((e) => { console.error('DB init failed:', e); process.exit(1); });
