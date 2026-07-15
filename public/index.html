@@ -57,6 +57,7 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
   <button data-s="sales">📈 Sales &amp; Dates</button>
   <button data-s="gorgias">🎧 Gorgias Stats</button>
   <button data-s="kb">💡 Knowledge Bases</button>
+  <button data-s="conn">🔌 Connectors</button>
 </nav>
 
 <div class="section active" id="s-specs">
@@ -128,7 +129,44 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
   </div>
 </div>
 
+<div class="section" id="s-conn">
+  <div class="card">
+    <h2>Connectors <button class="btn" style="float:right;margin:0;padding:5px 12px" onclick="toggleConnForm()">＋ Add connector</button></h2>
+    <table id="connTable"><thead><tr><th>Type</th><th>Name</th><th>Info</th><th>Status</th><th>Added by</th></tr></thead><tbody></tbody></table>
+    <div class="note">Credentials are encrypted at rest and write-only: once saved they are never shown again — not to you, not to anyone. Adding a connector of the same type replaces the previous one (nothing is deleted).</div>
+  </div>
+  <div class="card" id="connForm" style="display:none">
+    <h2>New connector</h2>
+    <label>Type</label>
+    <select id="cType" style="width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:inherit;background:#fff"></select>
+    <div id="cFields"></div>
+    <label>Your name</label><input id="cBy">
+    <button class="btn" onclick="addConnector()">Test &amp; save</button>
+    <div class="err" id="cErr"></div>
+  </div>
+</div>
+
 <footer>clicks brain · internal use only · no credentials are stored or displayed anywhere in this dashboard</footer>
+
+<!-- assistant -->
+<button id="aiFab" title="Ask the brain">🧠</button>
+<div id="aiPanel">
+  <div id="aiHead">clicks brain assistant <span id="aiClose">✕</span></div>
+  <div id="aiLog"></div>
+  <div id="aiBar"><input id="aiInput" placeholder="Ask how to add a connector, where data comes from…"><button class="btn" style="margin:0" onclick="aiSend()">Send</button></div>
+</div>
+<style>
+#aiFab{position:fixed;right:20px;bottom:20px;width:52px;height:52px;border-radius:50%;border:none;background:var(--accent);font-size:24px;cursor:pointer;box-shadow:0 4px 14px rgba(79,70,229,.4);z-index:50}
+#aiPanel{display:none;position:fixed;right:20px;bottom:84px;width:min(360px,90vw);height:460px;background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.15);z-index:50;flex-direction:column;overflow:hidden}
+#aiPanel.open{display:flex}
+#aiHead{background:var(--accent);color:#fff;padding:10px 14px;font-weight:600;font-size:13px;display:flex;justify-content:space-between}
+#aiClose{cursor:pointer}
+#aiLog{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
+.msg{max-width:85%;padding:8px 11px;border-radius:12px;font-size:13px;white-space:pre-wrap}
+.msg.user{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:4px}
+.msg.assistant{align-self:flex-start;background:var(--bg);border:1px solid var(--line);border-bottom-left-radius:4px}
+#aiBar{display:flex;gap:6px;padding:10px;border-top:1px solid var(--line)}
+</style>
 
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -245,7 +283,77 @@ async function addKb() {
   } catch (e) { el('kErr').textContent = e.message; }
 }
 
-loadProducts(); loadDates(); loadGorgias(); loadKbs();
+// connectors
+let connTypes = {};
+async function loadConnectorTypes() {
+  connTypes = await api('/api/connector-types');
+  const sel = document.getElementById('cType');
+  sel.innerHTML = Object.entries(connTypes).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join('');
+  sel.onchange = renderConnFields;
+  renderConnFields();
+}
+function renderConnFields() {
+  const t = connTypes[document.getElementById('cType').value];
+  document.getElementById('cFields').innerHTML = (t?.fields || []).map(f =>
+    `<label>${esc(f.label)}</label><input id="cf_${esc(f.key)}" type="${f.secret ? 'password' : 'text'}" autocomplete="off">`).join('');
+}
+function toggleConnForm() {
+  const f = document.getElementById('connForm');
+  f.style.display = f.style.display === 'none' ? 'block' : 'none';
+}
+async function loadConnectors() {
+  const conns = await api('/api/connectors');
+  document.querySelector('#connTable tbody').innerHTML = conns.length ? conns.map(c =>
+    `<tr><td><b>${esc(c.type)}</b></td><td>${esc(c.name)}</td><td><span class="tag src">${esc(Object.values(c.meta || {}).join(' · '))}</span></td>
+     <td><span class="tag ${c.active ? 'approved' : 'pending'}">${c.active ? 'active' : 'replaced'}</span></td><td>${esc(c.added_by)}</td></tr>`).join('')
+    : '<tr><td colspan="5" class="empty">No connectors yet — add one with ＋</td></tr>';
+}
+async function addConnector() {
+  const el = id => document.getElementById(id);
+  el('cErr').textContent = '';
+  const type = el('cType').value;
+  const config = {};
+  for (const f of connTypes[type].fields) config[f.key] = el('cf_' + f.key).value.trim();
+  try {
+    await api('/api/connectors', {method:'POST', body: JSON.stringify({ type, config, added_by: el('cBy').value.trim() || 'anonymous' })});
+    connTypes[type].fields.forEach(f => el('cf_' + f.key).value = '');
+    toggleConnForm(); loadConnectors(); loadGorgias();
+  } catch (e) { el('cErr').textContent = e.message; }
+}
+
+// assistant
+const aiHistory = [];
+const aiPanel = document.getElementById('aiPanel');
+document.getElementById('aiFab').onclick = () => {
+  aiPanel.classList.toggle('open');
+  if (aiPanel.classList.contains('open') && !aiHistory.length) {
+    aiAppend('assistant', 'Hi! I\'m the brain\'s assistant. I can help you add connectors (like Gorgias), explain where data comes from, or take knowledge base ideas. What do you need?');
+  }
+};
+document.getElementById('aiClose').onclick = () => aiPanel.classList.remove('open');
+document.getElementById('aiInput').addEventListener('keydown', e => { if (e.key === 'Enter') aiSend(); });
+function aiAppend(role, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + role;
+  d.textContent = text;
+  document.getElementById('aiLog').appendChild(d);
+  document.getElementById('aiLog').scrollTop = 1e9;
+}
+async function aiSend() {
+  const input = document.getElementById('aiInput');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  aiAppend('user', text);
+  aiHistory.push({ role: 'user', content: text });
+  try {
+    const r = await api('/api/assistant', {method:'POST', body: JSON.stringify({ messages: aiHistory })});
+    aiAppend('assistant', r.reply);
+    if (r.configured !== false) aiHistory.push({ role: 'assistant', content: r.reply });
+  } catch (e) { aiAppend('assistant', '⚠️ ' + e.message); }
+}
+
+loadProducts(); loadDates(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors();
 </script>
 </body>
 </html>

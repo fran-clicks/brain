@@ -11,12 +11,8 @@ services:
         fromDatabase:
           name: clicks-brain-db
           property: connectionString
-      - key: GORGIAS_DOMAIN
-        sync: false
-      - key: GORGIAS_EMAIL
-        sync: false
-      - key: GORGIAS_API_KEY
-        sync: false
+      - key: ENCRYPTION_KEY
+        generateValue: true
       - key: DASHBOARD_PASSWORD
         sync: false
 
