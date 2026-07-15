@@ -453,7 +453,8 @@ app.post('/api/assistant', async (req, res) => {
 
   const conns = await pool.query('SELECT type, name, meta, active FROM connectors WHERE active=true');
   const system = `You are the built-in assistant of "clicks brain", an internal team dashboard. Today is ${new Date().toISOString().slice(0, 10)}.
-Tabs: Overview (period stats 7d/1m/3m/6m/1y with event markers), Product Specs, Sales & Dates, Gorgias Stats, Knowledge Bases, Connectors.
+Tabs: Overview (period stats 7d/1m/3m/6m/1y with event markers), Sales & Dates, Gorgias Stats, Knowledge Bases, Connectors (the ＋ button in the nav).
+Product specs are not shown yet — they will be captured automatically from sources (Shopify product list, website) once those connectors are added.
 House rules:
 - Data flows in from sources; nothing is deletable/editable here. Wrong data → fix at the source, re-import.
 - Credentials go ONLY in Connectors → ＋ Add connector (encrypted, write-only). NEVER ask for or accept credentials in chat; if a user posts one, tell them to rotate it and use the Connectors form.

@@ -137,17 +137,16 @@ footer{color:rgba(16,17,20,.45)}
 </head>
 <body>
 <header>
-  <h1><img src="https://cdn.prod.website-files.com/66f575e72f06b9820f448d43/66fbda43f42a9d6f770bbae4_clicks-logo.svg" alt="clicks" style="height:22px;vertical-align:-3px" onerror="this.outerHTML='clicks'"> <span>brain</span></h1>
+  <h1><span style="background:#101114;border-radius:10px;padding:5px 10px;display:inline-flex;align-items:center;vertical-align:-6px"><img src="https://cdn.prod.website-files.com/66f575e72f06b9820f448d43/66fbda43f42a9d6f770bbae4_clicks-logo.svg" alt="clicks" style="height:18px" onerror="this.outerHTML='<b style=&quot;color:#ffc800&quot;>clicks</b>'"></span> <span>brain</span></h1>
   <span class="badge">🔒 Internal · data flows in from sources · fix errors at the source, not here</span>
 </header>
 
 <nav>
   <button data-s="home" class="active">🏠 Overview</button>
-  <button data-s="specs">📦 Product Specs</button>
   <button data-s="sales">📈 Sales &amp; Dates</button>
   <button data-s="gorgias">🎧 Gorgias Stats</button>
   <button data-s="kb">💡 Knowledge Bases</button>
-  <button data-s="conn">🔌 Connectors</button>
+  <button data-s="conn" title="Connectors" style="font-size:16px;padding:8px 16px;font-weight:800">＋</button>
 </nav>
 
 <!-- OVERVIEW -->
@@ -186,30 +185,6 @@ footer{color:rgba(16,17,20,.45)}
       <div class="err" id="eErr"></div>
       <div class="note">Events appear as 📌 markers on the chart above, so everyone can see their influence on tickets (and sales once connected). Events can't be removed.</div>
     </div>
-  </div>
-</div>
-
-<!-- PRODUCT SPECS -->
-<div class="section" id="s-specs">
-  <div class="card">
-    <h2>Product Specifications</h2>
-    <input class="search" id="specSearch" placeholder="Search products, SKUs, specs…">
-    <table id="specTable"><thead><tr><th>Product</th><th>SKU</th><th>Key specs</th><th>Warranty</th><th>Source</th></tr></thead><tbody></tbody></table>
-  </div>
-  <div class="card">
-    <h2>Import product</h2>
-    <div class="grid two">
-      <div><label>Product name</label><input id="pName"></div>
-      <div><label>SKU</label><input id="pSku"></div>
-    </div>
-    <label>Key specs</label><input id="pSpecs">
-    <div class="grid two">
-      <div><label>Warranty</label><input id="pWarranty"></div>
-      <div><label>Source</label><input id="pSource" placeholder="e.g. product catalog v3"></div>
-    </div>
-    <button class="btn" onclick="addProduct()">Import</button>
-    <div class="err" id="pErr"></div>
-    <div class="note">Entries can't be removed here. If something is wrong, fix it in the source system and re-import.</div>
   </div>
 </div>
 
@@ -428,31 +403,6 @@ async function addEvent() {
   } catch (e) { el('eErr').textContent = e.message; }
 }
 
-// ---------- products ----------
-let products = [];
-async function loadProducts() { products = await api('/api/products'); renderProducts(); }
-function renderProducts() {
-  const q = document.getElementById('specSearch').value.toLowerCase();
-  const rows = products.filter(p => JSON.stringify(p).toLowerCase().includes(q));
-  document.querySelector('#specTable tbody').innerHTML = rows.length ? rows.map(p =>
-    `<tr><td><b>${esc(p.name)}</b></td><td>${esc(p.sku)}</td><td>${esc(p.specs)}</td><td>${esc(p.warranty)}</td><td><span class="tag src">${esc(p.source)}</span></td></tr>`).join('')
-    : '<tr><td colspan="5" class="empty">No products yet — import from a source below</td></tr>';
-}
-async function addProduct() {
-  const el = id => document.getElementById(id);
-  el('pErr').textContent = '';
-  try {
-    await api('/api/products', {method:'POST', body: JSON.stringify({
-      name: el('pName').value.trim(), sku: el('pSku').value.trim(),
-      specs: el('pSpecs').value.trim(), warranty: el('pWarranty').value.trim(),
-      source: el('pSource').value.trim() || 'manual import'
-    })});
-    ['pName','pSku','pSpecs','pWarranty','pSource'].forEach(id => el(id).value = '');
-    loadProducts();
-  } catch (e) { el('pErr').textContent = e.message; }
-}
-document.getElementById('specSearch').oninput = renderProducts;
-
 // ---------- dates ----------
 async function loadDates() {
   const dates = await api('/api/dates');
@@ -613,7 +563,7 @@ async function aiSend() {
   finally { aiBusy = false; }
 }
 
-loadOverview(); loadEvents(); loadProducts(); loadDates(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors();
+loadOverview(); loadEvents(); loadDates(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors();
 </script>
 </body>
 </html>
