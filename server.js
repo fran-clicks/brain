@@ -392,18 +392,29 @@ async function overviewStats(days) {
   };
   const catSelects = Object.entries(CATS)
     .map(([k, cond]) => `count(*) FILTER (WHERE ${cond})::int ${k}`).join(', ');
-  const [created, opened, closed, breakdown, tagRows, totals, events, st] = await Promise.all([
-    pool.query(`SELECT date_trunc('${bucket}', created_datetime)::date d, count(*)::int c FROM tickets_cache
-                WHERE created_datetime >= now()-$1::interval GROUP BY 1 ORDER BY 1`, params),
-    pool.query(`SELECT date_trunc('${bucket}', created_datetime)::date d, count(*)::int c FROM tickets_cache
-                WHERE created_datetime >= now()-$1::interval AND status='open' GROUP BY 1 ORDER BY 1`, params),
-    pool.query(`SELECT date_trunc('${bucket}', closed_datetime)::date d, count(*)::int c FROM tickets_cache
-                WHERE closed_datetime >= now()-$1::interval GROUP BY 1 ORDER BY 1`, params),
-    pool.query(`SELECT date_trunc('${bucket}', created_datetime)::date d, ${catSelects} FROM tickets_cache
-                WHERE created_datetime >= now()-$1::interval GROUP BY 1 ORDER BY 1`, params),
-    pool.query(`SELECT date_trunc('${bucket}', created_datetime)::date d, t.tag, count(*)::int c
-                FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
-                WHERE created_datetime >= now()-$1::interval GROUP BY 1, 2 ORDER BY 1, 3 DESC`, params),
+  const mkCount = (col, extra = '') =>
+    `SELECT date_trunc('${bucket}', ${col})::date d, count(*)::int c FROM tickets_cache
+     WHERE ${col} >= now()-$1::interval ${extra} GROUP BY 1 ORDER BY 1`;
+  const mkCats = (col, extra = '') =>
+    `SELECT date_trunc('${bucket}', ${col})::date d, ${catSelects} FROM tickets_cache
+     WHERE ${col} >= now()-$1::interval ${extra} GROUP BY 1 ORDER BY 1`;
+  const mkTags = (col, extra = '') =>
+    `SELECT date_trunc('${bucket}', ${col})::date d, t.tag, count(*)::int c
+     FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
+     WHERE ${col} >= now()-$1::interval ${extra} GROUP BY 1, 2 ORDER BY 1, 3 DESC`;
+  const [created, opened, closed,
+         createdCats, openCats, closedCats,
+         createdTags, openTags, closedTags,
+         totals, events, st] = await Promise.all([
+    pool.query(mkCount('created_datetime'), params),
+    pool.query(mkCount('created_datetime', "AND status='open'"), params),
+    pool.query(mkCount('closed_datetime'), params),
+    pool.query(mkCats('created_datetime'), params),
+    pool.query(mkCats('created_datetime', "AND status='open'"), params),
+    pool.query(mkCats('closed_datetime'), params),
+    pool.query(mkTags('created_datetime'), params),
+    pool.query(mkTags('created_datetime', "AND status='open'"), params),
+    pool.query(mkTags('closed_datetime'), params),
     pool.query(`SELECT count(*)::int total,
                 count(*) FILTER (WHERE status='open')::int open,
                 count(*) FILTER (WHERE created_datetime >= now()-$1::interval)::int created,
@@ -418,8 +429,11 @@ async function overviewStats(days) {
     days, bucket,
     tickets: {
       series: { created: created.rows, still_open: opened.rows, closed: closed.rows },
-      breakdown: breakdown.rows,
-      tags: tagRows.rows,
+      breakdowns: {
+        created: { cats: createdCats.rows, tags: createdTags.rows },
+        still_open: { cats: openCats.rows, tags: openTags.rows },
+        closed: { cats: closedCats.rows, tags: closedTags.rows }
+      },
       totals: totals.rows[0]
     },
     sales: null, // no sales source connected yet

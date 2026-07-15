@@ -356,16 +356,16 @@ const CAT_LABELS = {
   cancel_refund: 'cancel/refund', troubleshoot: 'troubleshoot', shipping: 'shipping/delivery',
   returns_warranty: 'returns/warranty', product_question: 'product questions'
 };
-function buildBreakdownMap(s) {
+function buildBreakdownMap(bd) {
   const map = {};
-  (s.tickets.breakdown || []).forEach(r => {
+  (bd?.cats || []).forEach(r => {
     const d = String(r.d).slice(0,10);
     map[d] = { cats: Object.entries(CAT_LABELS).map(([k, l]) => [l, r[k]]).filter(([, v]) => v > 0), tags: [] };
   });
-  (s.tickets.tags || []).forEach(r => {
+  (bd?.tags || []).forEach(r => {
     const d = String(r.d).slice(0,10);
     map[d] = map[d] || { cats: [], tags: [] };
-    if (map[d].tags.length < 5) map[d].tags.push([r.tag, r.c]);
+    if (map[d].tags.length < 3) map[d].tags.push([r.tag, r.c]);
   });
   return map;
 }
@@ -383,7 +383,11 @@ async function loadOverview() {
       {l:`Events (${curDays}d)`, v:s.events.length}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
     const m = mergeSeries(s.tickets.series);
-    const bd = buildBreakdownMap(s);
+    const bdByDataset = [
+      buildBreakdownMap(s.tickets.breakdowns?.created),
+      buildBreakdownMap(s.tickets.breakdowns?.still_open),
+      buildBreakdownMap(s.tickets.breakdowns?.closed)
+    ];
     if (homeChart) homeChart.destroy();
     homeChart = new Chart(document.getElementById('homeChart'), {
       type: 'line',
@@ -393,24 +397,26 @@ async function loadOverview() {
         {label:'Closed', data:m.closed, borderColor:'#f0b400', backgroundColor:'rgba(255,200,0,.15)', tension:.25, pointRadius:3, pointHoverRadius:6}
       ]},
       options: { responsive:true, maintainAspectRatio:false,
-        interaction: { mode: 'index', intersect: false },
+        interaction: { mode: 'nearest', intersect: true },
         plugins:{
           legend:{position:'bottom'},
           eventMarkers:{ events: s.events },
           tooltip: {
+            displayColors: false,
             callbacks: {
+              title(items) {
+                const it = items[0];
+                return `${it.dataset.label} · ${it.label}`;
+              },
+              label(it) { return `${it.formattedValue} tickets`; },
               afterBody(items) {
-                const d = items[0]?.label;
-                const b = bd[d];
+                const it = items[0];
+                const b = bdByDataset[it.datasetIndex]?.[it.label];
                 if (!b) return '';
                 const lines = [];
-                if (b.cats.length) {
-                  lines.push('', 'Created that day, by category:');
-                  b.cats.forEach(([l, v]) => lines.push(`  ${l}: ${v}`));
-                }
+                if (b.cats.length) b.cats.forEach(([l, v]) => lines.push(`${l}: ${v}`));
                 if (b.tags.length) {
-                  lines.push('', 'Top tags:');
-                  b.tags.forEach(([t, v]) => lines.push(`  ${t}: ${v}`));
+                  lines.push('top tags: ' + b.tags.map(([t, v]) => `${t} (${v})`).join(', '));
                 }
                 return lines;
               }
