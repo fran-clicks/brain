@@ -27,7 +27,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em;padding:8px;border-bottom:1px solid var(--line)}
 td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
 tr:last-child td{border-bottom:none}
-input,textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:inherit;background:#fff;color:var(--ink)}
+input,textarea,select{width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:inherit;background:#fff;color:var(--ink)}
 label{font-size:12px;font-weight:600;color:var(--muted);display:block;margin:10px 0 4px}
 .btn{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:9px 16px;font-weight:600;cursor:pointer;font-size:13px;margin-top:12px}
 .tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px}
@@ -40,10 +40,32 @@ label{font-size:12px;font-weight:600;color:var(--muted);display:block;margin:10p
 .two{grid-template-columns:1fr 1fr}
 @media(max-width:700px){.two{grid-template-columns:1fr}}
 .empty{color:var(--muted);font-size:13px;padding:12px;text-align:center}
-.chart-wrap{position:relative;height:220px}
+.chart-wrap{position:relative;height:260px}
 footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
 .section{display:none}.section.active{display:block}
 .err{color:var(--red);font-size:12px;margin-top:8px}
+.periods{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.periods button{border:1px solid var(--line);background:var(--card);color:var(--muted);padding:6px 12px;border-radius:999px;cursor:pointer;font-weight:600;font-size:12px}
+.periods button.active{background:var(--ink);border-color:var(--ink);color:#fff}
+.askbox{display:flex;gap:8px;margin-bottom:14px}
+.askbox input{flex:1;padding:12px 14px;border-radius:10px;font-size:14px}
+.askbox .btn{margin:0}
+.evt{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--line)}
+.evt:last-child{border-bottom:none}
+.evt .pin{font-size:16px}
+.evt .t{font-weight:600}
+.evt .m{font-size:12px;color:var(--muted)}
+a{color:var(--accent)}
+#aiFab{position:fixed;right:20px;bottom:20px;width:52px;height:52px;border-radius:50%;border:none;background:var(--accent);font-size:24px;cursor:pointer;box-shadow:0 4px 14px rgba(79,70,229,.4);z-index:50}
+#aiPanel{display:none;position:fixed;right:20px;bottom:84px;width:min(380px,90vw);height:480px;background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.15);z-index:50;flex-direction:column;overflow:hidden}
+#aiPanel.open{display:flex}
+#aiHead{background:var(--accent);color:#fff;padding:10px 14px;font-weight:600;font-size:13px;display:flex;justify-content:space-between}
+#aiClose{cursor:pointer}
+#aiLog{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
+.msg{max-width:85%;padding:8px 11px;border-radius:12px;font-size:13px;white-space:pre-wrap}
+.msg.user{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:4px}
+.msg.assistant{align-self:flex-start;background:var(--bg);border:1px solid var(--line);border-bottom-left-radius:4px}
+#aiBar{display:flex;gap:6px;padding:10px;border-top:1px solid var(--line)}
 </style>
 </head>
 <body>
@@ -53,14 +75,55 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
 </header>
 
 <nav>
-  <button data-s="specs" class="active">📦 Product Specs</button>
+  <button data-s="home" class="active">🏠 Overview</button>
+  <button data-s="specs">📦 Product Specs</button>
   <button data-s="sales">📈 Sales &amp; Dates</button>
   <button data-s="gorgias">🎧 Gorgias Stats</button>
   <button data-s="kb">💡 Knowledge Bases</button>
   <button data-s="conn">🔌 Connectors</button>
 </nav>
 
-<div class="section active" id="s-specs">
+<!-- OVERVIEW -->
+<div class="section active" id="s-home">
+  <div class="askbox">
+    <input id="askInput" placeholder='Ask the brain anything — "cancellation refund tickets closed this week", "what happened around June 20?"…'>
+    <button class="btn" onclick="askBrain()">Ask 🧠</button>
+  </div>
+  <div class="periods" id="periods">
+    <button data-d="7" class="active">7 days</button>
+    <button data-d="30">1 month</button>
+    <button data-d="90">3 months</button>
+    <button data-d="180">6 months</button>
+    <button data-d="365">1 year</button>
+  </div>
+  <div class="grid kpis" id="homeKpis"></div>
+  <div class="card" style="margin-top:14px">
+    <h2>Tickets &amp; events <span style="font-weight:400;color:var(--muted);font-size:12px" id="syncInfo"></span></h2>
+    <div class="chart-wrap"><canvas id="homeChart"></canvas></div>
+    <div class="note" id="homeNote"></div>
+  </div>
+  <div class="card">
+    <h2>📌 Team events <button class="btn" style="float:right;margin:0;padding:5px 12px" onclick="toggleEvtForm()">＋ Add event</button></h2>
+    <div id="evtList"></div>
+    <div id="evtForm" style="display:none;border-top:1px solid var(--line);margin-top:10px">
+      <div class="grid two">
+        <div><label>Title</label><input id="eTitle" placeholder="e.g. Win-back email sent to lapsed customers"></div>
+        <div><label>Date</label><input type="date" id="eDate"></div>
+      </div>
+      <label>Details</label><textarea id="eDesc" rows="2" placeholder="Audience, goal, anything the team should know"></textarea>
+      <div class="grid two">
+        <div><label>Your name</label><input id="eBy"></div>
+        <div><label>Attachment (optional, max 5MB — e.g. the email itself)</label><input type="file" id="eFile"></div>
+      </div>
+      <button class="btn" onclick="addEvent()">Add event</button>
+      <div class="err" id="eErr"></div>
+      <div class="note">Events appear as 📌 markers on the chart above, so everyone can see their influence on tickets (and sales once connected). Events can't be removed.</div>
+    </div>
+  </div>
+</div>
+
+<!-- PRODUCT SPECS -->
+<div class="section" id="s-specs">
   <div class="card">
     <h2>Product Specifications</h2>
     <input class="search" id="specSearch" placeholder="Search products, SKUs, specs…">
@@ -72,9 +135,9 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
       <div><label>Product name</label><input id="pName"></div>
       <div><label>SKU</label><input id="pSku"></div>
     </div>
-    <label>Key specs</label><input id="pSpecs" placeholder="e.g. 65W GaN, USB-C PD 3.1, 2-port">
+    <label>Key specs</label><input id="pSpecs">
     <div class="grid two">
-      <div><label>Warranty</label><input id="pWarranty" placeholder="e.g. 2 years"></div>
+      <div><label>Warranty</label><input id="pWarranty"></div>
       <div><label>Source</label><input id="pSource" placeholder="e.g. product catalog v3"></div>
     </div>
     <button class="btn" onclick="addProduct()">Import</button>
@@ -83,33 +146,36 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
   </div>
 </div>
 
+<!-- SALES & DATES -->
 <div class="section" id="s-sales">
   <div class="card">
     <h2>Sales</h2>
-    <div class="note">No sales source connected yet — connect your store/analytics API and this section will populate automatically.</div>
+    <div class="note">No sales source connected yet — once your store/sales platform is added as a connector, sales, deliveries and refunds will appear here and on the Overview page.</div>
   </div>
   <div class="card">
     <h2>Key dates</h2>
     <table id="datesTable"><thead><tr><th>Date</th><th>Event</th><th>Source</th></tr></thead><tbody></tbody></table>
     <div class="grid two" style="margin-top:8px">
       <div><label>Date</label><input type="date" id="dDate"></div>
-      <div><label>Event</label><input id="dEvent" placeholder="e.g. Summer sale launch"></div>
+      <div><label>Event</label><input id="dEvent"></div>
     </div>
-    <label>Source</label><input id="dSource" placeholder="e.g. marketing calendar">
+    <label>Source</label><input id="dSource">
     <button class="btn" onclick="addDate()">Import</button>
     <div class="err" id="dErr"></div>
   </div>
 </div>
 
+<!-- GORGIAS -->
 <div class="section" id="s-gorgias">
   <div class="grid kpis" id="gorgiasKpis"></div>
   <div class="card" style="margin-top:14px">
-    <h2>Tickets created — last 7 days</h2>
+    <h2>Tickets created — last 7 days (live)</h2>
     <div class="chart-wrap"><canvas id="gorgiasChart"></canvas></div>
     <div class="note" id="gorgiasNote">Loading live data from Gorgias…</div>
   </div>
 </div>
 
+<!-- KNOWLEDGE BASES -->
 <div class="section" id="s-kb">
   <div class="card">
     <h2>Knowledge bases</h2>
@@ -117,9 +183,8 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
   </div>
   <div class="card">
     <h2>💡 Suggest a new knowledge base</h2>
-    <p style="font-size:13px;color:var(--muted)">Any team member can propose a database, doc set, or source to enrich the brain.</p>
     <div class="grid two">
-      <div><label>Name</label><input id="kName" placeholder="e.g. Returns policy FAQ"></div>
+      <div><label>Name</label><input id="kName"></div>
       <div><label>Your name</label><input id="kBy"></div>
     </div>
     <label>What is it &amp; why add it?</label>
@@ -129,16 +194,17 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
   </div>
 </div>
 
+<!-- CONNECTORS -->
 <div class="section" id="s-conn">
   <div class="card">
     <h2>Connectors <button class="btn" style="float:right;margin:0;padding:5px 12px" onclick="toggleConnForm()">＋ Add connector</button></h2>
     <table id="connTable"><thead><tr><th>Type</th><th>Name</th><th>Info</th><th>Status</th><th>Added by</th></tr></thead><tbody></tbody></table>
-    <div class="note">Credentials are encrypted at rest and write-only: once saved they are never shown again — not to you, not to anyone. Adding a connector of the same type replaces the previous one (nothing is deleted).</div>
+    <div class="note">Credentials are encrypted at rest and write-only — once saved they are never shown again, to anyone. Adding a connector of the same type replaces the previous one. Not sure how to do it? <a href="#" onclick="aiAsk('How do I add a connector? Walk me through it.');return false">Ask the assistant</a>.</div>
   </div>
   <div class="card" id="connForm" style="display:none">
     <h2>New connector</h2>
     <label>Type</label>
-    <select id="cType" style="width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:inherit;background:#fff"></select>
+    <select id="cType"></select>
     <div id="cFields"></div>
     <label>Your name</label><input id="cBy">
     <button class="btn" onclick="addConnector()">Test &amp; save</button>
@@ -148,25 +214,12 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
 
 <footer>clicks brain · internal use only · no credentials are stored or displayed anywhere in this dashboard</footer>
 
-<!-- assistant -->
 <button id="aiFab" title="Ask the brain">🧠</button>
 <div id="aiPanel">
   <div id="aiHead">clicks brain assistant <span id="aiClose">✕</span></div>
   <div id="aiLog"></div>
-  <div id="aiBar"><input id="aiInput" placeholder="Ask how to add a connector, where data comes from…"><button class="btn" style="margin:0" onclick="aiSend()">Send</button></div>
+  <div id="aiBar"><input id="aiInput" placeholder="Ask about data, connectors, events…"><button class="btn" style="margin:0" onclick="aiSend()">Send</button></div>
 </div>
-<style>
-#aiFab{position:fixed;right:20px;bottom:20px;width:52px;height:52px;border-radius:50%;border:none;background:var(--accent);font-size:24px;cursor:pointer;box-shadow:0 4px 14px rgba(79,70,229,.4);z-index:50}
-#aiPanel{display:none;position:fixed;right:20px;bottom:84px;width:min(360px,90vw);height:460px;background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.15);z-index:50;flex-direction:column;overflow:hidden}
-#aiPanel.open{display:flex}
-#aiHead{background:var(--accent);color:#fff;padding:10px 14px;font-weight:600;font-size:13px;display:flex;justify-content:space-between}
-#aiClose{cursor:pointer}
-#aiLog{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
-.msg{max-width:85%;padding:8px 11px;border-radius:12px;font-size:13px;white-space:pre-wrap}
-.msg.user{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:4px}
-.msg.assistant{align-self:flex-start;background:var(--bg);border:1px solid var(--line);border-bottom-left-radius:4px}
-#aiBar{display:flex;gap:6px;padding:10px;border-top:1px solid var(--line)}
-</style>
 
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -185,12 +238,132 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.getElementById('s-' + b.dataset.s).classList.add('active');
 });
 
-// products
-let products = [];
-async function loadProducts() {
-  products = await api('/api/products');
-  renderProducts();
+// ---------- overview ----------
+let curDays = 7, homeChart;
+document.querySelectorAll('#periods button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#periods button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  curDays = +b.dataset.d;
+  loadOverview();
+});
+
+// inline Chart.js plugin: vertical 📌 markers for events
+const eventMarkers = {
+  id: 'eventMarkers',
+  afterDatasetsDraw(chart, _a, opts) {
+    const evts = opts.events || [];
+    if (!evts.length) return;
+    const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
+    const labels = chart.data.labels;
+    evts.forEach(e => {
+      const d = String(e.event_date).slice(0, 10);
+      let idx = labels.findIndex(l => l >= d);
+      if (idx === -1 && labels.length && d <= labels[labels.length-1]) idx = labels.length - 1;
+      if (idx === -1) return;
+      const px = x.getPixelForValue(idx);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(220,38,38,.55)';
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, bottom); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = '14px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('📌', px, top + 12);
+      ctx.font = '10px sans-serif'; ctx.fillStyle = '#6b7280';
+      ctx.fillText(String(e.title).slice(0, 18), px, top + 26);
+      ctx.restore();
+    });
+  }
+};
+Chart.register(eventMarkers);
+
+function mergeSeries(series) {
+  const all = new Set();
+  Object.values(series).forEach(rows => rows.forEach(r => all.add(String(r.d).slice(0,10))));
+  const labels = [...all].sort();
+  const line = rows => {
+    const m = Object.fromEntries(rows.map(r => [String(r.d).slice(0,10), r.c]));
+    return labels.map(l => m[l] ?? 0);
+  };
+  return { labels, created: line(series.created), closed: line(series.closed), cancel: line(series.cancel_refund) };
 }
+
+async function loadOverview() {
+  try {
+    const s = await api('/api/stats/overview?days=' + curDays);
+    const t = s.tickets.totals;
+    document.getElementById('homeKpis').innerHTML = [
+      {l:`Tickets created (${curDays}d)`, v:t.created},
+      {l:`Tickets closed (${curDays}d)`, v:t.closed},
+      {l:`Cancel/refund tickets (${curDays}d)`, v:t.cancel_refund},
+      {l:'Open now (synced)', v:t.open},
+      {l:`Sales (${curDays}d)`, v:'—'},
+      {l:`Events (${curDays}d)`, v:s.events.length}
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    const m = mergeSeries(s.tickets.series);
+    if (homeChart) homeChart.destroy();
+    homeChart = new Chart(document.getElementById('homeChart'), {
+      type: 'line',
+      data: { labels: m.labels, datasets: [
+        {label:'Created', data:m.created, borderColor:'#4f46e5', backgroundColor:'#4f46e522', tension:.25, fill:true},
+        {label:'Closed', data:m.closed, borderColor:'#059669', tension:.25},
+        {label:'Cancel/refund', data:m.cancel, borderColor:'#dc2626', tension:.25}
+      ]},
+      options: { responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{position:'bottom'}, eventMarkers:{ events: s.events } },
+        scales:{ y:{beginAtZero:true, ticks:{precision:0}} } }
+    });
+    document.getElementById('syncInfo').textContent = s.last_sync ? '· synced ' + new Date(s.last_sync).toLocaleString() : '';
+    document.getElementById('homeNote').textContent = s.last_sync
+      ? `Ticket data from the local Gorgias sync (${s.bucket} buckets). Sales appears once a sales source is connected — ask the assistant. 📌 = team events.`
+      : 'No ticket data yet — add the Gorgias connector (Connectors tab) and stats will start syncing.';
+  } catch (e) {
+    document.getElementById('homeNote').textContent = 'Overview error: ' + e.message;
+  }
+}
+
+// events
+function toggleEvtForm() {
+  const f = document.getElementById('evtForm');
+  f.style.display = f.style.display === 'none' ? 'block' : 'none';
+}
+async function loadEvents() {
+  const evts = await api('/api/events');
+  document.getElementById('evtList').innerHTML = evts.length ? evts.map(e => `
+    <div class="evt"><div class="pin">📌</div><div>
+      <div class="t">${esc(e.title)} <span class="tag date">${esc(String(e.event_date).slice(0,10))}</span></div>
+      <div>${esc(e.description)}</div>
+      <div class="m">by ${esc(e.added_by)}${e.attachment_name ? ` · <a href="/api/events/${e.id}/attachment" target="_blank">📎 ${esc(e.attachment_name)}</a>` : ''}</div>
+    </div></div>`).join('')
+    : '<div class="empty">No events yet — log campaigns, launches, anything that could move the numbers.</div>';
+}
+function readFile(f) {
+  return new Promise((ok, err) => {
+    const r = new FileReader();
+    r.onload = () => ok({ name: f.name, type: f.type, data: r.result.split(',')[1] });
+    r.onerror = err;
+    r.readAsDataURL(f);
+  });
+}
+async function addEvent() {
+  const el = id => document.getElementById(id);
+  el('eErr').textContent = '';
+  try {
+    const f = el('eFile').files[0];
+    if (f && f.size > 5 * 1024 * 1024) throw new Error('attachment too large (max 5MB)');
+    await api('/api/events', {method:'POST', body: JSON.stringify({
+      title: el('eTitle').value.trim(), description: el('eDesc').value.trim(),
+      event_date: el('eDate').value, added_by: el('eBy').value.trim() || 'anonymous',
+      attachment: f ? await readFile(f) : undefined
+    })});
+    ['eTitle','eDesc','eDate','eBy'].forEach(id => el(id).value = '');
+    el('eFile').value = '';
+    toggleEvtForm(); loadEvents(); loadOverview();
+  } catch (e) { el('eErr').textContent = e.message; }
+}
+
+// ---------- products ----------
+let products = [];
+async function loadProducts() { products = await api('/api/products'); renderProducts(); }
 function renderProducts() {
   const q = document.getElementById('specSearch').value.toLowerCase();
   const rows = products.filter(p => JSON.stringify(p).toLowerCase().includes(q));
@@ -213,7 +386,7 @@ async function addProduct() {
 }
 document.getElementById('specSearch').oninput = renderProducts;
 
-// dates
+// ---------- dates ----------
 async function loadDates() {
   const dates = await api('/api/dates');
   document.querySelector('#datesTable tbody').innerHTML = dates.length ? dates.map(d =>
@@ -233,7 +406,7 @@ async function addDate() {
   } catch (e) { el('dErr').textContent = e.message; }
 }
 
-// gorgias
+// ---------- gorgias live tab ----------
 let gChart;
 async function loadGorgias() {
   const note = document.getElementById('gorgiasNote');
@@ -241,16 +414,14 @@ async function loadGorgias() {
     const g = await api('/api/gorgias/stats');
     if (!g.configured) { note.textContent = g.message; return; }
     const frt = g.avg_first_response_seconds != null ? (g.avg_first_response_seconds/3600).toFixed(1) + 'h' : '—';
-    const kpis = [
+    document.getElementById('gorgiasKpis').innerHTML = [
       {l:'Total tickets', v: g.total_tickets ?? '—'},
       {l:`Open (last ${g.sample_size})`, v: g.open_in_recent ?? '—'},
       {l:'Created last 7d', v: g.created_last_7d ?? '—'},
       {l:'Closed last 7d', v: g.closed_last_7d ?? '—'},
       {l:'Avg first response', v: frt},
       {l:`CSAT (${g.csat_responses ?? 0} responses)`, v: g.csat_avg_5 != null ? g.csat_avg_5 + '/5' : '—'}
-    ];
-    document.getElementById('gorgiasKpis').innerHTML = kpis.map(k =>
-      `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
     const days = g.created_per_day || {};
     if (gChart) gChart.destroy();
     gChart = new Chart(document.getElementById('gorgiasChart'), {
@@ -263,7 +434,7 @@ async function loadGorgias() {
   } catch (e) { note.textContent = 'Could not reach Gorgias: ' + e.message; }
 }
 
-// knowledge bases
+// ---------- knowledge bases ----------
 async function loadKbs() {
   const kbs = await api('/api/kb');
   document.querySelector('#kbTable tbody').innerHTML = kbs.length ? kbs.map(k =>
@@ -283,7 +454,7 @@ async function addKb() {
   } catch (e) { el('kErr').textContent = e.message; }
 }
 
-// connectors
+// ---------- connectors ----------
 let connTypes = {};
 async function loadConnectorTypes() {
   connTypes = await api('/api/connector-types');
@@ -300,6 +471,9 @@ function renderConnFields() {
 function toggleConnForm() {
   const f = document.getElementById('connForm');
   f.style.display = f.style.display === 'none' ? 'block' : 'none';
+  if (f.style.display === 'block') {
+    aiAsk('I\'m adding a new connector — stay with me and help if I get stuck. What do I need for each type?');
+  }
 }
 async function loadConnectors() {
   const conns = await api('/api/connectors');
@@ -317,43 +491,62 @@ async function addConnector() {
   try {
     await api('/api/connectors', {method:'POST', body: JSON.stringify({ type, config, added_by: el('cBy').value.trim() || 'anonymous' })});
     connTypes[type].fields.forEach(f => el('cf_' + f.key).value = '');
-    toggleConnForm(); loadConnectors(); loadGorgias();
+    toggleConnForm(); loadConnectors(); loadGorgias(); loadOverview();
   } catch (e) { el('cErr').textContent = e.message; }
 }
 
-// assistant
+// ---------- assistant ----------
 const aiHistory = [];
 const aiPanel = document.getElementById('aiPanel');
-document.getElementById('aiFab').onclick = () => {
-  aiPanel.classList.toggle('open');
-  if (aiPanel.classList.contains('open') && !aiHistory.length) {
-    aiAppend('assistant', 'Hi! I\'m the brain\'s assistant. I can help you add connectors (like Gorgias), explain where data comes from, or take knowledge base ideas. What do you need?');
+function aiOpen() {
+  aiPanel.classList.add('open');
+  if (!aiHistory.length) {
+    aiAppend('assistant', 'Hi! I\'m the brain\'s assistant. Ask me about the data ("refund tickets closed this week"), how to add connectors, or log an event. What do you need?');
   }
-};
+}
+document.getElementById('aiFab').onclick = () => aiPanel.classList.contains('open') ? aiPanel.classList.remove('open') : aiOpen();
 document.getElementById('aiClose').onclick = () => aiPanel.classList.remove('open');
 document.getElementById('aiInput').addEventListener('keydown', e => { if (e.key === 'Enter') aiSend(); });
+document.getElementById('askInput').addEventListener('keydown', e => { if (e.key === 'Enter') askBrain(); });
+function askBrain() {
+  const q = document.getElementById('askInput').value.trim();
+  if (!q) return aiOpen();
+  document.getElementById('askInput').value = '';
+  aiAsk(q);
+}
+function aiAsk(text) {
+  aiOpen();
+  document.getElementById('aiInput').value = text;
+  aiSend();
+}
 function aiAppend(role, text) {
   const d = document.createElement('div');
   d.className = 'msg ' + role;
   d.textContent = text;
   document.getElementById('aiLog').appendChild(d);
   document.getElementById('aiLog').scrollTop = 1e9;
+  return d;
 }
+let aiBusy = false;
 async function aiSend() {
+  if (aiBusy) return;
   const input = document.getElementById('aiInput');
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
   aiAppend('user', text);
   aiHistory.push({ role: 'user', content: text });
+  const thinking = aiAppend('assistant', '…');
+  aiBusy = true;
   try {
     const r = await api('/api/assistant', {method:'POST', body: JSON.stringify({ messages: aiHistory })});
-    aiAppend('assistant', r.reply);
+    thinking.textContent = r.reply;
     if (r.configured !== false) aiHistory.push({ role: 'assistant', content: r.reply });
-  } catch (e) { aiAppend('assistant', '⚠️ ' + e.message); }
+  } catch (e) { thinking.textContent = '⚠️ ' + e.message; }
+  finally { aiBusy = false; }
 }
 
-loadProducts(); loadDates(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors();
+loadOverview(); loadEvents(); loadProducts(); loadDates(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors();
 </script>
 </body>
 </html>
