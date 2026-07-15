@@ -303,55 +303,80 @@ async function getGorgiasConfig() {
 }
 
 let syncRunning = false;
-async function syncGorgias(maxPages = 5) {
+const BACKFILL_HORIZON_DAYS = 400; // keep ~13 months of history
+
+async function syncGorgias(maxPages = 8) {
   if (syncRunning) return { skipped: true };
   const cfg = await getGorgiasConfig();
   if (!cfg) return { configured: false };
   syncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)).rows[0]?.v || {};
-  const lastSync = st.last_updated ? Date.parse(st.last_updated) : 0;
-  let cursor = null, pages = 0, upserts = 0, done = false, newest = null, lastError = null;
+  let pages = 0, upserts = 0, lastError = null;
+  const horizon = Date.now() - BACKFILL_HORIZON_DAYS * 864e5;
+
+  const fetchPage = async (cursor) =>
+    gorgiasRequest(cfg, `/api/tickets?limit=100&order_by=updated_datetime:desc&trashed=false${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+  const upsertRows = async (rows) => {
+    for (const x of rows) {
+      await pool.query(
+        `INSERT INTO tickets_cache (gorgias_id, status, subject, channel, tags, created_datetime, closed_datetime, updated_datetime, synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
+         ON CONFLICT (gorgias_id) DO UPDATE SET status=$2, subject=$3, channel=$4, tags=$5,
+           created_datetime=$6, closed_datetime=$7, updated_datetime=$8, synced_at=now()`,
+        [x.id, x.status || '', (x.subject || '').slice(0, 500), x.channel || '',
+         JSON.stringify((x.tags || []).map(g => g?.name).filter(Boolean)),
+         x.created_datetime || null, x.closed_datetime || null, x.updated_datetime || null]);
+      upserts++;
+    }
+  };
+
   try {
-    while (pages < maxPages && !done) {
-      const q = `/api/tickets?limit=100&order_by=updated_datetime:desc&trashed=false${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-      const t = await gorgiasRequest(cfg, q);
-      const rows = t.data || [];
-      if (!rows.length) break;
-      for (const x of rows) {
-        await pool.query(
-          `INSERT INTO tickets_cache (gorgias_id, status, subject, channel, tags, created_datetime, closed_datetime, updated_datetime, synced_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
-           ON CONFLICT (gorgias_id) DO UPDATE SET status=$2, subject=$3, channel=$4, tags=$5,
-             created_datetime=$6, closed_datetime=$7, updated_datetime=$8, synced_at=now()`,
-          [x.id, x.status || '', (x.subject || '').slice(0, 500), x.channel || '',
-           JSON.stringify((x.tags || []).map(g => g?.name).filter(Boolean)),
-           x.created_datetime || null, x.closed_datetime || null, x.updated_datetime || null]);
-        upserts++;
+    // phase 1 — incremental: catch everything updated since the last run
+    if (st.last_updated) {
+      const lastUpd = Date.parse(st.last_updated);
+      let cursor = null, newest = null, done = false;
+      while (pages < maxPages && !done) {
+        const t = await fetchPage(cursor);
+        const rows = t.data || [];
+        if (!rows.length) break;
+        await upsertRows(rows);
+        if (!newest) newest = rows[0]?.updated_datetime || null;
+        pages++;
+        const oldest = rows[rows.length - 1]?.updated_datetime;
+        cursor = t.meta?.next_cursor;
+        if (!cursor || (oldest && Date.parse(oldest) < lastUpd)) done = true;
       }
-      if (!newest && rows[0]?.updated_datetime) newest = rows[0].updated_datetime;
-      const oldest = rows[rows.length - 1]?.updated_datetime;
-      if (lastSync && oldest && Date.parse(oldest) < lastSync) done = true;
-      cursor = t.meta?.next_cursor;
-      if (!cursor) done = true;
+      if (newest) st.last_updated = newest;
+    }
+
+    // phase 2 — backfill: keep descending through history until the horizon, resumable across runs
+    while (!st.backfill_done && pages < maxPages) {
+      const t = await fetchPage(st.backfill_cursor || null);
+      const rows = t.data || [];
+      if (!rows.length) { st.backfill_done = true; break; }
+      await upsertRows(rows);
       pages++;
+      if (!st.last_updated && rows[0]?.updated_datetime && !st.backfill_cursor) {
+        st.last_updated = rows[0].updated_datetime; // first ever run
+      }
+      const oldest = rows[rows.length - 1]?.updated_datetime;
+      st.backfill_oldest = oldest || st.backfill_oldest;
+      st.backfill_cursor = t.meta?.next_cursor || null;
+      if (!st.backfill_cursor || (oldest && Date.parse(oldest) < horizon)) st.backfill_done = true;
     }
   } catch (e) {
     lastError = String(e.message);
     console.error('gorgias sync error:', lastError);
   } finally {
-    // always record the attempt so failures are visible in the UI
     const cached = (await pool.query('SELECT count(*)::int c FROM tickets_cache')).rows[0].c;
     await pool.query(
       `INSERT INTO sync_state (k, v) VALUES ('gorgias', $1)
        ON CONFLICT (k) DO UPDATE SET v=$1`,
-      [JSON.stringify({
-        last_updated: newest || st.last_updated || null,
-        last_run: new Date().toISOString(),
-        upserts, pages, cached, last_error: lastError
-      })]).catch(e => console.error('sync_state write:', e.message));
+      [JSON.stringify({ ...st, last_run: new Date().toISOString(), upserts, pages, cached, last_error: lastError })])
+      .catch(e => console.error('sync_state write:', e.message));
     syncRunning = false;
   }
-  return { configured: true, pages, upserts, error: lastError };
+  return { configured: true, pages, upserts, backfill_done: !!st.backfill_done, backfill_oldest: st.backfill_oldest || null, error: lastError };
 }
 
 async function maybeSync() {
@@ -361,19 +386,30 @@ async function maybeSync() {
   return st;
 }
 
-// keep the cache warm while the service is awake; deep-sync on boot if cache is empty
-setInterval(() => syncGorgias(5).catch(e => console.error('interval sync:', e.message)), 60 * 60 * 1000);
+// background cadence: aggressive while backfilling history, hourly once caught up
+setInterval(async () => {
+  try {
+    const st = (await pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)).rows[0]?.v;
+    if (st && !st.backfill_done) {
+      await syncGorgias(20); // ~2,000 tickets every 5 min until history is complete
+    } else if (!st?.last_run || Date.now() - Date.parse(st.last_run) > 55 * 60 * 1000) {
+      await syncGorgias(8);
+    }
+  } catch (e) { console.error('interval sync:', e.message); }
+}, 5 * 60 * 1000);
+
 async function bootSync() {
+  const st = (await pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)).rows[0]?.v;
   const c = (await pool.query('SELECT count(*)::int c FROM tickets_cache')).rows[0].c;
-  if (c === 0) {
-    console.log('tickets_cache empty — running deep initial sync');
-    const r = await syncGorgias(20);
-    console.log('initial sync:', JSON.stringify(r));
+  if (c === 0 || !st?.backfill_done) {
+    console.log('starting sync (cache:', c, 'backfill_done:', !!st?.backfill_done, ')');
+    const r = await syncGorgias(30);
+    console.log('boot sync:', JSON.stringify(r));
   }
 }
 
 app.post('/api/gorgias/sync', async (_req, res) => {
-  try { res.json(await syncGorgias(20)); }
+  try { res.json(await syncGorgias(50)); }
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 

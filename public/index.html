@@ -427,11 +427,14 @@ async function loadOverview() {
     });
     document.getElementById('syncInfo').textContent = s.last_sync
       ? `· synced ${new Date(s.last_sync).toLocaleString()} · ${s.sync?.cached ?? '?'} tickets cached` : '';
+    const backfilling = s.sync && !s.sync.backfill_done;
     document.getElementById('homeNote').textContent =
       s.sync?.last_error ? `⚠️ Last sync failed: ${s.sync.last_error} — hit Sync now to retry.`
+      : backfilling
+        ? `⏳ Backfilling ticket history from Gorgias — reached ${s.sync.backfill_oldest ? String(s.sync.backfill_oldest).slice(0,10) : 'starting…'} so far. Counts grow until the backfill completes (runs automatically every few minutes).`
       : s.last_sync
         ? `Ticket data from the local Gorgias sync (${s.bucket} buckets). Sales appears once a sales source is connected — ask the assistant. 📌 = team events.`
-        : 'No ticket data yet — if Gorgias is connected, hit 🔄 Sync now (first sync pulls up to 2,000 recent tickets).';
+        : 'No ticket data yet — if Gorgias is connected, hit 🔄 Sync now.';
   } catch (e) {
     document.getElementById('homeNote').textContent = 'Overview error: ' + e.message;
   }
