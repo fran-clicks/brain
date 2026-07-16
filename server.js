@@ -214,8 +214,12 @@ app.get('/api/connector-types', async (_req, res) => res.json(await getAllConnec
 
 app.get('/api/connectors', async (_req, res) => {
   const { rows } = await pool.query(
-    'SELECT id, type, name, meta, active, added_by, approval_status, approved_by, created_at FROM connectors ORDER BY created_at DESC');
-  res.json(rows);
+    'SELECT id, type, name, meta, active, added_by, approval_status, approved_by, created_at, config_encrypted FROM connectors ORDER BY created_at DESC');
+  res.json(rows.map(({ config_encrypted, ...r }) => {
+    let decrypt_ok = true;
+    try { decrypt(config_encrypted); } catch { decrypt_ok = false; }
+    return { ...r, decrypt_ok }; // ciphertext itself is never returned
+  }));
 });
 
 // ---------- pending integrations + admin approval ----------
@@ -558,7 +562,7 @@ async function getShopifyToken(cfg) {
   if (!r.ok || !j.access_token) {
     throw new Error(`Shopify token exchange failed (${r.status}): ${j.error_description || j.error || 'check client ID/secret and that the app is installed on this store'}`);
   }
-  shopifyTokenCache[k] = { token: j.access_token, exp: Date.now() + (j.expires_in || 86399) * 1000 };
+  shopifyTokenCache[k] = { token: j.access_token, exp: Date.now() + (j.expires_in || 86399) * 1000, scope: j.scope || '' };
   return j.access_token;
 }
 
@@ -704,7 +708,12 @@ app.get('/api/shopify/summary', async (_req, res) => {
     const conn = await getConnector('shopify');
     const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || null;
     const has = (await pool.query('SELECT 1 FROM orders_cache LIMIT 1')).rows.length > 0;
-    if (!has) return res.json({ configured: !!conn, empty: true, sync: ss });
+    let granted_scopes = null;
+    if (conn) {
+      try { await getShopifyToken(conn.config); granted_scopes = shopifyTokenCache[`${conn.config.store_domain}:${conn.config.client_id}`]?.scope ?? null; }
+      catch (e) { granted_scopes = `token error: ${e.message}`; }
+    }
+    if (!has) return res.json({ configured: !!conn, empty: true, sync: ss, granted_scopes });
     const [tot, countries, products, recent] = await Promise.all([
       pool.query(`SELECT count(*) FILTER (WHERE cancelled_at IS NULL)::int orders,
         round(sum(total_price) FILTER (WHERE cancelled_at IS NULL))::int revenue,

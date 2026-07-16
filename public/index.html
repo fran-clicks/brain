@@ -532,7 +532,8 @@ async function loadShopify() {
     if (s.empty || !s.configured) {
       note.textContent = !s.configured
         ? 'Shopify is not connected yet — an admin can add it on the ＋ page.'
-        : 'Connected — waiting for the first orders to sync' + (s.sync?.last_error ? ` (⚠️ ${s.sync.last_error})` : '…');
+        : 'Connected — waiting for the first orders to sync' + (s.sync?.last_error ? ` (⚠️ ${s.sync.last_error})` : '…')
+          + (s.granted_scopes != null ? ` · token scopes: [${s.granted_scopes || 'none'}]` : '');
       return;
     }
     const t = s.totals_30d;
@@ -636,6 +637,7 @@ function renderConnFields() {
 }
 function connStatus(c) {
   if (!c.active) return `<span class="tag src">${c.approval_status === 'rejected' ? 'rejected' : 'replaced'}</span>`;
+  if (c.decrypt_ok === false) return '<span class="tag pending">🔑 re-enter credentials — encryption key changed</span>';
   if (c.approval_status === 'pending') return '<span class="tag pending">awaiting approval</span>';
   if (c.meta?.integration === 'pending') return '<span class="tag pending">approved · wiring sync</span>';
   return '<span class="tag approved">active</span>';
