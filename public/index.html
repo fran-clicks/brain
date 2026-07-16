@@ -258,21 +258,32 @@ footer{color:rgba(16,17,20,.45)}
     <div class="note">Only authorized members have the admin password. Approving accepts the source into the brain (data sync is then wired by the dev team); rejecting deactivates it.</div>
   </div>
   <div class="card">
-    <h2>💬 Want to connect something? Talk to the brain</h2>
-    <p style="font-size:13px;color:var(--muted);margin-bottom:8px">Tell it what you want to connect — Shopify, Klaviyo, a shipping provider, a custom API, anything. It will figure out what's needed and build the form for you below. Never paste credentials in the chat.</p>
+    <h2>💬 Request a connection</h2>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:8px">Tell the brain what you'd like connected and <b>why</b> — the idea and the reason only, never keys or passwords. Your request goes to the admins for review.</p>
     <div id="connLog" style="max-height:280px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:4px 0"></div>
     <div style="display:flex;gap:6px;margin-top:8px">
-      <input id="connInput" placeholder='e.g. "I want to connect our Shopify store" or "add our shipping provider"'>
+      <input id="connInput" placeholder='e.g. "connect Klaviyo so we can see campaign performance next to sales"'>
       <button class="btn" style="margin:0" onclick="connSend()">Send</button>
     </div>
   </div>
+  <div class="card" id="reqCard" style="display:none">
+    <h2>📨 Requests</h2>
+    <div id="reqList"></div>
+    <div class="grid two" style="margin-top:10px">
+      <div><label>Admin password (to decide)</label><input type="password" id="rqPw" autocomplete="off"></div>
+    </div>
+    <div class="err" id="rqErr"></div>
+  </div>
   <div class="card" id="connForm">
-    <h2>New connector</h2>
+    <h2>New connector <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
     <label>Type</label>
     <select id="cType"></select>
     <div class="note" id="cNotes" style="display:none;margin-top:6px"></div>
     <div id="cFields"></div>
-    <label>Your name</label><input id="cBy">
+    <div class="grid two">
+      <div><label>Your name</label><input id="cBy"></div>
+      <div><label>Admin password</label><input type="password" id="cPw" autocomplete="off"></div>
+    </div>
     <button class="btn" onclick="addConnector()">Save connector</button>
     <div class="err" id="cErr"></div>
   </div>
@@ -644,13 +655,39 @@ async function addConnector() {
   const config = {};
   for (const f of connTypes[type].fields) config[f.key] = el('cf_' + f.key).value.trim();
   try {
-    const saved = await api('/api/connectors', {method:'POST', body: JSON.stringify({ type, config, added_by: el('cBy').value.trim() || 'anonymous' })});
+    const saved = await api('/api/connectors', {method:'POST', body: JSON.stringify({
+      type, config, added_by: el('cBy').value.trim() || 'anonymous', admin_password: el('cPw').value })});
     connTypes[type].fields.forEach(f => el('cf_' + f.key).value = '');
     loadConnectors(); loadGorgias(); loadOverview();
     connAppend('assistant', saved.meta?.integration === 'pending'
       ? `✅ "${connTypes[type].label}" credentials saved (encrypted). Integration status: pending — data sync will be wired next.`
       : `✅ "${connTypes[type].label}" connected and working.`);
   } catch (e) { el('cErr').textContent = e.message; }
+}
+
+// requests
+async function loadRequests() {
+  const reqs = await api('/api/requests');
+  const card = document.getElementById('reqCard');
+  card.style.display = reqs.length ? 'block' : 'none';
+  document.getElementById('reqList').innerHTML = reqs.map(r => `
+    <div class="evt"><div class="pin">${r.status === 'pending' ? '📨' : r.status === 'approved' ? '✅' : '🚫'}</div><div style="flex:1">
+      <div class="t">${esc(r.service)} <span class="tag ${r.status === 'approved' ? 'approved' : r.status === 'pending' ? 'pending' : 'src'}">${esc(r.status)}</span></div>
+      <div>${esc(r.reason)}</div>
+      <div class="m">by ${esc(r.requested_by)} · ${esc(String(r.created_at).slice(0, 10))}${r.decided_by ? ` · decided by ${esc(r.decided_by)}` : ''}</div>
+    </div>
+    ${r.status === 'pending' ? `<div>
+      <button class="btn" style="margin:0;padding:5px 12px" onclick="decideReq(${r.id},'approved')">Approve</button>
+      <button class="btn" style="margin:0;padding:5px 12px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="decideReq(${r.id},'rejected')">Reject</button>
+    </div>` : ''}</div>`).join('');
+}
+async function decideReq(id, decision) {
+  const el = i => document.getElementById(i);
+  el('rqErr').textContent = '';
+  try {
+    await api(`/api/requests/${id}/decision`, {method:'POST', body: JSON.stringify({ decision, admin_password: el('rqPw').value })});
+    loadRequests();
+  } catch (e) { el('rqErr').textContent = e.message; }
 }
 
 // inline connector chat (same assistant, own thread)
@@ -680,7 +717,7 @@ async function connSend() {
     thinking.textContent = r.reply;
     if (r.configured !== false) connHistory.push({ role: 'assistant', content: r.reply });
     await loadConnectorTypes(); // the assistant may have created a new form
-    loadConnectors();
+    loadConnectors(); loadRequests();
   } catch (e) { thinking.textContent = '⚠️ ' + e.message; }
   finally { connBusy = false; }
 }
@@ -746,7 +783,7 @@ api('/api/auth/me').then(m => {
   }
 }).catch(() => {});
 
-loadOverview(); loadEvents(); loadDates(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors();
+loadOverview(); loadEvents(); loadDates(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors(); loadRequests();
 </script>
 </body>
 </html>

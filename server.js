@@ -133,6 +133,10 @@ async function initDb() {
     ALTER TABLE connectors ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
     CREATE TABLE IF NOT EXISTS users (
       email TEXT PRIMARY KEY, pass_hash TEXT, created_at TIMESTAMPTZ DEFAULT now());
+    CREATE TABLE IF NOT EXISTS connection_requests (
+      id SERIAL PRIMARY KEY, service TEXT NOT NULL, reason TEXT NOT NULL,
+      requested_by TEXT DEFAULT 'anonymous', status TEXT DEFAULT 'pending',
+      decided_by TEXT, decided_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
   `);
   for (const em of ['fran@clicks.tech', 'kp@clicks.tech']) {
     await pool.query('INSERT INTO users (email) VALUES ($1) ON CONFLICT (email) DO NOTHING', [em]);
@@ -222,6 +226,33 @@ const adminOk = (pw) => {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 };
 
+// ---------- connection requests (members propose, admins decide) ----------
+app.get('/api/requests', async (_req, res) => {
+  const { rows } = await pool.query(
+    'SELECT * FROM connection_requests ORDER BY (status=\'pending\') DESC, created_at DESC LIMIT 100');
+  res.json(rows);
+});
+app.post('/api/requests', async (req, res) => {
+  const { service, reason } = req.body || {};
+  if (!service || !reason) return res.status(400).json({ error: 'service and reason required' });
+  if (looksSecret(service + ' ' + reason)) return res.status(400).json({ error: 'Requests must contain only the idea and the reason — never keys or passwords.' });
+  const { rows } = await pool.query(
+    'INSERT INTO connection_requests (service, reason, requested_by) VALUES ($1,$2,$3) RETURNING *',
+    [String(service).slice(0, 200), String(reason).slice(0, 2000), req.userEmail || 'anonymous']);
+  res.status(201).json(rows[0]);
+});
+app.post('/api/requests/:id/decision', async (req, res) => {
+  const { decision, admin_password } = req.body || {};
+  if (!adminOk(admin_password)) return res.status(403).json({ error: 'Wrong admin password.' });
+  if (!['approved', 'rejected'].includes(decision)) return res.status(400).json({ error: 'decision must be approved or rejected' });
+  const { rows } = await pool.query(
+    `UPDATE connection_requests SET status=$1, decided_by=$2, decided_at=now()
+     WHERE id=$3 AND status='pending' RETURNING *`,
+    [decision, req.userEmail || 'admin', req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'not found or already decided' });
+  res.json(rows[0]);
+});
+
 app.get('/api/integrations/pending', async (_req, res) => {
   const { rows } = await pool.query(
     `SELECT id, type, name, meta, added_by, created_at FROM connectors
@@ -247,7 +278,10 @@ app.post('/api/connectors/:id/decision', async (req, res) => {
 });
 
 app.post('/api/connectors', async (req, res) => {
-  const { type, name, config, added_by } = req.body || {};
+  const { type, name, config, added_by, admin_password } = req.body || {};
+  if (!adminOk(admin_password)) {
+    return res.status(403).json({ error: 'Only admins can add connectors. Members: request the connection in the chat above (idea + reason) — an admin will take it from there.' });
+  }
   const types = await getAllConnectorTypes();
   const def = types[type];
   if (!def) return res.status(400).json({ error: 'unknown connector type' });
@@ -281,7 +315,7 @@ app.post('/api/connectors', async (req, res) => {
     return res.status(400).json({ error: `Connection test failed: ${e.message}. Credentials were NOT saved.` });
   }
   await pool.query('UPDATE connectors SET active=false WHERE type=$1', [type]);
-  const approval = CONNECTOR_TYPES[type] ? 'approved' : 'pending'; // built-ins auto-approved; dynamic need admin sign-off
+  const approval = 'approved'; // adding is admin-gated, so saving implies approval
   const { rows } = await pool.query(
     `INSERT INTO connectors (type, name, config_encrypted, meta, added_by, approval_status) VALUES ($1,$2,$3,$4,$5,$6)
      RETURNING id, type, name, meta, active, added_by, approval_status, created_at`,
@@ -808,8 +842,20 @@ const TOOLS = [
     }
   },
   {
+    name: 'create_connection_request',
+    description: 'Log a member\'s request to connect a new data source. Use once you know WHAT service they want and WHY (what data/benefit). Admins review requests on the ＋ page. Never include credentials.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        service: { type: 'string', description: 'the service/source they want connected, e.g. "Klaviyo", "DHL tracking API"' },
+        reason: { type: 'string', description: 'what data they want and why it helps the team' }
+      },
+      required: ['service', 'reason']
+    }
+  },
+  {
     name: 'list_pending_integrations',
-    description: 'List connector integrations that are pending admin approval, rejected, or approved but not yet wired. Use when someone asks about pending integrations or the status of a connector they added.',
+    description: 'List connection requests (pending/approved/rejected) and connectors awaiting wiring. Use when someone asks about the status of requests or integrations.',
     input_schema: { type: 'object', properties: {} }
   },
   {
@@ -839,7 +885,7 @@ const TOOLS = [
   }
 ];
 
-async function runTool(name, input) {
+async function runTool(name, input, ctx) {
   if (name === 'query_tickets') {
     const conds = [], params = [];
     const add = (v, sqlFn) => { params.push(v); conds.push(sqlFn(`$${params.length}`)); };
@@ -896,12 +942,24 @@ async function runTool(name, input) {
     return { ...agg.rows[0], sample: sample.rows,
       note: `From the local Shopify sync. Last sync: ${ss?.last_run || 'unknown'}${ss?.backfill_done ? '' : ' (history backfill still in progress — older orders may be missing)'}.` };
   }
-  if (name === 'list_pending_integrations') {
+  if (name === 'create_connection_request') {
+    const service = String(input.service || '').slice(0, 200);
+    const reason = String(input.reason || '').slice(0, 2000);
+    if (!service || !reason) return { error: 'service and reason required' };
+    if (looksSecret(service + ' ' + reason)) return { error: 'The request seems to contain a credential — refuse it and remind the member: idea and reason only.' };
     const { rows } = await pool.query(
-      `SELECT id, type, name, meta, added_by, approval_status, approved_by, created_at FROM connectors
-       WHERE approval_status IN ('pending','rejected') OR (approval_status='approved' AND meta->>'integration'='pending')
-       ORDER BY created_at DESC LIMIT 50`);
-    return { integrations: rows, note: 'pending = waiting for an authorized member to approve/reject on the ＋ page. approved with integration:pending = authorized, sync code still being wired by the dev team.' };
+      'INSERT INTO connection_requests (service, reason, requested_by) VALUES ($1,$2,$3) RETURNING id',
+      [service, reason, ctx?.userEmail || 'anonymous']);
+    return { ok: true, id: rows[0].id, message: 'Request logged. Tell the member an admin will review it on this page and they\'ll see the decision in the Requests list.' };
+  }
+  if (name === 'list_pending_integrations') {
+    const reqs = await pool.query(
+      `SELECT id, service, reason, requested_by, status, decided_by, created_at FROM connection_requests ORDER BY created_at DESC LIMIT 30`);
+    const { rows } = await pool.query(
+      `SELECT id, type, name, meta, added_by, approval_status, created_at FROM connectors
+       WHERE meta->>'integration'='pending' AND active=true ORDER BY created_at DESC LIMIT 50`);
+    return { connection_requests: reqs.rows, connectors_awaiting_wiring: rows,
+      note: 'connection_requests: member proposals awaiting admin decision on the ＋ page. connectors_awaiting_wiring: credentials saved by an admin, sync code still being built.' };
   }
   if (name === 'create_connector_type') {
     const slug = String(input.slug || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 40);
@@ -935,7 +993,7 @@ async function runAssistant(inputMessages, opts = {}) {
 
   const conns = await pool.query('SELECT type, name, meta, active FROM connectors WHERE active=true');
   const knownTypes = await getAllConnectorTypes();
-  const system = `You are the built-in assistant of "clicks brain", an internal team dashboard. Today is ${new Date().toISOString().slice(0, 10)}.
+  const system = `You are the built-in assistant of "clicks brain", an internal team dashboard. Today is ${new Date().toISOString().slice(0, 10)}. Current user: ${opts.userEmail || 'unknown'}.
 Tabs: Overview (period stats 7d/1m/3m/6m/1y with event markers), Sales & Dates, Gorgias Stats, Knowledge Bases, Connectors (the ＋ button in the nav).
 Product specs are not shown yet — they will be captured automatically from sources (Shopify product list, website) once those connectors are added.
 House rules:
@@ -944,14 +1002,14 @@ House rules:
 - Connector types currently in the dropdown: ${JSON.stringify(Object.fromEntries(Object.entries(knownTypes).map(([k, v]) => [k, { label: v.label, fields: v.fields.map(f => f.key), dynamic: !!v.dynamic }])))}.
 - Active connectors right now: ${JSON.stringify(conns.rows)}.
 - Team events (campaigns, launches) are logged on the Overview tab with optional attachments and appear as 📌 markers on charts to show their influence.
-Adding NEW kinds of connectors is a core part of your job. When a member wants to connect something not in the dropdown (Klaviyo, a shipping provider, a custom internal API...):
-0. FIRST, remind them briefly: share only the IDEA and the REASON in chat — never keys, tokens or passwords. Credentials go exclusively into the encrypted form.
-1. Ask what service it is and what data they want from it.
-2. Work out what its API needs for server-to-server auth (base URL/store domain, API key/token, account id...). Ask if unsure — the member may need to check with whoever admins that service.
-3. Call create_connector_type with clear field labels that say exactly where to find each value. Mark every credential secret:true.
-4. Tell them the form is now in the dropdown on this page; after they save, an AUTHORIZED member must approve it in the "Pending integrations" list on this page (requires the admin password, entered in that list — never in chat). Once approved, the dev team wires the data sync.
-gorgias, anthropic, slack and shopify connectors are fully wired and auto-approved: they test the connection and work immediately. Shopify sync unlocks sales/order/delivery data (query_sales) and the sales line on Overview.
-Use list_pending_integrations to report what's waiting for approval or wiring. You cannot approve anything yourself.
+CONNECTION REQUESTS are a core part of your job. Members cannot add connectors — only ADMINS can (the New connector form requires the admin password). The member flow is:
+0. Remind them briefly: share only the IDEA and the REASON in chat — never keys, tokens or passwords. If they post a credential, tell them to rotate it immediately.
+1. Ask what service they want connected and what data/benefit they expect.
+2. Once you have service + reason, call create_connection_request to log it.
+3. Tell them: an admin reviews it in the Requests list on this page; if approved, the admin sets up the credentials and the dev team wires the sync.
+For ADMINS preparing an approved request, you may call create_connector_type to add a tailored credentials form to the dropdown (clear field labels saying where to find each value; every credential secret:true).
+gorgias, anthropic, slack and shopify connectors are fully wired: they test the connection and work immediately once an admin saves them. Shopify sync unlocks sales/order/delivery data (query_sales) and the sales line on Overview.
+Use list_pending_integrations to report request/wiring status. You cannot approve anything yourself.
 Use your tools to answer data questions with real numbers. If a question needs sales/order/delivery data, use query_sales and relay its guidance. Be concise. Answer in the user's language.${opts.slack ? '\nYou are replying inside Slack: use Slack formatting (*bold*, bullet lines with •), keep replies short, no markdown headers or tables.' : ''}`;
 
   let reply = '';
@@ -964,7 +1022,7 @@ Use your tools to answer data questions with real numbers. If a question needs s
       role: 'user',
       content: await Promise.all(toolUses.map(async tu => ({
         type: 'tool_result', tool_use_id: tu.id,
-        content: JSON.stringify(await runTool(tu.name, tu.input || {})).slice(0, 8000)
+        content: JSON.stringify(await runTool(tu.name, tu.input || {}, opts)).slice(0, 8000)
       })))
     }];
     reply = text; // fallback if rounds exhausted
@@ -974,7 +1032,7 @@ Use your tools to answer data questions with real numbers. If a question needs s
 
 app.post('/api/assistant', async (req, res) => {
   try {
-    res.json(await runAssistant(req.body?.messages || []));
+    res.json(await runAssistant(req.body?.messages || [], { userEmail: req.userEmail }));
   } catch (e) {
     res.status(502).json({ error: `Assistant error: ${e.message}` });
   }
@@ -1019,7 +1077,7 @@ app.post('/api/slack/events', async (req, res) => {
   const text = String(ev.text || '').replace(/<@[^>]+>/g, '').trim();
   if (!text) return;
   try {
-    const { reply } = await runAssistant([{ role: 'user', content: text }], { slack: true });
+    const { reply } = await runAssistant([{ role: 'user', content: text }], { slack: true, userEmail: `slack:${ev.user || 'unknown'}` });
     await slackPost(conn.config.bot_token, ev.channel, reply, ev.thread_ts || ev.ts);
   } catch (e) {
     console.error('slack assistant error:', e.message);
