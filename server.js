@@ -183,7 +183,8 @@ const CONNECTOR_TYPES = {
     label: 'Shopify store',
     fields: [
       { key: 'store_domain', label: 'Store subdomain, e.g. "clicks-tech" for clicks-tech.myshopify.com', secret: false },
-      { key: 'admin_token', label: 'Admin API access token starting shpat_ (Settings → Apps → Develop apps → your app → API credentials). Needs read_orders + read_products scopes.', secret: true }
+      { key: 'client_id', label: 'App Client ID (dev.shopify.com → your app → Settings)', secret: false },
+      { key: 'client_secret', label: 'App Client Secret (same page — rotate it first if it was ever shared in chat/email)', secret: true }
     ]
   }
 };
@@ -505,9 +506,32 @@ app.post('/api/gorgias/sync', async (_req, res) => {
 
 // ---------- Shopify (orders sync, same pattern as Gorgias) ----------
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-01';
+
+// 2026 flow: apps are created in the Dev Dashboard; the server exchanges client_id/client_secret
+// for a 24h access token (client credentials grant) and refreshes it automatically.
+const shopifyTokenCache = {};
+async function getShopifyToken(cfg) {
+  if (cfg.admin_token) return cfg.admin_token; // legacy custom-app tokens still honored
+  const k = `${cfg.store_domain}:${cfg.client_id}`;
+  const c = shopifyTokenCache[k];
+  if (c && Date.now() < c.exp - 5 * 60 * 1000) return c.token;
+  const r = await fetch(`https://${cfg.store_domain}.myshopify.com/admin/oauth/access_token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'client_credentials', client_id: cfg.client_id, client_secret: cfg.client_secret })
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.access_token) {
+    throw new Error(`Shopify token exchange failed (${r.status}): ${j.error_description || j.error || 'check client ID/secret and that the app is installed on this store'}`);
+  }
+  shopifyTokenCache[k] = { token: j.access_token, exp: Date.now() + (j.expires_in || 86399) * 1000 };
+  return j.access_token;
+}
+
 async function shopifyRequest(cfg, pathAndQuery) {
+  const token = await getShopifyToken(cfg);
   const r = await fetch(`https://${cfg.store_domain}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}${pathAndQuery}`, {
-    headers: { 'X-Shopify-Access-Token': cfg.admin_token, Accept: 'application/json' }
+    headers: { 'X-Shopify-Access-Token': token, Accept: 'application/json' }
   });
   if (!r.ok) throw new Error(`Shopify ${pathAndQuery.split('?')[0]} → ${r.status}`);
   const link = r.headers.get('link') || '';
