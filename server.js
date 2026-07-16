@@ -646,6 +646,35 @@ async function syncShopify(maxPages = 8) {
   return { configured: true, pages, upserts, backfill_done: !!st.backfill_done, error: lastError };
 }
 
+app.get('/api/shopify/summary', async (_req, res) => {
+  try {
+    const conn = await getConnector('shopify');
+    const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || null;
+    const has = (await pool.query('SELECT 1 FROM orders_cache LIMIT 1')).rows.length > 0;
+    if (!has) return res.json({ configured: !!conn, empty: true, sync: ss });
+    const [tot, countries, products, recent] = await Promise.all([
+      pool.query(`SELECT count(*) FILTER (WHERE cancelled_at IS NULL)::int orders,
+        round(sum(total_price) FILTER (WHERE cancelled_at IS NULL))::int revenue,
+        count(*) FILTER (WHERE cancelled_at IS NOT NULL)::int cancelled,
+        count(*) FILTER (WHERE financial_status IN ('refunded','partially_refunded'))::int refunded,
+        count(*) FILTER (WHERE fulfillment_status='fulfilled' AND cancelled_at IS NULL)::int fulfilled,
+        count(*) FILTER (WHERE fulfillment_status<>'fulfilled' AND cancelled_at IS NULL)::int unfulfilled,
+        max(currency) currency
+        FROM orders_cache WHERE created_at >= now()-interval '30 days'`),
+      pool.query(`SELECT country, round(sum(total_price))::int revenue, count(*)::int orders
+        FROM orders_cache WHERE created_at >= now()-interval '30 days' AND cancelled_at IS NULL AND country <> ''
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 6`),
+      pool.query(`SELECT it->>'title' product, sum(coalesce((it->>'qty')::int,0))::int qty
+        FROM orders_cache, LATERAL jsonb_array_elements(items) it
+        WHERE created_at >= now()-interval '30 days' AND cancelled_at IS NULL
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 6`),
+      pool.query(`SELECT order_number, created_at::date d, country, total_price, currency, financial_status, fulfillment_status,
+        (cancelled_at IS NOT NULL) cancelled FROM orders_cache ORDER BY created_at DESC LIMIT 12`)
+    ]);
+    res.json({ configured: true, totals_30d: tot.rows[0], top_countries: countries.rows, top_products: products.rows, recent: recent.rows, sync: ss });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/shopify/sync', async (_req, res) => {
   try { res.json(await syncShopify(30)); }
   catch (e) { res.status(502).json({ error: e.message }); }

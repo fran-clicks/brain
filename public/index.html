@@ -144,7 +144,7 @@ footer{color:rgba(16,17,20,.45)}
 
 <nav>
   <button data-s="home" class="active">🏠 Overview</button>
-  <button data-s="sales">📈 Sales &amp; Dates</button>
+  <button data-s="sales">🛒 Shopify</button>
   <button data-s="gorgias">🎧 Gorgias Stats</button>
   <button data-s="kb">💡 Knowledge Bases</button>
   <button data-s="conn" title="Connectors" style="font-size:16px;padding:8px 16px;font-weight:800">＋</button>
@@ -192,22 +192,23 @@ footer{color:rgba(16,17,20,.45)}
   </div>
 </div>
 
-<!-- SALES & DATES -->
+<!-- SHOPIFY -->
 <div class="section" id="s-sales">
-  <div class="card">
-    <h2>Sales</h2>
-    <div class="note">No sales source connected yet — once your store/sales platform is added as a connector, sales, deliveries and refunds will appear here and on the Overview page.</div>
+  <div class="grid kpis" id="shopKpis"></div>
+  <div class="grid two" style="margin-top:14px">
+    <div class="card">
+      <h2>Top countries (30d)</h2>
+      <table id="shopCountries"><thead><tr><th>Country</th><th>Revenue</th><th>Orders</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Top products (30d)</h2>
+      <table id="shopProducts"><thead><tr><th>Product</th><th>Units</th></tr></thead><tbody></tbody></table>
+    </div>
   </div>
   <div class="card">
-    <h2>Key dates</h2>
-    <table id="datesTable"><thead><tr><th>Date</th><th>Event</th><th>Source</th></tr></thead><tbody></tbody></table>
-    <div class="grid two" style="margin-top:8px">
-      <div><label>Date</label><input type="date" id="dDate"></div>
-      <div><label>Event</label><input id="dEvent"></div>
-    </div>
-    <label>Source</label><input id="dSource">
-    <button class="btn" onclick="addDate()">Import</button>
-    <div class="err" id="dErr"></div>
+    <h2>Recent orders <button class="btn" style="float:right;margin:0;padding:5px 12px" id="shopSyncBtn" onclick="shopSync()">🔄 Sync now</button></h2>
+    <table id="shopRecent"><thead><tr><th>Order</th><th>Date</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th></tr></thead><tbody></tbody></table>
+    <div class="note" id="shopNote">Loading Shopify data…</div>
   </div>
 </div>
 
@@ -523,24 +524,47 @@ async function addEvent() {
   } catch (e) { el('eErr').textContent = e.message; }
 }
 
-// ---------- dates ----------
-async function loadDates() {
-  const dates = await api('/api/dates');
-  document.querySelector('#datesTable tbody').innerHTML = dates.length ? dates.map(d =>
-    `<tr><td><span class="tag date">${esc(String(d.date).slice(0,10))}</span></td><td>${esc(d.event)}</td><td><span class="tag src">${esc(d.source)}</span></td></tr>`).join('')
-    : '<tr><td colspan="3" class="empty">No dates yet</td></tr>';
-}
-async function addDate() {
-  const el = id => document.getElementById(id);
-  el('dErr').textContent = '';
+// ---------- shopify tab ----------
+async function loadShopify() {
+  const note = document.getElementById('shopNote');
   try {
-    await api('/api/dates', {method:'POST', body: JSON.stringify({
-      date: el('dDate').value, event: el('dEvent').value.trim(),
-      source: el('dSource').value.trim() || 'manual import'
-    })});
-    el('dEvent').value = ''; el('dSource').value = '';
-    loadDates();
-  } catch (e) { el('dErr').textContent = e.message; }
+    const s = await api('/api/shopify/summary');
+    if (s.empty || !s.configured) {
+      note.textContent = !s.configured
+        ? 'Shopify is not connected yet — an admin can add it on the ＋ page.'
+        : 'Connected — waiting for the first orders to sync' + (s.sync?.last_error ? ` (⚠️ ${s.sync.last_error})` : '…');
+      return;
+    }
+    const t = s.totals_30d;
+    document.getElementById('shopKpis').innerHTML = [
+      {l:'Revenue (30d)', v:`${(t.revenue ?? 0).toLocaleString()} ${t.currency || ''}`},
+      {l:'Orders (30d)', v:t.orders},
+      {l:'Fulfilled', v:t.fulfilled},
+      {l:'Awaiting fulfillment', v:t.unfulfilled},
+      {l:'Cancelled (30d)', v:t.cancelled},
+      {l:'Refunded (30d)', v:t.refunded}
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    document.querySelector('#shopCountries tbody').innerHTML = s.top_countries.map(c =>
+      `<tr><td><b>${esc(c.country)}</b></td><td>${(c.revenue ?? 0).toLocaleString()}</td><td>${c.orders}</td></tr>`).join('') || '<tr><td colspan="3" class="empty">—</td></tr>';
+    document.querySelector('#shopProducts tbody').innerHTML = s.top_products.map(p =>
+      `<tr><td>${esc(p.product)}</td><td>${p.qty}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
+    document.querySelector('#shopRecent tbody').innerHTML = s.recent.map(o =>
+      `<tr${o.cancelled ? ' style="opacity:.5"' : ''}><td><b>${esc(o.order_number)}</b>${o.cancelled ? ' <span class="tag src">cancelled</span>' : ''}</td>
+       <td>${esc(String(o.d).slice(0,10))}</td><td>${esc(o.country)}</td><td>${(+o.total_price).toLocaleString()} ${esc(o.currency)}</td>
+       <td><span class="tag ${o.financial_status === 'paid' ? 'approved' : 'pending'}">${esc(o.financial_status)}</span></td>
+       <td><span class="tag ${o.fulfillment_status === 'fulfilled' ? 'approved' : 'pending'}">${esc(o.fulfillment_status)}</span></td></tr>`).join('');
+    note.textContent = s.sync
+      ? `Synced from Shopify · last run ${new Date(s.sync.last_run).toLocaleString()} · ${s.sync.cached ?? '?'} orders cached`
+        + (s.sync.backfill_done ? '' : ' · ⏳ history backfill in progress') + (s.sync.last_error ? ` · ⚠️ ${s.sync.last_error}` : '')
+      : '';
+  } catch (e) { note.textContent = 'Shopify error: ' + e.message; }
+}
+async function shopSync() {
+  const b = document.getElementById('shopSyncBtn');
+  b.disabled = true; b.textContent = '⏳ Syncing…';
+  try { await api('/api/shopify/sync', {method:'POST', body:'{}'}); loadShopify(); loadOverview(); }
+  catch (e) { document.getElementById('shopNote').textContent = '⚠️ ' + e.message; }
+  finally { b.disabled = false; b.textContent = '🔄 Sync now'; }
 }
 
 // ---------- gorgias live tab ----------
@@ -783,7 +807,7 @@ api('/api/auth/me').then(m => {
   }
 }).catch(() => {});
 
-loadOverview(); loadEvents(); loadDates(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors(); loadRequests();
+loadOverview(); loadEvents(); loadShopify(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors(); loadRequests();
 </script>
 </body>
 </html>
