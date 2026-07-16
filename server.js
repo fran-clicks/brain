@@ -303,8 +303,8 @@ app.post('/api/connectors', async (req, res) => {
       if (!t.ok) throw new Error(`Slack auth.test: ${t.error}`);
       meta = { team: t.team, bot: t.user };
     } else if (type === 'shopify') {
-      const shop = await shopifyRequest(config, '/shop.json');
-      meta = { store: shop.data?.shop?.name || config.store_domain, domain: config.store_domain };
+      const d = await shopifyGraphql(config, 'query { shop { name } }');
+      meta = { store: d?.shop?.name || config.store_domain, domain: config.store_domain };
     } else {
       // dynamic connector: store credentials now, integration wired later.
       // Non-secret fields go into visible meta; secrets never do.
@@ -562,15 +562,57 @@ async function getShopifyToken(cfg) {
   return j.access_token;
 }
 
-async function shopifyRequest(cfg, pathAndQuery) {
+// GraphQL Admin API — REST is unavailable to apps created after Shopify's 2025/2026 cutoff
+async function shopifyGraphql(cfg, query, variables = {}) {
   const token = await getShopifyToken(cfg);
-  const r = await fetch(`https://${cfg.store_domain}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}${pathAndQuery}`, {
-    headers: { 'X-Shopify-Access-Token': token, Accept: 'application/json' }
+  const r = await fetch(`https://${cfg.store_domain}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+    method: 'POST',
+    headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, variables })
   });
-  if (!r.ok) throw new Error(`Shopify ${pathAndQuery.split('?')[0]} → ${r.status}`);
-  const link = r.headers.get('link') || '';
-  const next = link.match(/<[^>]*[?&]page_info=([^&>]+)[^>]*>;\s*rel="next"/)?.[1] || null;
-  return { data: await r.json(), next };
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Shopify GraphQL → ${r.status}`);
+  if (j.errors?.length) throw new Error(`Shopify GraphQL: ${j.errors.map(e => e.message).join('; ').slice(0, 300)}`);
+  return j.data;
+}
+
+const ORDERS_QUERY = `
+query Orders($cursor: String, $q: String, $sortKey: OrderSortKeys!) {
+  orders(first: 50, after: $cursor, query: $q, sortKey: $sortKey, reverse: true) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      legacyResourceId name createdAt updatedAt cancelledAt
+      currencyCode
+      totalPriceSet { shopMoney { amount } }
+      displayFinancialStatus displayFulfillmentStatus
+      shippingAddress { countryCodeV2 }
+      lineItems(first: 20) { nodes { title sku quantity } }
+    }
+  }
+}`;
+
+function normalizeOrder(n) {
+  return {
+    id: Number(n.legacyResourceId),
+    name: n.name || '',
+    created_at: n.createdAt || null,
+    cancelled_at: n.cancelledAt || null,
+    updated_at: n.updatedAt || null,
+    currency: n.currencyCode || '',
+    total_price: n.totalPriceSet?.shopMoney?.amount || 0,
+    country: n.shippingAddress?.countryCodeV2 || '',
+    financial_status: (n.displayFinancialStatus || '').toLowerCase(),
+    fulfillment_status: (n.displayFulfillmentStatus || 'unfulfilled').toLowerCase(),
+    line_items: (n.lineItems?.nodes || []).map(li => ({ title: li.title, sku: li.sku, quantity: li.quantity }))
+  };
+}
+
+async function fetchOrdersPage(cfg, { cursor = null, q = null, sortKey = 'UPDATED_AT' } = {}) {
+  const d = await shopifyGraphql(cfg, ORDERS_QUERY, { cursor, q, sortKey });
+  return {
+    orders: (d.orders?.nodes || []).map(normalizeOrder),
+    next: d.orders?.pageInfo?.hasNextPage ? d.orders.pageInfo.endCursor : null
+  };
 }
 
 let shopifySyncRunning = false;
@@ -593,7 +635,7 @@ async function syncShopify(maxPages = 8) {
            total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, updated_at=$11, synced_at=now()`,
         [o.id, o.name || '', o.created_at || null, o.cancelled_at || null, o.currency || '',
          Number(o.total_price) || 0,
-         o.shipping_address?.country_code || o.billing_address?.country_code || '',
+         o.country || '',
          o.financial_status || '', o.fulfillment_status || 'unfulfilled',
          JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity }))),
          o.updated_at || null]);
@@ -602,28 +644,29 @@ async function syncShopify(maxPages = 8) {
   };
 
   try {
-    // incremental: everything updated since last run
+    // incremental: everything updated since last run (UPDATED_AT desc, stop when older than last sync)
     if (st.last_updated) {
-      let q = `/orders.json?status=any&limit=250&updated_at_min=${encodeURIComponent(st.last_updated)}`;
-      let newestSeen = st.last_updated;
-      while (pages < maxPages && q) {
-        const { data, next } = await shopifyRequest(cfg, q);
-        const orders = data.orders || [];
+      const lastUpd = Date.parse(st.last_updated);
+      let cursor = null, newest = null, done = false;
+      while (pages < maxPages && !done) {
+        const { orders, next } = await fetchOrdersPage(cfg, { cursor, sortKey: 'UPDATED_AT' });
         if (!orders.length) break;
         await upsertOrders(orders);
-        orders.forEach(o => { if (o.updated_at > newestSeen) newestSeen = o.updated_at; });
+        if (!newest) newest = orders[0]?.updated_at || null;
         pages++;
-        q = next ? `/orders.json?limit=250&page_info=${encodeURIComponent(next)}` : null;
+        const oldest = orders[orders.length - 1]?.updated_at;
+        cursor = next;
+        if (!cursor || (oldest && Date.parse(oldest) < lastUpd)) done = true;
       }
-      st.last_updated = newestSeen;
+      if (newest) st.last_updated = newest;
     }
-    // backfill: full history to the horizon, resumable
+    // backfill: CREATED_AT desc within the horizon, resumable across runs
     while (!st.backfill_done && pages < maxPages) {
-      const q = st.backfill_cursor
-        ? `/orders.json?limit=250&page_info=${encodeURIComponent(st.backfill_cursor)}`
-        : `/orders.json?status=any&limit=250&created_at_min=${encodeURIComponent(horizonIso)}&order=created_at+desc`;
-      const { data, next } = await shopifyRequest(cfg, q);
-      const orders = data.orders || [];
+      const { orders, next } = await fetchOrdersPage(cfg, {
+        cursor: st.backfill_cursor || null,
+        q: `created_at:>='${horizonIso}'`,
+        sortKey: 'CREATED_AT'
+      });
       if (!orders.length) { st.backfill_done = true; break; }
       await upsertOrders(orders);
       pages++;
