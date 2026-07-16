@@ -1032,7 +1032,12 @@ app.get('/api/health', (_req, res) => res.json({ ok: true }));
 const PORT = process.env.PORT || 3000;
 initDb()
   .then(() => {
-    app.listen(PORT, () => console.log(`clicks brain on :${PORT}`));
+    app.listen(PORT, () => {
+      console.log(`clicks brain on :${PORT}`);
+      console.log('env check — ADMIN_PASSWORD set:', !!process.env.ADMIN_PASSWORD,
+        '| DASHBOARD_PASSWORD set:', !!process.env.DASHBOARD_PASSWORD,
+        '| ENCRYPTION_KEY set:', !!process.env.ENCRYPTION_KEY);
+    });
     bootSync().catch(e => console.error('boot sync:', e.message));
   })
   .catch((e) => { console.error('DB init failed:', e); process.exit(1); });
