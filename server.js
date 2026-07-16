@@ -623,6 +623,9 @@ async function syncShopify(maxPages = 8) {
   const cfg = conn.config;
   shopifySyncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || {};
+  if (st.engine !== 'graphql') { // one-time reset: cursors from the old REST engine are incompatible
+    st.engine = 'graphql'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
+  }
   let pages = 0, upserts = 0, lastError = null;
   const horizonIso = new Date(Date.now() - BACKFILL_HORIZON_DAYS * 864e5).toISOString();
 
