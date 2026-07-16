@@ -572,7 +572,14 @@ async function shopifyGraphql(cfg, query, variables = {}) {
   });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(`Shopify GraphQL → ${r.status}`);
-  if (j.errors?.length) throw new Error(`Shopify GraphQL: ${j.errors.map(e => e.message).join('; ').slice(0, 300)}`);
+  if (j.errors?.length) {
+    const msg = j.errors.map(e => e.message).join('; ').slice(0, 300);
+    if (/access denied/i.test(msg)) {
+      // scopes may have just changed — drop the cached token so the next call gets a fresh one
+      delete shopifyTokenCache[`${cfg.store_domain}:${cfg.client_id}`];
+    }
+    throw new Error(`Shopify GraphQL: ${msg}`);
+  }
   return j.data;
 }
 
