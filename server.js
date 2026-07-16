@@ -13,19 +13,76 @@ const { Pool } = require('pg');
 const app = express();
 app.use(express.json({ limit: '8mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
-// ---------- optional site-wide protection ----------
-// /api/slack/* is exempt (Slack signs its own requests); /api/health is exempt for Render's health checker.
-const SITE_PW = process.env.DASHBOARD_PASSWORD;
-if (SITE_PW) {
-  app.use((req, res, next) => {
-    if (req.path.startsWith('/api/slack/') || req.path === '/api/health') return next();
-    const [, b64] = (req.headers.authorization || '').split(' ');
-    const pw = b64 ? Buffer.from(b64, 'base64').toString().split(':').slice(1).join(':') : '';
-    if (pw === SITE_PW) return next();
-    res.set('WWW-Authenticate', 'Basic realm="clicks brain"').status(401).send('Auth required');
-  });
-}
+// ---------- session auth (per-user login) ----------
+// Exempt: Slack (signs its own requests), health checks, the login page and auth endpoints.
+const AUTH_EXEMPT = (p) =>
+  p.startsWith('/api/slack/') || p === '/api/health' || p === '/login.html' || p.startsWith('/api/auth/');
+
+const sessionSign = (s) => crypto.createHmac('sha256', KEY).update('session:' + s).digest('base64url');
+const makeSession = (email) => {
+  const body = `${email}|${Date.now() + 7 * 864e5}`; // 7 days
+  return Buffer.from(body).toString('base64url') + '.' + sessionSign(body);
+};
+const readSession = (req) => {
+  const raw = (req.headers.cookie || '').split(';').map(s => s.trim())
+    .find(s => s.startsWith('cb_session='))?.slice('cb_session='.length);
+  if (!raw) return null;
+  const [b64, sig] = raw.split('.');
+  if (!b64 || !sig) return null;
+  const body = Buffer.from(b64, 'base64url').toString();
+  const a = Buffer.from(sessionSign(body)), b = Buffer.from(sig);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  const [email, exp] = body.split('|');
+  return Date.now() < +exp ? email : null;
+};
+const setSessionCookie = (res, email) =>
+  res.set('Set-Cookie', `cb_session=${makeSession(email)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${7 * 86400}`);
+
+app.use((req, res, next) => {
+  if (AUTH_EXEMPT(req.path)) return next();
+  const email = readSession(req);
+  if (email) { req.userEmail = email; return next(); }
+  if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'not signed in' });
+  res.redirect('/login.html');
+});
 app.use(express.static(path.join(__dirname, 'public')));
+
+const ALLOWED_USERS = ['fran@clicks.tech', 'kp@clicks.tech'];
+const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 64).toString('hex');
+
+app.post('/api/auth/setup', async (req, res) => {
+  const { email, password, invite_code } = req.body || {};
+  const invite = process.env.ADMIN_PASSWORD || process.env.DASHBOARD_PASSWORD;
+  if (!invite) return res.status(400).json({ error: 'No ADMIN_PASSWORD set on the server — set it in Render → Environment first.' });
+  if (invite_code !== invite) return res.status(403).json({ error: 'Wrong invite code.' });
+  const em = String(email || '').toLowerCase().trim();
+  const u = (await pool.query('SELECT * FROM users WHERE email=$1', [em])).rows[0];
+  if (!u) return res.status(403).json({ error: 'This email is not on the member list.' });
+  if (u.pass_hash) return res.status(409).json({ error: 'Password already set — use Sign in.' });
+  if (String(password || '').length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  const salt = crypto.randomBytes(16).toString('hex');
+  await pool.query('UPDATE users SET pass_hash=$1 WHERE email=$2', [`${salt}:${hashPw(password, salt)}`, em]);
+  setSessionCookie(res, em);
+  res.json({ ok: true, email: em });
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const em = String(req.body?.email || '').toLowerCase().trim();
+  const u = (await pool.query('SELECT * FROM users WHERE email=$1', [em])).rows[0];
+  if (!u?.pass_hash) return res.status(403).json({ error: u ? 'No password set yet — use First time? below.' : 'Unknown email.' });
+  const [salt, hash] = u.pass_hash.split(':');
+  const a = Buffer.from(hashPw(String(req.body?.password || ''), salt)), b = Buffer.from(hash);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(403).json({ error: 'Wrong password.' });
+  setSessionCookie(res, em);
+  res.json({ ok: true, email: em });
+});
+
+app.post('/api/auth/logout', (_req, res) => {
+  res.set('Set-Cookie', 'cb_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0');
+  res.json({ ok: true });
+});
+
+app.get('/api/auth/me', (req, res) => res.json({ email: readSession(req) }));
 
 // ---------- Postgres ----------
 const pool = new Pool({
@@ -74,7 +131,12 @@ async function initDb() {
     ALTER TABLE connectors ADD COLUMN IF NOT EXISTS approval_status TEXT DEFAULT 'approved';
     ALTER TABLE connectors ADD COLUMN IF NOT EXISTS approved_by TEXT;
     ALTER TABLE connectors ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
+    CREATE TABLE IF NOT EXISTS users (
+      email TEXT PRIMARY KEY, pass_hash TEXT, created_at TIMESTAMPTZ DEFAULT now());
   `);
+  for (const em of ['fran@clicks.tech', 'kp@clicks.tech']) {
+    await pool.query('INSERT INTO users (email) VALUES ($1) ON CONFLICT (email) DO NOTHING', [em]);
+  }
 }
 
 // ---------- crypto ----------
@@ -855,7 +917,8 @@ House rules:
 - Connector types currently in the dropdown: ${JSON.stringify(Object.fromEntries(Object.entries(knownTypes).map(([k, v]) => [k, { label: v.label, fields: v.fields.map(f => f.key), dynamic: !!v.dynamic }])))}.
 - Active connectors right now: ${JSON.stringify(conns.rows)}.
 - Team events (campaigns, launches) are logged on the Overview tab with optional attachments and appear as 📌 markers on charts to show their influence.
-Adding NEW kinds of connectors is a core part of your job. When a member wants to connect something not in the dropdown (Shopify, Klaviyo, a shipping provider, a custom internal API...):
+Adding NEW kinds of connectors is a core part of your job. When a member wants to connect something not in the dropdown (Klaviyo, a shipping provider, a custom internal API...):
+0. FIRST, remind them briefly: share only the IDEA and the REASON in chat — never keys, tokens or passwords. Credentials go exclusively into the encrypted form.
 1. Ask what service it is and what data they want from it.
 2. Work out what its API needs for server-to-server auth (base URL/store domain, API key/token, account id...). Ask if unsure — the member may need to check with whoever admins that service.
 3. Call create_connector_type with clear field labels that say exactly where to find each value. Mark every credential secret:true.

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign in · Clicks Brain</title>
+<style>
+:root{color-scheme:light;--yellow:#ffc800;--ink:#101114;--muted:#5f6368}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  min-height:100vh;display:flex;align-items:center;justify-content:center;
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--ink);
+  background:
+    radial-gradient(700px 460px at 88% -8%, rgba(255,200,0,.28), transparent 62%),
+    radial-gradient(560px 400px at -8% 34%, rgba(255,200,0,.14), transparent 60%),
+    linear-gradient(180deg,#f7f7f8,#ececef);
+}
+.card{
+  width:min(380px,92vw);padding:28px;border-radius:20px;
+  background:rgba(255,255,255,.62);backdrop-filter:blur(18px) saturate(1.6);-webkit-backdrop-filter:blur(18px) saturate(1.6);
+  border:1px solid rgba(255,255,255,.65);
+  box-shadow:0 8px 28px rgba(16,17,20,.12), inset 0 1px 0 rgba(255,255,255,.85);
+}
+h1{font-size:20px;font-weight:800;letter-spacing:-.02em;margin-bottom:4px}
+h1 span{background:var(--yellow);padding:1px 10px;border-radius:999px}
+p{color:var(--muted);font-size:13px;margin-bottom:16px}
+label{font-size:12px;font-weight:600;color:var(--muted);display:block;margin:12px 0 4px}
+input{width:100%;border:1px solid rgba(16,17,20,.12);border-radius:10px;padding:11px 13px;font:inherit;background:rgba(255,255,255,.72)}
+input:focus{outline:none;border-color:#f0b400;box-shadow:0 0 0 3px rgba(255,200,0,.18)}
+button{
+  width:100%;margin-top:18px;padding:12px;border-radius:12px;font-weight:700;font-size:14px;cursor:pointer;
+  background:linear-gradient(180deg,#ffd83e,var(--yellow));color:var(--ink);border:1px solid rgba(16,17,20,.15);
+  box-shadow:0 3px 0 rgba(16,17,20,.28), inset 0 1px 0 rgba(255,255,255,.7);
+}
+button:active{transform:translateY(2px);box-shadow:0 1px 0 rgba(16,17,20,.28)}
+.err{color:#dc2626;font-size:12px;margin-top:10px;min-height:16px}
+.toggle{margin-top:14px;text-align:center;font-size:12px}
+.toggle a{color:#8a6800;font-weight:600;cursor:pointer}
+#setupFields{display:none}
+footer{margin-top:16px;font-size:11px;color:var(--muted);text-align:center}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🧠 clicks <span>brain</span></h1>
+  <p id="mode-label">Sign in with your member account.</p>
+  <label>Email</label><input id="email" type="email" autocomplete="username" placeholder="you@clicks.tech">
+  <label>Password</label><input id="password" type="password" autocomplete="current-password">
+  <div id="setupFields">
+    <label>Invite code (ask an admin)</label><input id="invite" type="password" autocomplete="off">
+  </div>
+  <button onclick="go()" id="goBtn">Sign in</button>
+  <div class="err" id="err"></div>
+  <div class="toggle"><a onclick="toggleMode()" id="toggleLink">First time? Set your password</a></div>
+  <footer>internal use only · credentials are never shared with or by the brain</footer>
+</div>
+<script>
+let setup = false;
+function toggleMode() {
+  setup = !setup;
+  document.getElementById('setupFields').style.display = setup ? 'block' : 'none';
+  document.getElementById('goBtn').textContent = setup ? 'Set password & sign in' : 'Sign in';
+  document.getElementById('mode-label').textContent = setup
+    ? 'First login: choose a password (min 8 chars). You need the invite code from an admin.'
+    : 'Sign in with your member account.';
+  document.getElementById('toggleLink').textContent = setup ? '← Back to sign in' : 'First time? Set your password';
+  document.getElementById('err').textContent = '';
+}
+async function go() {
+  const el = id => document.getElementById(id);
+  el('err').textContent = '';
+  try {
+    const r = await fetch(setup ? '/api/auth/setup' : '/api/auth/login', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        email: el('email').value.trim(), password: el('password').value,
+        ...(setup ? { invite_code: el('invite').value } : {})
+      })
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    location.href = '/';
+  } catch (e) { el('err').textContent = e.message; }
+}
+document.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+</script>
+</body>
+</html>

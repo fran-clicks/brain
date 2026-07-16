@@ -139,6 +139,7 @@ footer{color:rgba(16,17,20,.45)}
 <header>
   <h1><span style="background:#101114;border-radius:10px;padding:5px 10px;display:inline-flex;align-items:center;vertical-align:-6px"><img src="https://cdn.prod.website-files.com/66f575e72f06b9820f448d43/66fbda43f42a9d6f770bbae4_clicks-logo.svg" alt="clicks" style="height:18px" onerror="this.outerHTML='<b style=&quot;color:#ffc800&quot;>clicks</b>'"></span> <span>brain</span></h1>
   <span class="badge">🔒 Internal · data flows in from sources · fix errors at the source, not here</span>
+  <span class="badge" id="whoami" style="cursor:pointer" title="Click to sign out"></span>
 </header>
 
 <nav>
@@ -731,6 +732,15 @@ async function aiSend() {
   } catch (e) { thinking.textContent = '⚠️ ' + e.message; }
   finally { aiBusy = false; }
 }
+
+// signed-in identity + sign out
+api('/api/auth/me').then(m => {
+  const w = document.getElementById('whoami');
+  if (m.email) {
+    w.textContent = `👤 ${m.email} · sign out`;
+    w.onclick = async () => { await api('/api/auth/logout', {method:'POST', body:'{}'}); location.href = '/login.html'; };
+  }
+}).catch(() => {});
 
 loadOverview(); loadEvents(); loadDates(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors();
 </script>
