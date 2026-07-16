@@ -641,9 +641,12 @@ async function overviewStats(days) {
                 WHERE event_date >= (now()-$1::interval)::date ORDER BY event_date`, params),
     pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)
   ]);
-  const [salesSeries, salesTotals, shopifySt] = await Promise.all([
-    pool.query(`SELECT date_trunc('${bucket}', created_at)::date d, count(*)::int orders, round(sum(total_price))::int revenue
+  const [salesSeries, cancelSeries, salesTotals, shopifySt] = await Promise.all([
+    pool.query(`SELECT date_trunc('${bucket}', created_at)::date d, count(*)::int orders, round(sum(total_price))::int revenue,
+                count(*) FILTER (WHERE financial_status IN ('refunded','partially_refunded'))::int refunded
                 FROM orders_cache WHERE created_at >= now()-$1::interval AND cancelled_at IS NULL GROUP BY 1 ORDER BY 1`, params),
+    pool.query(`SELECT date_trunc('${bucket}', cancelled_at)::date d, count(*)::int c
+                FROM orders_cache WHERE cancelled_at >= now()-$1::interval GROUP BY 1 ORDER BY 1`, params),
     pool.query(`SELECT count(*) FILTER (WHERE cancelled_at IS NULL)::int orders,
                 round(sum(total_price) FILTER (WHERE cancelled_at IS NULL))::int revenue,
                 count(*) FILTER (WHERE cancelled_at IS NOT NULL)::int cancelled,
@@ -665,7 +668,7 @@ async function overviewStats(days) {
       },
       totals: totals.rows[0]
     },
-    sales: hasSales ? { series: salesSeries.rows, totals: salesTotals.rows[0], sync: shopifySt.rows[0]?.v || null } : null,
+    sales: hasSales ? { series: salesSeries.rows, cancel_series: cancelSeries.rows, totals: salesTotals.rows[0], sync: shopifySt.rows[0]?.v || null } : null,
     events: events.rows,
     last_sync: st.rows[0]?.v?.last_run || null,
     sync: st.rows[0]?.v || null

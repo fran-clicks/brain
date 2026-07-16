@@ -400,7 +400,10 @@ async function loadOverview() {
     if (s.sales?.series?.length) {
       const rev = Object.fromEntries(s.sales.series.map(r => [String(r.d).slice(0,10), r.revenue]));
       datasets.push({label:'Sales', data:m.labels.map(l => rev[l] ?? 0), borderColor:'#2563eb',
-        borderDash:[6,4], tension:.25, pointRadius:3, pointHoverRadius:6, yAxisID:'y1'});
+        backgroundColor:'rgba(37,99,235,.08)', fill:true, borderDash:[6,4], tension:.25, pointRadius:3, pointHoverRadius:6, yAxisID:'y1'});
+      const canc = Object.fromEntries((s.sales.cancel_series || []).map(r => [String(r.d).slice(0,10), r.c]));
+      datasets.push({label:'Cancelled orders', data:m.labels.map(l => canc[l] ?? 0), borderColor:'#7c3aed',
+        tension:.25, pointRadius:3, pointHoverRadius:6});
     }
     homeChart = new Chart(document.getElementById('homeChart'), {
       type: 'line',
@@ -422,8 +425,9 @@ async function loadOverview() {
                 const it = items[0];
                 if (it.dataset.label === 'Sales') {
                   const o = (s.sales?.series || []).find(r => String(r.d).slice(0,10) === it.label);
-                  return o ? [`${o.orders} orders`] : '';
+                  return o ? [`${o.orders} orders`, ...(o.refunded ? [`${o.refunded} refunded`] : [])] : '';
                 }
+                if (it.dataset.label === 'Cancelled orders') return '';
                 const b = bdByDataset[it.datasetIndex]?.[it.label];
                 if (!b) return '';
                 const lines = [];
