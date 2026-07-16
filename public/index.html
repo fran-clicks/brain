@@ -374,12 +374,14 @@ async function loadOverview() {
   try {
     const s = await api('/api/stats/overview?days=' + curDays);
     const t = s.tickets.totals;
+    const sv = s.sales?.totals;
     document.getElementById('homeKpis').innerHTML = [
       {l:`Tickets created (${curDays}d)`, v:t.created},
       {l:`Tickets closed (${curDays}d)`, v:t.closed},
-      {l:`Cancel/refund tickets (${curDays}d)`, v:t.cancel_refund},
       {l:'Open now (synced)', v:t.open},
-      {l:`Sales (${curDays}d)`, v:'—'},
+      {l:`Sales (${curDays}d)`, v: sv ? `${(sv.revenue ?? 0).toLocaleString()} ${sv.currency || ''}` : '—'},
+      {l:`Orders (${curDays}d)`, v: sv ? sv.orders : '—'},
+      {l:`Cancelled / refunded (${curDays}d)`, v: sv ? `${sv.cancelled} / ${sv.refunded}` : t.cancel_refund + ' tickets'},
       {l:`Events (${curDays}d)`, v:s.events.length}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
     const m = mergeSeries(s.tickets.series);
@@ -389,13 +391,19 @@ async function loadOverview() {
       buildBreakdownMap(s.tickets.breakdowns?.closed)
     ];
     if (homeChart) homeChart.destroy();
+    const datasets = [
+      {label:'Created', data:m.created, borderColor:'#101114', backgroundColor:'rgba(16,17,20,.06)', tension:.25, fill:true, pointRadius:3, pointHoverRadius:6},
+      {label:'Still open', data:m.open, borderColor:'#dc2626', tension:.25, pointRadius:3, pointHoverRadius:6},
+      {label:'Closed', data:m.closed, borderColor:'#f0b400', backgroundColor:'rgba(255,200,0,.15)', tension:.25, pointRadius:3, pointHoverRadius:6}
+    ];
+    if (s.sales?.series?.length) {
+      const rev = Object.fromEntries(s.sales.series.map(r => [String(r.d).slice(0,10), r.revenue]));
+      datasets.push({label:'Sales', data:m.labels.map(l => rev[l] ?? 0), borderColor:'#2563eb',
+        borderDash:[6,4], tension:.25, pointRadius:3, pointHoverRadius:6, yAxisID:'y1'});
+    }
     homeChart = new Chart(document.getElementById('homeChart'), {
       type: 'line',
-      data: { labels: m.labels, datasets: [
-        {label:'Created', data:m.created, borderColor:'#101114', backgroundColor:'rgba(16,17,20,.06)', tension:.25, fill:true, pointRadius:3, pointHoverRadius:6},
-        {label:'Still open', data:m.open, borderColor:'#dc2626', tension:.25, pointRadius:3, pointHoverRadius:6},
-        {label:'Closed', data:m.closed, borderColor:'#f0b400', backgroundColor:'rgba(255,200,0,.15)', tension:.25, pointRadius:3, pointHoverRadius:6}
-      ]},
+      data: { labels: m.labels, datasets },
       options: { responsive:true, maintainAspectRatio:false,
         interaction: { mode: 'nearest', intersect: true },
         plugins:{
@@ -411,6 +419,10 @@ async function loadOverview() {
               label(it) { return `${it.formattedValue} tickets`; },
               afterBody(items) {
                 const it = items[0];
+                if (it.dataset.label === 'Sales') {
+                  const o = (s.sales?.series || []).find(r => String(r.d).slice(0,10) === it.label);
+                  return o ? [`${o.orders} orders`] : '';
+                }
                 const b = bdByDataset[it.datasetIndex]?.[it.label];
                 if (!b) return '';
                 const lines = [];
@@ -423,7 +435,9 @@ async function loadOverview() {
             }
           }
         },
-        scales:{ y:{beginAtZero:true, ticks:{precision:0}} } }
+        scales:{ y:{beginAtZero:true, ticks:{precision:0}},
+                 y1:{display: !!s.sales, position:'right', beginAtZero:true, grid:{drawOnChartArea:false},
+                     ticks:{callback: v => v.toLocaleString()}} } }
     });
     document.getElementById('syncInfo').textContent = s.last_sync
       ? `· synced ${new Date(s.last_sync).toLocaleString()} · ${s.sync?.cached ?? '?'} tickets cached` : '';

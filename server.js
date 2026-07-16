@@ -61,6 +61,13 @@ async function initDb() {
       attachment_name TEXT, attachment_type TEXT, attachment_data TEXT,
       created_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS sync_state (k TEXT PRIMARY KEY, v JSONB NOT NULL DEFAULT '{}');
+    CREATE TABLE IF NOT EXISTS orders_cache (
+      shopify_id BIGINT PRIMARY KEY, order_number TEXT DEFAULT '',
+      created_at TIMESTAMPTZ, cancelled_at TIMESTAMPTZ,
+      currency TEXT DEFAULT '', total_price NUMERIC DEFAULT 0,
+      country TEXT DEFAULT '', financial_status TEXT DEFAULT '', fulfillment_status TEXT DEFAULT '',
+      items JSONB DEFAULT '[]', updated_at TIMESTAMPTZ, synced_at TIMESTAMPTZ DEFAULT now());
+    CREATE INDEX IF NOT EXISTS idx_oc_created ON orders_cache (created_at);
     CREATE TABLE IF NOT EXISTS connector_types (
       slug TEXT PRIMARY KEY, label TEXT NOT NULL, fields JSONB NOT NULL,
       notes TEXT DEFAULT '', created_by TEXT DEFAULT 'assistant', created_at TIMESTAMPTZ DEFAULT now());
@@ -108,6 +115,13 @@ const CONNECTOR_TYPES = {
     fields: [
       { key: 'bot_token', label: 'Bot User OAuth Token, starts with xoxb- (api.slack.com/apps → your app → OAuth & Permissions)', secret: true },
       { key: 'signing_secret', label: 'Signing Secret (api.slack.com/apps → your app → Basic Information)', secret: true }
+    ]
+  },
+  shopify: {
+    label: 'Shopify store',
+    fields: [
+      { key: 'store_domain', label: 'Store subdomain, e.g. "clicks-tech" for clicks-tech.myshopify.com', secret: false },
+      { key: 'admin_token', label: 'Admin API access token starting shpat_ (Settings → Apps → Develop apps → your app → API credentials). Needs read_orders + read_products scopes.', secret: true }
     ]
   }
 };
@@ -191,6 +205,9 @@ app.post('/api/connectors', async (req, res) => {
       })).json();
       if (!t.ok) throw new Error(`Slack auth.test: ${t.error}`);
       meta = { team: t.team, bot: t.user };
+    } else if (type === 'shopify') {
+      const shop = await shopifyRequest(config, '/shop.json');
+      meta = { store: shop.data?.shop?.name || config.store_domain, domain: config.store_domain };
     } else {
       // dynamic connector: store credentials now, integration wired later.
       // Non-secret fields go into visible meta; secrets never do.
@@ -207,6 +224,7 @@ app.post('/api/connectors', async (req, res) => {
      RETURNING id, type, name, meta, active, added_by, approval_status, created_at`,
     [type, name || def.label, encrypt(config), meta, added_by || 'anonymous', approval]);
   if (type === 'gorgias') syncGorgias(15).catch(e => console.error('initial sync:', e.message));
+  if (type === 'shopify') syncShopify(30).catch(e => console.error('initial shopify sync:', e.message));
   res.status(201).json(rows[0]);
 });
 
@@ -396,6 +414,16 @@ setInterval(async () => {
       await syncGorgias(8);
     }
   } catch (e) { console.error('interval sync:', e.message); }
+  try {
+    const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v;
+    const hasConn = await getConnector('shopify');
+    if (!hasConn) return;
+    if (!ss || !ss.backfill_done) {
+      await syncShopify(20);
+    } else if (!ss.last_run || Date.now() - Date.parse(ss.last_run) > 55 * 60 * 1000) {
+      await syncShopify(8);
+    }
+  } catch (e) { console.error('interval shopify sync:', e.message); }
 }, 5 * 60 * 1000);
 
 async function bootSync() {
@@ -410,6 +438,96 @@ async function bootSync() {
 
 app.post('/api/gorgias/sync', async (_req, res) => {
   try { res.json(await syncGorgias(50)); }
+  catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ---------- Shopify (orders sync, same pattern as Gorgias) ----------
+const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-01';
+async function shopifyRequest(cfg, pathAndQuery) {
+  const r = await fetch(`https://${cfg.store_domain}.myshopify.com/admin/api/${SHOPIFY_API_VERSION}${pathAndQuery}`, {
+    headers: { 'X-Shopify-Access-Token': cfg.admin_token, Accept: 'application/json' }
+  });
+  if (!r.ok) throw new Error(`Shopify ${pathAndQuery.split('?')[0]} → ${r.status}`);
+  const link = r.headers.get('link') || '';
+  const next = link.match(/<[^>]*[?&]page_info=([^&>]+)[^>]*>;\s*rel="next"/)?.[1] || null;
+  return { data: await r.json(), next };
+}
+
+let shopifySyncRunning = false;
+async function syncShopify(maxPages = 8) {
+  if (shopifySyncRunning) return { skipped: true };
+  const conn = await getConnector('shopify');
+  if (!conn) return { configured: false };
+  const cfg = conn.config;
+  shopifySyncRunning = true;
+  const st = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || {};
+  let pages = 0, upserts = 0, lastError = null;
+  const horizonIso = new Date(Date.now() - BACKFILL_HORIZON_DAYS * 864e5).toISOString();
+
+  const upsertOrders = async (orders) => {
+    for (const o of orders) {
+      await pool.query(
+        `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, updated_at, synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+         ON CONFLICT (shopify_id) DO UPDATE SET order_number=$2, created_at=$3, cancelled_at=$4, currency=$5,
+           total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, updated_at=$11, synced_at=now()`,
+        [o.id, o.name || '', o.created_at || null, o.cancelled_at || null, o.currency || '',
+         Number(o.total_price) || 0,
+         o.shipping_address?.country_code || o.billing_address?.country_code || '',
+         o.financial_status || '', o.fulfillment_status || 'unfulfilled',
+         JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity }))),
+         o.updated_at || null]);
+      upserts++;
+    }
+  };
+
+  try {
+    // incremental: everything updated since last run
+    if (st.last_updated) {
+      let q = `/orders.json?status=any&limit=250&updated_at_min=${encodeURIComponent(st.last_updated)}`;
+      let newestSeen = st.last_updated;
+      while (pages < maxPages && q) {
+        const { data, next } = await shopifyRequest(cfg, q);
+        const orders = data.orders || [];
+        if (!orders.length) break;
+        await upsertOrders(orders);
+        orders.forEach(o => { if (o.updated_at > newestSeen) newestSeen = o.updated_at; });
+        pages++;
+        q = next ? `/orders.json?limit=250&page_info=${encodeURIComponent(next)}` : null;
+      }
+      st.last_updated = newestSeen;
+    }
+    // backfill: full history to the horizon, resumable
+    while (!st.backfill_done && pages < maxPages) {
+      const q = st.backfill_cursor
+        ? `/orders.json?limit=250&page_info=${encodeURIComponent(st.backfill_cursor)}`
+        : `/orders.json?status=any&limit=250&created_at_min=${encodeURIComponent(horizonIso)}&order=created_at+desc`;
+      const { data, next } = await shopifyRequest(cfg, q);
+      const orders = data.orders || [];
+      if (!orders.length) { st.backfill_done = true; break; }
+      await upsertOrders(orders);
+      pages++;
+      if (!st.last_updated) st.last_updated = new Date().toISOString();
+      st.backfill_oldest = orders[orders.length - 1]?.created_at || st.backfill_oldest;
+      st.backfill_cursor = next;
+      if (!next) st.backfill_done = true;
+    }
+  } catch (e) {
+    lastError = String(e.message);
+    console.error('shopify sync error:', lastError);
+  } finally {
+    const cached = (await pool.query('SELECT count(*)::int c FROM orders_cache')).rows[0].c;
+    await pool.query(
+      `INSERT INTO sync_state (k, v) VALUES ('shopify', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
+      [JSON.stringify({ ...st, last_run: new Date().toISOString(), upserts, pages, cached, last_error: lastError })])
+      .catch(e => console.error('shopify sync_state write:', e.message));
+    shopifySyncRunning = false;
+  }
+  return { configured: true, pages, upserts, backfill_done: !!st.backfill_done, error: lastError };
+}
+
+app.post('/api/shopify/sync', async (_req, res) => {
+  try { res.json(await syncShopify(30)); }
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 
@@ -461,6 +579,19 @@ async function overviewStats(days) {
                 WHERE event_date >= (now()-$1::interval)::date ORDER BY event_date`, params),
     pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)
   ]);
+  const [salesSeries, salesTotals, shopifySt] = await Promise.all([
+    pool.query(`SELECT date_trunc('${bucket}', created_at)::date d, count(*)::int orders, round(sum(total_price))::int revenue
+                FROM orders_cache WHERE created_at >= now()-$1::interval AND cancelled_at IS NULL GROUP BY 1 ORDER BY 1`, params),
+    pool.query(`SELECT count(*) FILTER (WHERE cancelled_at IS NULL)::int orders,
+                round(sum(total_price) FILTER (WHERE cancelled_at IS NULL))::int revenue,
+                count(*) FILTER (WHERE cancelled_at IS NOT NULL)::int cancelled,
+                count(*) FILTER (WHERE financial_status IN ('refunded','partially_refunded'))::int refunded,
+                count(*) FILTER (WHERE fulfillment_status='fulfilled' AND cancelled_at IS NULL)::int delivered,
+                max(currency) currency
+                FROM orders_cache WHERE created_at >= now()-$1::interval`, params),
+    pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)
+  ]);
+  const hasSales = (await pool.query('SELECT 1 FROM orders_cache LIMIT 1')).rows.length > 0;
   return {
     days, bucket,
     tickets: {
@@ -472,7 +603,7 @@ async function overviewStats(days) {
       },
       totals: totals.rows[0]
     },
-    sales: null, // no sales source connected yet
+    sales: hasSales ? { series: salesSeries.rows, totals: salesTotals.rows[0], sync: shopifySt.rows[0]?.v || null } : null,
     events: events.rows,
     last_sync: st.rows[0]?.v?.last_run || null,
     sync: st.rows[0]?.v || null
@@ -573,8 +704,19 @@ const TOOLS = [
   },
   {
     name: 'query_sales',
-    description: 'Sales/orders data (deliveries, revenue by country/product, etc).',
-    input_schema: { type: 'object', properties: { question: { type: 'string' } } }
+    description: 'Search/aggregate Shopify orders from the local synced cache: revenue, order counts, cancellations, refunds, delivery status — filterable by country (ISO-2 like AU, JP), product text, fulfillment/financial status, and date range. Returns totals plus up to 10 sample orders.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        product_match: { type: 'string', description: 'case-insensitive regex matched against line item titles/SKUs' },
+        country: { type: 'string', description: 'ISO-2 country code, e.g. AU, JP, US' },
+        fulfillment_status: { type: 'string', enum: ['fulfilled', 'unfulfilled', 'partial'], description: 'fulfilled = delivered/shipped; unfulfilled = not yet' },
+        financial_status: { type: 'string', description: 'e.g. paid, refunded, partially_refunded' },
+        cancelled: { type: 'boolean', description: 'true = only cancelled orders' },
+        created_after: { type: 'string', description: 'ISO date' },
+        created_before: { type: 'string', description: 'ISO date' }
+      }
+    }
   },
   {
     name: 'list_pending_integrations',
@@ -633,7 +775,37 @@ async function runTool(name, input) {
     return (await pool.query('SELECT id, title, description, event_date, added_by, attachment_name FROM events ORDER BY event_date DESC LIMIT 50')).rows;
   }
   if (name === 'query_sales') {
-    return { error: 'No sales source is connected to the brain yet. Sales, delivery and order data (by country, product, delivery status) will become available once a store/sales connector is added. Offer to set one up right now: ask which platform they use, then use create_connector_type to build the credentials form.' };
+    const hasSales = (await pool.query('SELECT 1 FROM orders_cache LIMIT 1')).rows.length > 0;
+    if (!hasSales) {
+      const conn = await getConnector('shopify');
+      return { error: conn
+        ? 'Shopify is connected but no orders have synced yet — the backfill may still be running. Try again in a few minutes or press Sync now.'
+        : 'No sales source connected yet. A built-in "Shopify store" connector exists in the New connector dropdown on the ＋ page — it needs the store subdomain and an Admin API token (shpat_) with read_orders scope.' };
+    }
+    const conds = [], p = [];
+    const add = (v, fn) => { p.push(v); conds.push(fn(`$${p.length}`)); };
+    if (input.product_match) add(String(input.product_match).slice(0, 200), x => `items::text ~* ${x}`);
+    if (input.country) add(String(input.country).toUpperCase().slice(0, 2), x => `country = ${x}`);
+    if (input.fulfillment_status) add(input.fulfillment_status, x => `fulfillment_status = ${x}`);
+    if (input.financial_status) add(input.financial_status, x => `financial_status = ${x}`);
+    if (input.cancelled === true) conds.push('cancelled_at IS NOT NULL');
+    if (input.cancelled === false) conds.push('cancelled_at IS NULL');
+    if (input.created_after) add(input.created_after, x => `created_at >= ${x}`);
+    if (input.created_before) add(input.created_before, x => `created_at < ${x}`);
+    const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
+    const agg = await pool.query(
+      `SELECT count(*)::int orders, round(coalesce(sum(total_price),0))::int revenue, max(currency) currency,
+       count(*) FILTER (WHERE fulfillment_status='fulfilled')::int fulfilled,
+       count(*) FILTER (WHERE cancelled_at IS NOT NULL)::int cancelled,
+       count(*) FILTER (WHERE financial_status IN ('refunded','partially_refunded'))::int refunded
+       FROM orders_cache ${where}`, p);
+    const sample = await pool.query(
+      `SELECT order_number, created_at::date created, country, total_price, currency, financial_status, fulfillment_status,
+       cancelled_at IS NOT NULL AS cancelled, items
+       FROM orders_cache ${where} ORDER BY created_at DESC LIMIT 10`, p);
+    const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v;
+    return { ...agg.rows[0], sample: sample.rows,
+      note: `From the local Shopify sync. Last sync: ${ss?.last_run || 'unknown'}${ss?.backfill_done ? '' : ' (history backfill still in progress — older orders may be missing)'}.` };
   }
   if (name === 'list_pending_integrations') {
     const { rows } = await pool.query(
@@ -688,7 +860,7 @@ Adding NEW kinds of connectors is a core part of your job. When a member wants t
 2. Work out what its API needs for server-to-server auth (base URL/store domain, API key/token, account id...). Ask if unsure — the member may need to check with whoever admins that service.
 3. Call create_connector_type with clear field labels that say exactly where to find each value. Mark every credential secret:true.
 4. Tell them the form is now in the dropdown on this page; after they save, an AUTHORIZED member must approve it in the "Pending integrations" list on this page (requires the admin password, entered in that list — never in chat). Once approved, the dev team wires the data sync.
-gorgias, anthropic and slack connectors are fully wired and auto-approved: they test the connection and work immediately.
+gorgias, anthropic, slack and shopify connectors are fully wired and auto-approved: they test the connection and work immediately. Shopify sync unlocks sales/order/delivery data (query_sales) and the sales line on Overview.
 Use list_pending_integrations to report what's waiting for approval or wiring. You cannot approve anything yourself.
 Use your tools to answer data questions with real numbers. If a question needs sales/order/delivery data, use query_sales and relay its guidance. Be concise. Answer in the user's language.${opts.slack ? '\nYou are replying inside Slack: use Slack formatting (*bold*, bullet lines with •), keep replies short, no markdown headers or tables.' : ''}`;
 
