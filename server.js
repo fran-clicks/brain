@@ -45,7 +45,11 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'not signed in' });
   res.redirect('/login.html');
 });
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.html')) res.set('Cache-Control', 'no-cache'); // always revalidate pages after deploys
+  }
+}));
 
 const ALLOWED_USERS = ['fran@clicks.tech', 'kp@clicks.tech'];
 const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 64).toString('hex');
