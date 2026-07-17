@@ -323,6 +323,17 @@ footer{color:rgba(16,17,20,.45)}
     </div>
     <div class="err" id="rqErr"></div>
   </div>
+  <div class="card" id="membersCard" style="display:none">
+    <h2>👥 Members <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
+    <table id="membersTable"><thead><tr><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody></tbody></table>
+    <div class="grid two" style="margin-top:10px">
+      <div><label>Email</label><input id="uEmail" type="email" placeholder="name@clicks.tech"></div>
+      <div><label>Role</label><select id="uRole"><option value="member">member</option><option value="admin">admin</option></select></div>
+    </div>
+    <button class="btn" onclick="addUser()">Add member</button>
+    <div class="err" id="uErr"></div>
+    <div class="note">New members set their own password on the login page ("First time?") using the invite code — share it with them privately.</div>
+  </div>
   <div class="card" id="connForm">
     <h2>New connector <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
     <label>Type</label>
@@ -370,7 +381,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (s === 'stock') loadStock();
   if (s === 'home') loadOverview();
   if (s === 'kb') loadKbs();
-  if (s === 'conn') { loadConnectors(); loadRequests(); }
+  if (s === 'conn') { loadConnectors(); loadRequests(); loadMembers(); }
 });
 
 // ---------- overview ----------
@@ -950,6 +961,28 @@ async function addConnector() {
   } catch (e) { el('cErr').textContent = e.message; }
 }
 
+// members (admins only)
+async function loadMembers() {
+  if (!window.isAdmin) return;
+  try {
+    const users = await api('/api/users');
+    document.getElementById('membersCard').style.display = 'block';
+    document.querySelector('#membersTable tbody').innerHTML = users.map(u =>
+      `<tr><td><b>${esc(u.email)}</b></td>
+       <td><span class="tag ${u.role === 'admin' ? 'date' : 'src'}">${esc(u.role)}</span></td>
+       <td><span class="tag ${u.activated ? 'approved' : 'pending'}">${u.activated ? 'active' : 'awaiting first login'}</span></td></tr>`).join('');
+  } catch {}
+}
+async function addUser() {
+  const el = i => document.getElementById(i);
+  el('uErr').textContent = '';
+  try {
+    await api('/api/users', {method:'POST', body: JSON.stringify({ email: el('uEmail').value.trim(), role: el('uRole').value })});
+    el('uEmail').value = '';
+    loadMembers();
+  } catch (e) { el('uErr').textContent = e.message; }
+}
+
 // requests
 async function loadRequests() {
   const reqs = await api('/api/requests');
@@ -1073,6 +1106,7 @@ api('/api/auth/me').then(m => {
       document.getElementById('cPw')?.closest('div')?.style.setProperty('display', 'none');
     }
     loadKbs(); // re-render with admin controls if applicable
+    loadMembers();
   }
 }).catch(() => {});
 

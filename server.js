@@ -82,6 +82,25 @@ app.post('/api/auth/logout', (_req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- member management (admins only) ----------
+app.get('/api/users', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const { rows } = await pool.query(
+    `SELECT email, role, (pass_hash IS NOT NULL) AS activated, created_at FROM users ORDER BY created_at`);
+  res.json(rows);
+});
+app.post('/api/users', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const em = String(req.body?.email || '').toLowerCase().trim();
+  const role = req.body?.role === 'admin' ? 'admin' : 'member';
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) return res.status(400).json({ error: 'valid email required' });
+  const { rows } = await pool.query(
+    `INSERT INTO users (email, role) VALUES ($1,$2)
+     ON CONFLICT (email) DO UPDATE SET role=$2
+     RETURNING email, role, (pass_hash IS NOT NULL) AS activated`, [em, role]);
+  res.status(201).json(rows[0]);
+});
+
 app.get('/api/auth/me', async (req, res) => {
   const email = readSession(req);
   if (!email) return res.json({ email: null });
@@ -157,6 +176,8 @@ async function initDb() {
     await pool.query(`INSERT INTO users (email, role) VALUES ($1, 'admin')
                       ON CONFLICT (email) DO UPDATE SET role='admin'`, [em]);
   }
+  await pool.query(`INSERT INTO users (email, role) VALUES ('kevin@clicks.tech', 'member')
+                    ON CONFLICT (email) DO NOTHING`);
 }
 
 async function isAdminReq(req) {
