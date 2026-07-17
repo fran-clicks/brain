@@ -189,9 +189,19 @@ footer{color:rgba(16,17,20,.45)}
     </div>
     <div class="note" id="homeNote"></div>
   </div>
+  <div class="grid two">
+    <div class="card">
+      <h2>📌 Recent events <span style="font-weight:400;color:var(--muted);font-size:12px">· today & last 7 days</span></h2>
+      <div id="evtRecent"></div>
+    </div>
+    <div class="card">
+      <h2>📅 Upcoming events</h2>
+      <div id="evtUpcoming"></div>
+    </div>
+  </div>
   <div class="card">
-    <h2>📌 Team events <button class="btn" style="float:right;margin:0;padding:5px 12px" onclick="toggleEvtForm()">＋ Add event</button></h2>
-    <div id="evtList"></div>
+    <h2>Team events <button class="btn" style="float:right;margin:0;padding:5px 12px" onclick="toggleEvtForm()">＋ Add event</button></h2>
+    <div class="note" style="margin-top:0">Log campaigns, launches, trips — anything that could move the numbers or that the team should plan around. Past events appear as 📌 pins on the chart.</div>
     <div id="evtForm" style="display:none;border-top:1px solid var(--line);margin-top:10px">
       <div class="grid two">
         <div><label>Title</label><input id="eTitle" placeholder="e.g. Win-back email sent to lapsed customers"></div>
@@ -441,31 +451,6 @@ const eventMarkers = {
 };
 Chart.register(eventMarkers);
 
-// future zone: tinted "planned" region beyond today with a divider line
-const futureZone = {
-  id: 'futureZone',
-  beforeDatasetsDraw(chart, _a, opts) {
-    const today = opts.today;
-    if (!today) return;
-    const labels = chart.data.labels;
-    const idx = labels.findIndex(l => l > today);
-    if (idx === -1) return;
-    const { ctx, chartArea: { top, bottom, right } } = chart;
-    const x = chart.scales.x.getPixelForValue(Math.max(idx - 0.5, 0));
-    ctx.save();
-    ctx.fillStyle = 'rgba(255,200,0,.05)';
-    ctx.fillRect(x, top, right - x, bottom - top);
-    ctx.strokeStyle = 'rgba(16,17,20,.35)';
-    ctx.setLineDash([2, 3]);
-    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.font = '10px sans-serif'; ctx.fillStyle = '#5f6368'; ctx.textAlign = 'left';
-    ctx.fillText('today ▸ planned', x + 6, top + 12);
-    ctx.restore();
-  }
-};
-Chart.register(futureZone);
-
 // crosshair: subtle vertical guide following the hovered point
 const crosshair = {
   id: 'crosshair',
@@ -560,26 +545,15 @@ function bindEventHover(canvas) {
   canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
 }
 
-function mergeSeries(series, bucket, days) {
+function mergeSeries(series) {
   const all = new Set();
   Object.values(series).forEach(rows => rows.forEach(r => all.add(String(r.d).slice(0,10))));
-  let labels = [...all].sort();
-  // extend the timeline into the future so planned events are visible
-  const today = new Date().toISOString().slice(0,10);
-  const step = bucket === 'week' ? 7 : 1;
-  const futureDays = days <= 31 ? 14 : 30;
-  const end = new Date(Date.now() + futureDays * 864e5);
-  let d = new Date(labels[labels.length - 1] || today);
-  while (true) {
-    d = new Date(d.getTime() + step * 864e5);
-    if (d > end) break;
-    labels.push(d.toISOString().slice(0,10));
-  }
+  const labels = [...all].sort();
   const line = rows => {
     const m = Object.fromEntries(rows.map(r => [String(r.d).slice(0,10), r.c]));
-    return labels.map(l => l > today ? (m[l] ?? null) : (m[l] ?? 0)); // lines stop at today
+    return labels.map(l => m[l] ?? 0);
   };
-  return { labels, today, created: line(series.created), open: line(series.still_open), closed: line(series.closed) };
+  return { labels, created: line(series.created), open: line(series.still_open), closed: line(series.closed) };
 }
 
 const CAT_LABELS = {
@@ -614,7 +588,7 @@ async function loadOverview() {
       {l:`Cancelled / refunded (${curDays}d)`, v: sv ? `${sv.cancelled} / ${sv.refunded}` : t.cancel_refund + ' tickets'},
       {l:`Events (${curDays}d)`, v:s.events.length}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
-    const m = mergeSeries(s.tickets.series, s.bucket, s.days);
+    const m = mergeSeries(s.tickets.series);
     const bdByDataset = [
       buildBreakdownMap(s.tickets.breakdowns?.created),
       buildBreakdownMap(s.tickets.breakdowns?.still_open),
@@ -649,7 +623,6 @@ async function loadOverview() {
         plugins:{
           legend:{position:'bottom', labels:{usePointStyle:true, padding:18, font:{size:12, weight:600}}},
           eventMarkers:{ events: s.events },
-          futureZone:{ today: m.today },
           tooltip: {
             displayColors: false,
             backgroundColor: 'rgba(16,17,20,.92)',
@@ -729,16 +702,26 @@ function toggleEvtForm() {
   const f = document.getElementById('evtForm');
   f.style.display = f.style.display === 'none' ? 'block' : 'none';
 }
+function evtRow(e, pin) {
+  return `<div class="evt"><div class="pin">${pin}</div><div>
+    <div class="t">${esc(e.title)} <span class="tag date">${esc(String(e.event_date).slice(0,10))}</span></div>
+    <div>${esc(e.description)}</div>
+    <div class="m">by ${esc(e.added_by)}${e.attachment_name ? ` · <a href="/api/events/${e.id}/attachment" target="_blank">📎 ${esc(e.attachment_name)}</a>` : ''}</div>
+  </div></div>`;
+}
 async function loadEvents() {
   const evts = await api('/api/events');
   const today = new Date().toISOString().slice(0,10);
-  document.getElementById('evtList').innerHTML = evts.length ? evts.map(e => `
-    <div class="evt"><div class="pin">${String(e.event_date).slice(0,10) > today ? '📅' : '📌'}</div><div>
-      <div class="t">${esc(e.title)} <span class="tag date">${esc(String(e.event_date).slice(0,10))}</span>${String(e.event_date).slice(0,10) > today ? ' <span class="tag pending">upcoming</span>' : ''}</div>
-      <div>${esc(e.description)}</div>
-      <div class="m">by ${esc(e.added_by)}${e.attachment_name ? ` · <a href="/api/events/${e.id}/attachment" target="_blank">📎 ${esc(e.attachment_name)}</a>` : ''}</div>
-    </div></div>`).join('')
-    : '<div class="empty">No events yet — log campaigns, launches, anything that could move the numbers.</div>';
+  const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString().slice(0,10);
+  const recent = evts.filter(e => { const d = String(e.event_date).slice(0,10); return d <= today && d >= weekAgo; });
+  const upcoming = evts.filter(e => String(e.event_date).slice(0,10) > today)
+    .sort((a, b) => String(a.event_date).localeCompare(String(b.event_date)));
+  document.getElementById('evtRecent').innerHTML = recent.length
+    ? recent.map(e => evtRow(e, '📌')).join('')
+    : '<div class="empty">Nothing in the last 7 days.</div>';
+  document.getElementById('evtUpcoming').innerHTML = upcoming.length
+    ? upcoming.map(e => evtRow(e, '📅')).join('')
+    : '<div class="empty">Nothing planned — add an event with a future date.</div>';
 }
 function readFile(f) {
   return new Promise((ok, err) => {
