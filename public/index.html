@@ -169,7 +169,7 @@ footer{color:rgba(16,17,20,.45)}
       <span style="font-weight:400;color:var(--muted);font-size:12px" id="syncInfo"></span>
       <button class="btn" style="float:right;margin:0;padding:5px 12px" id="syncBtn" onclick="syncNow()">🔄 Sync now</button>
     </h2>
-    <div class="chart-wrap"><canvas id="homeChart"></canvas></div>
+    <div class="chart-wrap" style="height:clamp(340px,52vh,500px)"><canvas id="homeChart"></canvas></div>
     <div class="note" id="homeNote"></div>
   </div>
   <div class="card">
@@ -389,6 +389,35 @@ const eventMarkers = {
 };
 Chart.register(eventMarkers);
 
+// crosshair: subtle vertical guide following the hovered point
+const crosshair = {
+  id: 'crosshair',
+  afterDatasetsDraw(chart) {
+    const a = chart.getActiveElements?.()[0];
+    if (!a) return;
+    const { ctx, chartArea: { top, bottom } } = chart;
+    const x = a.element.x;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(16,17,20,.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+    ctx.restore();
+  }
+};
+Chart.register(crosshair);
+
+// vertical gradient fill helper (scriptable backgroundColor)
+function vGradient(rgb, maxAlpha) {
+  return (context) => {
+    const { ctx, chartArea } = context.chart;
+    if (!chartArea) return `rgba(${rgb},${maxAlpha})`;
+    const g = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+    g.addColorStop(0, `rgba(${rgb},${maxAlpha})`);
+    g.addColorStop(1, `rgba(${rgb},0)`);
+    return g;
+  };
+}
+
 // custom "focus" scale: values ≤300 get 70% of the height (50-step ticks),
 // everything above is compressed with 100/200-step ticks
 const FOCUS_K = 300, FOCUS_SPLIT = 0.7;
@@ -504,19 +533,21 @@ async function loadOverview() {
       buildBreakdownMap(s.tickets.breakdowns?.closed)
     ];
     if (homeChart) homeChart.destroy();
-    // Gorgias = solid lines + circles · Shopify = dashed lines + squares
+    // Gorgias = solid lines + circles · Shopify = dashed lines + diamonds
+    const base = { tension:.35, borderWidth:2.5, pointRadius:0, pointHitRadius:14, pointHoverRadius:6,
+                   pointHoverBorderWidth:2, pointHoverBackgroundColor:'#fff' };
     const datasets = [
-      {label:'🎧 Created', data:m.created, borderColor:'#101114', backgroundColor:'rgba(16,17,20,.06)', tension:.25, fill:true, pointRadius:3, pointHoverRadius:6, pointStyle:'circle'},
-      {label:'🎧 Still open', data:m.open, borderColor:'#dc2626', tension:.25, pointRadius:3, pointHoverRadius:6, pointStyle:'circle'},
-      {label:'🎧 Closed', data:m.closed, borderColor:'#f0b400', backgroundColor:'rgba(255,200,0,.15)', tension:.25, pointRadius:3, pointHoverRadius:6, pointStyle:'circle'}
+      {...base, label:'🎧 Created', data:m.created, borderColor:'#101114', backgroundColor:vGradient('16,17,20',.14), fill:true, pointStyle:'circle', pointHoverBorderColor:'#101114'},
+      {...base, label:'🎧 Still open', data:m.open, borderColor:'#dc2626', pointStyle:'circle', pointHoverBorderColor:'#dc2626'},
+      {...base, label:'🎧 Closed', data:m.closed, borderColor:'#f0b400', backgroundColor:vGradient('255,200,0',.22), fill:true, pointStyle:'circle', pointHoverBorderColor:'#f0b400'}
     ];
     if (s.sales?.series?.length) {
       const ord = Object.fromEntries(s.sales.series.map(r => [String(r.d).slice(0,10), r.orders]));
-      datasets.push({label:'🛒 Orders', data:m.labels.map(l => ord[l] ?? 0), borderColor:'#2563eb',
-        backgroundColor:'rgba(37,99,235,.07)', fill:true, borderDash:[7,4], tension:.25, pointRadius:4, pointHoverRadius:7, pointStyle:'rectRot'});
+      datasets.push({...base, label:'🛒 Orders', data:m.labels.map(l => ord[l] ?? 0), borderColor:'#2563eb',
+        backgroundColor:vGradient('37,99,235',.16), fill:true, borderDash:[7,4], pointStyle:'rectRot', pointHoverRadius:7, pointHoverBorderColor:'#2563eb'});
       const canc = Object.fromEntries((s.sales.cancel_series || []).map(r => [String(r.d).slice(0,10), r.c]));
-      datasets.push({label:'🛒 Cancelled', data:m.labels.map(l => canc[l] ?? 0), borderColor:'#7c3aed',
-        borderDash:[7,4], tension:.25, pointRadius:4, pointHoverRadius:7, pointStyle:'rectRot'});
+      datasets.push({...base, label:'🛒 Cancelled', data:m.labels.map(l => canc[l] ?? 0), borderColor:'#7c3aed',
+        borderDash:[7,4], pointStyle:'rectRot', pointHoverRadius:7, pointHoverBorderColor:'#7c3aed'});
     }
     const homeCanvas = document.getElementById('homeChart');
     bindEventHover(homeCanvas);
@@ -525,11 +556,21 @@ async function loadOverview() {
       data: { labels: m.labels, datasets },
       options: { responsive:true, maintainAspectRatio:false,
         interaction: { mode: 'nearest', intersect: true },
+        animation: { duration: 700, easing: 'easeOutQuart',
+          delay: (ctx) => ctx.type === 'data' ? ctx.dataIndex * 6 + ctx.datasetIndex * 90 : 0 },
         plugins:{
-          legend:{position:'bottom', labels:{usePointStyle:true}},
+          legend:{position:'bottom', labels:{usePointStyle:true, padding:18, font:{size:12, weight:600}}},
           eventMarkers:{ events: s.events },
           tooltip: {
             displayColors: false,
+            backgroundColor: 'rgba(16,17,20,.92)',
+            titleColor: '#ffc800',
+            bodyColor: '#fff',
+            padding: 12,
+            cornerRadius: 10,
+            titleFont: { size: 13, weight: 700 },
+            bodyFont: { size: 12 },
+            caretSize: 6,
             callbacks: {
               title(items) {
                 const it = items[0];
@@ -559,8 +600,12 @@ async function loadOverview() {
             }
           }
         },
-        scales:{ y:{type:'focus', beginAtZero:true, ticks:{precision:0},
-                    title:{display:true, text:'Count per day (detail below 300)', color:'#5f6368', font:{size:11}}} } }
+        scales:{ y:{type:'focus', beginAtZero:true,
+                    ticks:{precision:0, color:'#5f6368', font:{size:11}},
+                    grid:{color:'rgba(16,17,20,.06)'}, border:{display:false},
+                    title:{display:true, text:'Count per day (detail below 300)', color:'#5f6368', font:{size:11}}},
+                 x:{ticks:{color:'#5f6368', font:{size:11}, maxRotation:0, autoSkipPadding:16},
+                    grid:{display:false}, border:{display:false}} } }
     });
     document.getElementById('syncInfo').textContent = s.last_sync
       ? `· synced ${new Date(s.last_sync).toLocaleString()} · ${s.sync?.cached ?? '?'} tickets cached` : '';
