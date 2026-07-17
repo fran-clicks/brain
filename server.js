@@ -589,16 +589,26 @@ app.post('/api/gorgias/sync', async (_req, res) => {
 
 // ---------- UK stock (simple keyed JSON API) ----------
 async function ukStockFetch(cfg) {
-  // the stock service sleeps on Render's free tier — retry through the cold-start 502/503s
-  let lastStatus = 0;
+  let url;
+  try { url = new URL(String(cfg.base_url).trim()); } catch { throw new Error(`invalid URL "${cfg.base_url}" — it must look like https://clicks-uk-returns.onrender.com/api/v1/stock`); }
+  if (!/^https?:$/.test(url.protocol)) throw new Error('URL must start with https://');
+  // the stock service sleeps on Render's free tier — retry through cold-start 502/503s and transient network errors
+  let lastErr = null;
   for (let attempt = 0; attempt < 4; attempt++) {
     if (attempt) await new Promise(r => setTimeout(r, 8000));
-    const r = await fetch(cfg.base_url, { headers: { 'X-API-Key': cfg.api_key, Accept: 'application/json' } });
+    let r;
+    try {
+      r = await fetch(url, { headers: { 'X-API-Key': cfg.api_key, Accept: 'application/json' } });
+    } catch (e) {
+      const code = e.cause?.code || e.cause?.message || e.message;
+      lastErr = `network error reaching ${url.hostname}: ${code}${code === 'ENOTFOUND' ? ' (domain not found — check the URL for typos)' : ''}`;
+      continue; // transient network issues get retried too
+    }
     if (r.ok) return r.json();
-    lastStatus = r.status;
+    lastErr = `UK stock API → ${r.status}${[502, 503, 504].includes(r.status) ? ' (service may be waking from sleep — try again in ~1 min)' : ''}`;
     if (![502, 503, 504].includes(r.status)) break; // real error (401/403/404) — don't retry
   }
-  throw new Error(`UK stock API → ${lastStatus}${[502, 503, 504].includes(lastStatus) ? ' (service may be waking from sleep — try again in ~1 min)' : ''}`);
+  throw new Error(lastErr || 'unreachable');
 }
 const pickField = (o, keys) => { for (const k of keys) { if (o?.[k] != null) return o[k]; } return null; };
 function extractStockItems(j) {
