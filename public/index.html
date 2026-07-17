@@ -454,12 +454,16 @@ async function loadOverview() {
     ];
     if (s.sales?.series?.length) {
       const rev = Object.fromEntries(s.sales.series.map(r => [String(r.d).slice(0,10), r.revenue]));
-      datasets.push({label:'Sales', data:m.labels.map(l => rev[l] ?? 0), borderColor:'#2563eb',
-        backgroundColor:'rgba(37,99,235,.08)', fill:true, borderDash:[6,4], tension:.25, pointRadius:3, pointHoverRadius:6, yAxisID:'y1'});
+      const ord = Object.fromEntries(s.sales.series.map(r => [String(r.d).slice(0,10), r.orders]));
+      datasets.push({label:'Orders', data:m.labels.map(l => ord[l] ?? 0), borderColor:'#2563eb',
+        tension:.25, pointRadius:3, pointHoverRadius:6});
+      datasets.push({label:'Revenue', data:m.labels.map(l => rev[l] ?? 0), borderColor:'#60a5fa',
+        backgroundColor:'rgba(37,99,235,.07)', fill:true, borderDash:[6,4], tension:.25, pointRadius:3, pointHoverRadius:6, yAxisID:'y1'});
       const canc = Object.fromEntries((s.sales.cancel_series || []).map(r => [String(r.d).slice(0,10), r.c]));
       datasets.push({label:'Cancelled orders', data:m.labels.map(l => canc[l] ?? 0), borderColor:'#7c3aed',
         tension:.25, pointRadius:3, pointHoverRadius:6});
     }
+    const curr = s.sales?.totals?.currency || 'USD';
     const homeCanvas = document.getElementById('homeChart');
     bindEventHover(homeCanvas);
     homeChart = new Chart(homeCanvas, {
@@ -480,9 +484,10 @@ async function loadOverview() {
               label(it) { return `${it.formattedValue} tickets`; },
               afterBody(items) {
                 const it = items[0];
-                if (it.dataset.label === 'Sales') {
+                if (it.dataset.label === 'Revenue' || it.dataset.label === 'Orders') {
                   const o = (s.sales?.series || []).find(r => String(r.d).slice(0,10) === it.label);
-                  return o ? [`${o.orders} orders`, ...(o.refunded ? [`${o.refunded} refunded`] : [])] : '';
+                  return o ? [`${(o.revenue ?? 0).toLocaleString()} ${s.sales?.totals?.currency || ''} · ${o.orders} orders`,
+                              ...(o.refunded ? [`${o.refunded} refunded`] : [])] : '';
                 }
                 if (it.dataset.label === 'Cancelled orders') return '';
                 const b = bdByDataset[it.datasetIndex]?.[it.label];
@@ -497,9 +502,11 @@ async function loadOverview() {
             }
           }
         },
-        scales:{ y:{beginAtZero:true, ticks:{precision:0}},
+        scales:{ y:{beginAtZero:true, ticks:{precision:0},
+                    title:{display:true, text:'Tickets & orders (count)', color:'#5f6368', font:{size:11}}},
                  y1:{display: !!s.sales, position:'right', beginAtZero:true, grid:{drawOnChartArea:false},
-                     ticks:{callback: v => v.toLocaleString()}} } }
+                     title:{display: !!s.sales, text:`Revenue (${curr})`, color:'#5f6368', font:{size:11}},
+                     ticks:{callback: v => v >= 1000 ? (v/1000).toLocaleString() + 'k' : v}} } }
     });
     document.getElementById('syncInfo').textContent = s.last_sync
       ? `· synced ${new Date(s.last_sync).toLocaleString()} · ${s.sync?.cached ?? '?'} tickets cached` : '';
