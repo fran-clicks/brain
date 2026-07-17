@@ -759,9 +759,11 @@ async function loadStock() {
       `<tr><td>${esc(new Date(h.taken_at).toLocaleString())}</td><td><span class="tag src">${esc(h.sku)}</span></td>
        <td>${esc(h.name || '')}</td><td><b>${h.qty ?? '?'}</b></td></tr>`).join('')
       : '<tr><td colspan="4" class="empty">No changes recorded yet — history builds as levels move</td></tr>';
-    note.textContent = s.sync
+    const allZero = stockItems.length && stockItems.every(i => !i.qty);
+    note.textContent = (s.sync
       ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · refreshes hourly${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''} · low stock highlighted`
-      : '';
+      : '')
+      + (allZero && s.sample_raw ? ` · ⚠️ all quantities read as 0 — raw item from your API: ${JSON.stringify(s.sample_raw).slice(0, 300)}` : '');
   } catch (e) { note.textContent = '⚠️ ' + e.message; }
 }
 document.getElementById('stockSearch').oninput = renderStockTable;

@@ -666,7 +666,9 @@ app.get('/api/stock', async (_req, res) => {
     pool.query(`SELECT h.taken_at, h.sku, h.qty, s.name FROM uk_stock_history h
                 LEFT JOIN uk_stock s ON s.sku = h.sku ORDER BY h.taken_at DESC LIMIT 15`)
   ]);
-  res.json({ configured: !!conn, items: items.rows, totals: totals.rows[0], history: history.rows, sync: ss });
+  // diagnostic: expose one raw item so field-mapping problems are visible in the UI
+  const sample = (await pool.query('SELECT raw FROM uk_stock LIMIT 1')).rows[0]?.raw || null;
+  res.json({ configured: !!conn, items: items.rows, totals: totals.rows[0], history: history.rows, sync: ss, sample_raw: sample });
 });
 app.post('/api/stock/sync', async (_req, res) => {
   try { res.json(await syncUkStock()); }
