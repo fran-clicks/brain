@@ -576,7 +576,8 @@ Order by severity. If everything is genuinely fine, return [].`;
     res.json(record);
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
-app.get('/api/kb/audit', async (_req, res) => {
+app.get('/api/kb/audit', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='kb_audit'`)).rows[0]?.v || null;
   res.json(st || { findings: null });
 });

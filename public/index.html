@@ -360,11 +360,11 @@ footer{color:rgba(16,17,20,.45)}
       <div class="err" id="kbNewErr"></div>
     </div>
   </div>
-  <div class="card">
-    <h2>🔍 Look for flaws
-      <button class="btn" style="float:right;margin:0;padding:5px 12px;display:none" id="kbAuditBtn" onclick="runKbAudit()">Run audit</button>
+  <div class="card" id="kbAuditCard" style="display:none">
+    <h2>🔍 Look for flaws <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span>
+      <button class="btn" style="float:right;margin:0;padding:5px 12px" id="kbAuditBtn" onclick="runKbAudit()">Run audit</button>
     </h2>
-    <p style="font-size:13px;color:var(--muted)">Cross-checks all knowledge bases against each other and against live synced data (stock, products, return reasons, ticket tags) for contradictions, outdated claims, and gaps. Admin-triggered · one Claude call per run.</p>
+    <p style="font-size:13px;color:var(--muted)">Cross-checks all knowledge bases against each other and against live synced data (stock, products, return reasons, ticket tags) for contradictions, outdated claims, and gaps. One Claude call per run.</p>
     <div id="kbAuditResults"></div>
     <div class="note" id="kbAuditNote">No audit run yet.</div>
   </div>
@@ -1276,8 +1276,9 @@ function renderAudit(a) {
   note.textContent = `Last audit ${new Date(a.at).toLocaleString()} by ${a.by}`;
 }
 async function loadKbAudit() {
+  if (!window.isAdmin) return; // the flaws section exists only for admins
+  document.getElementById('kbAuditCard').style.display = 'block';
   try { renderAudit(await api('/api/kb/audit')); } catch {}
-  if (window.isAdmin) document.getElementById('kbAuditBtn').style.display = 'inline-block';
 }
 async function runKbAudit() {
   const b = document.getElementById('kbAuditBtn');
