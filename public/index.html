@@ -459,13 +459,19 @@ const eventMarkers = {
     const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
     const labels = chart.data.labels;
     const slots = {}; // stack pins sharing the same date
-    const drawPin = (px, py, emoji) => {
-      ctx.beginPath(); ctx.arc(px, py, 12, 0, Math.PI * 2);
+    const drawPin = (px, py, camp) => {
+      ctx.beginPath(); ctx.arc(px, py, 11, 0, Math.PI * 2);
       ctx.fillStyle = '#ffc800'; ctx.fill();
-      ctx.strokeStyle = 'rgba(16,17,20,.3)'; ctx.lineWidth = 1.5; ctx.stroke();
-      ctx.font = '12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(emoji, px, py + 1);
-      ctx.textBaseline = 'alphabetic';
+      ctx.strokeStyle = 'rgba(16,17,20,.35)'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.strokeStyle = '#101114'; ctx.fillStyle = '#101114'; ctx.lineWidth = 1.6;
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      if (camp) { // envelope
+        ctx.strokeRect(px - 5.5, py - 4, 11, 8);
+        ctx.beginPath(); ctx.moveTo(px - 5.5, py - 4); ctx.lineTo(px, py + 0.5); ctx.lineTo(px + 5.5, py - 4); ctx.stroke();
+      } else { // map pin: head + stem
+        ctx.beginPath(); ctx.arc(px, py - 2, 3.4, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(px, py + 1); ctx.lineTo(px, py + 5.5); ctx.stroke();
+      }
     };
     evts.forEach(e => {
       const d = String(e.event_date).slice(0, 10);
@@ -474,15 +480,16 @@ const eventMarkers = {
       if (idx === -1) return;
       const px = x.getPixelForValue(idx);
       const camp = e.kind === 'campaign';
-      chart.$pins.push({ x: px, top, bottom, ev: e });
+      const key = Math.round(px);
+      const slot = slots[key] || 0; slots[key] = slot + 1;
+      const py = top + 14 + slot * 26;
+      chart.$pins.push({ x: px, py, top, bottom, ev: e });
       ctx.save();
       ctx.strokeStyle = camp ? 'rgba(37,99,235,.45)' : 'rgba(220,38,38,.55)';
       ctx.setLineDash([4, 4]);
       ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, bottom); ctx.stroke();
       ctx.setLineDash([]);
-      const key = Math.round(px);
-      const slot = slots[key] || 0; slots[key] = slot + 1;
-      drawPin(px, top + 14 + slot * 27, camp ? '✉️' : '📌');
+      drawPin(px, py, camp);
       ctx.restore();
     });
   }
@@ -584,7 +591,9 @@ function bindEventHover(canvas) {
     const pins = homeChart?.$pins || [];
     const r = canvas.getBoundingClientRect();
     const mx = e.clientX - r.left, my = e.clientY - r.top;
-    const hit = pins.find(p => Math.abs(mx - p.x) < 10 && my >= p.top && my <= p.bottom);
+    // prefer the exact pin circle under the cursor (stacked pins share x), fall back to the line
+    const hit = pins.find(p => Math.abs(mx - p.x) < 13 && Math.abs(my - p.py) < 13)
+      || pins.find(p => Math.abs(mx - p.x) < 8 && my >= p.top && my <= p.bottom);
     if (hit) {
       const ev = hit.ev;
       tip.innerHTML = `<b>${ev.kind === 'campaign' ? '✉️' : '📌'} ${esc(ev.title)}</b><br>
