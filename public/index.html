@@ -144,8 +144,8 @@ footer{color:rgba(16,17,20,.45)}
 
 <nav>
   <button data-s="home" class="active">🏠 Overview</button>
+  <button data-s="gorgias">🎧 Gorgias</button>
   <button data-s="sales">🛒 Shopify</button>
-  <button data-s="gorgias">🎧 Gorgias Stats</button>
   <button data-s="kb">💡 Knowledge Bases</button>
   <button data-s="conn" title="Connectors" style="font-size:16px;padding:8px 16px;font-weight:800">＋</button>
 </nav>
@@ -292,6 +292,8 @@ footer{color:rgba(16,17,20,.45)}
 
 <footer>clicks brain · internal use only · no credentials are stored or displayed anywhere in this dashboard</footer>
 
+<div id="evtTip" style="display:none;position:fixed;z-index:60;max-width:260px;font-size:12px;line-height:1.5;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);border:1px solid rgba(16,17,20,.12);border-radius:10px;padding:10px 12px;box-shadow:0 8px 28px rgba(16,17,20,.18);pointer-events:none"></div>
+
 <button id="aiFab" title="Ask the brain">🧠</button>
 <div id="aiPanel">
   <div id="aiHead">clicks brain assistant <span id="aiClose">✕</span></div>
@@ -318,6 +320,19 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
 
 // ---------- overview ----------
 let curDays = 7, homeChart;
+const ovCache = new Map(); // days → {t, v}
+async function fetchOverview(days) {
+  const hit = ovCache.get(days);
+  if (hit && Date.now() - hit.t < 60 * 1000) return hit.v;
+  const v = await api('/api/stats/overview?days=' + days);
+  ovCache.set(days, { t: Date.now(), v });
+  return v;
+}
+async function prefetchPeriods() { // warm the other ranges so switching is instant
+  for (const d of [7, 30, 90, 180, 365]) {
+    if (d !== curDays && !ovCache.has(d)) { try { await fetchOverview(d); } catch {} }
+  }
+}
 document.querySelectorAll('#periods button').forEach(b => b.onclick = () => {
   document.querySelectorAll('#periods button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
@@ -325,11 +340,12 @@ document.querySelectorAll('#periods button').forEach(b => b.onclick = () => {
   loadOverview();
 });
 
-// inline Chart.js plugin: vertical 📌 markers for events
+// inline Chart.js plugin: vertical 📌 markers for events (hoverable — pins recorded on the chart)
 const eventMarkers = {
   id: 'eventMarkers',
   afterDatasetsDraw(chart, _a, opts) {
     const evts = opts.events || [];
+    chart.$pins = [];
     if (!evts.length) return;
     const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
     const labels = chart.data.labels;
@@ -339,6 +355,7 @@ const eventMarkers = {
       if (idx === -1 && labels.length && d <= labels[labels.length-1]) idx = labels.length - 1;
       if (idx === -1) return;
       const px = x.getPixelForValue(idx);
+      chart.$pins.push({ x: px, top, bottom, ev: e });
       ctx.save();
       ctx.strokeStyle = 'rgba(220,38,38,.55)';
       ctx.setLineDash([4, 4]);
@@ -346,13 +363,39 @@ const eventMarkers = {
       ctx.setLineDash([]);
       ctx.font = '14px sans-serif'; ctx.textAlign = 'center';
       ctx.fillText('📌', px, top + 12);
-      ctx.font = '10px sans-serif'; ctx.fillStyle = '#6b7280';
-      ctx.fillText(String(e.title).slice(0, 18), px, top + 26);
       ctx.restore();
     });
   }
 };
 Chart.register(eventMarkers);
+
+// floating tooltip for event pins
+function bindEventHover(canvas) {
+  if (canvas.$evtBound) return;
+  canvas.$evtBound = true;
+  const tip = document.getElementById('evtTip');
+  canvas.addEventListener('mousemove', (e) => {
+    const pins = homeChart?.$pins || [];
+    const r = canvas.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    const hit = pins.find(p => Math.abs(mx - p.x) < 10 && my >= p.top && my <= p.bottom);
+    if (hit) {
+      const ev = hit.ev;
+      tip.innerHTML = `<b>📌 ${esc(ev.title)}</b><br>
+        <span class="tag date">${esc(String(ev.event_date).slice(0,10))}</span> by <b>${esc(ev.added_by)}</b>
+        ${ev.description ? `<br>${esc(ev.description)}` : ''}
+        ${ev.attachment_name ? `<br>📎 <a href="/api/events/${ev.id}/attachment" target="_blank">${esc(ev.attachment_name)}</a>` : ''}`;
+      tip.style.display = 'block';
+      tip.style.left = Math.min(e.clientX + 14, innerWidth - 280) + 'px';
+      tip.style.top = (e.clientY + 14) + 'px';
+      canvas.style.cursor = 'pointer';
+    } else {
+      tip.style.display = 'none';
+      canvas.style.cursor = '';
+    }
+  });
+  canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+}
 
 function mergeSeries(series) {
   const all = new Set();
@@ -385,7 +428,7 @@ function buildBreakdownMap(bd) {
 
 async function loadOverview() {
   try {
-    const s = await api('/api/stats/overview?days=' + curDays);
+    const s = await fetchOverview(curDays);
     const t = s.tickets.totals;
     const sv = s.sales?.totals;
     document.getElementById('homeKpis').innerHTML = [
@@ -417,7 +460,9 @@ async function loadOverview() {
       datasets.push({label:'Cancelled orders', data:m.labels.map(l => canc[l] ?? 0), borderColor:'#7c3aed',
         tension:.25, pointRadius:3, pointHoverRadius:6});
     }
-    homeChart = new Chart(document.getElementById('homeChart'), {
+    const homeCanvas = document.getElementById('homeChart');
+    bindEventHover(homeCanvas);
+    homeChart = new Chart(homeCanvas, {
       type: 'line',
       data: { labels: m.labels, datasets },
       options: { responsive:true, maintainAspectRatio:false,
@@ -574,10 +619,9 @@ async function loadGorgias() {
   const note = document.getElementById('gorgiasNote');
   try {
     const g = await api('/api/gorgias/stats');
-    if (!g.configured) { note.textContent = g.message; return; }
     const frt = g.avg_first_response_seconds != null ? (g.avg_first_response_seconds/3600).toFixed(1) + 'h' : '—';
     document.getElementById('gorgiasKpis').innerHTML = [
-      {l:'Total tickets (all time)', v: g.total_tickets ?? '—'},
+      {l:'Total tickets (all time)', v: g.total_tickets ?? (g.cached_total != null ? `${g.cached_total} synced` : '—')},
       {l:'Open now', v: g.open_total ?? '—'},
       {l:'Created last 7d', v: g.created_last_7d ?? '—'},
       {l:'Closed last 7d', v: g.closed_last_7d ?? '—'},
@@ -591,9 +635,11 @@ async function loadGorgias() {
       data:{labels:Object.keys(days), datasets:[{label:'Tickets created', data:Object.values(days), backgroundColor:'#ffc800', borderColor:'rgba(16,17,20,.2)', borderWidth:1, borderRadius:6}]},
       options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true, ticks:{precision:0}}}}
     });
-    note.textContent = 'Live from Gorgias · fetched ' + new Date(g.fetched_at).toLocaleString()
-      + (g.errors?.length ? ' · some metrics unavailable: ' + g.errors.join('; ') : '');
-  } catch (e) { note.textContent = 'Could not reach Gorgias: ' + e.message; }
+    note.textContent = (g.configured
+      ? 'Synced data + live Gorgias metrics · ' + new Date(g.fetched_at).toLocaleString()
+      : '⚠️ ' + (g.message || 'Live metrics unavailable'))
+      + (g.errors?.length ? ' · issues: ' + g.errors.join('; ') : '');
+  } catch (e) { note.textContent = 'Gorgias error: ' + e.message; }
 }
 
 // ---------- knowledge bases ----------
@@ -809,7 +855,7 @@ api('/api/auth/me').then(m => {
   }
 }).catch(() => {});
 
-loadOverview(); loadEvents(); loadShopify(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors(); loadRequests();
+loadOverview().then(prefetchPeriods); loadEvents(); loadShopify(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors(); loadRequests();
 </script>
 </body>
 </html>

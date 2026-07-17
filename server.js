@@ -494,6 +494,7 @@ async function syncGorgias(maxPages = 8) {
       [JSON.stringify({ ...st, last_run: new Date().toISOString(), upserts, pages, cached, last_error: lastError })])
       .catch(e => console.error('sync_state write:', e.message));
     syncRunning = false;
+    overviewCache.clear();
   }
   return { configured: true, pages, upserts, backfill_done: !!st.backfill_done, backfill_oldest: st.backfill_oldest || null, error: lastError };
 }
@@ -699,6 +700,7 @@ async function syncShopify(maxPages = 8) {
       [JSON.stringify({ ...st, last_run: new Date().toISOString(), upserts, pages, cached, last_error: lastError })])
       .catch(e => console.error('shopify sync_state write:', e.message));
     shopifySyncRunning = false;
+    overviewCache.clear();
   }
   return { configured: true, pages, upserts, backfill_done: !!st.backfill_done, error: lastError };
 }
@@ -786,7 +788,7 @@ async function overviewStats(days) {
                 count(*) FILTER (WHERE closed_datetime >= now()-$1::interval)::int closed,
                 count(*) FILTER (WHERE created_datetime >= now()-$1::interval AND (subject ~* '${CANCEL_RX}' OR tags::text ~* '${CANCEL_RX}'))::int cancel_refund
                 FROM tickets_cache`, params),
-    pool.query(`SELECT id, title, event_date, added_by, attachment_name FROM events
+    pool.query(`SELECT id, title, description, event_date, added_by, attachment_name FROM events
                 WHERE event_date >= (now()-$1::interval)::date ORDER BY event_date`, params),
     pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)
   ]);
@@ -824,33 +826,37 @@ async function overviewStats(days) {
   };
 }
 
+const overviewCache = new Map(); // days → {t, v}; cleared after every sync
 app.get('/api/stats/overview', async (req, res) => {
   try {
-    await maybeSync();
-    res.json(await overviewStats(req.query.days));
+    maybeSync().catch(() => {}); // fire-and-forget, never blocks the response
+    const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 366);
+    const hit = overviewCache.get(days);
+    if (hit && Date.now() - hit.t < 60 * 1000) return res.json(hit.v);
+    const v = await overviewStats(days);
+    overviewCache.set(days, { t: Date.now(), v });
+    res.json(v);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// legacy endpoint kept for the Gorgias tab (live snapshot)
+// Gorgias tab: synced-cache stats always; live extras (CSAT, FRT, all-time total) when the connector is available
 app.get('/api/gorgias/stats', async (_req, res) => {
   const cfg = await getGorgiasConfig();
-  if (!cfg) return res.json({ configured: false, message: 'Gorgias not connected — add it from the Connectors tab (+).' });
-  const out = { configured: true, fetched_at: new Date().toISOString(), errors: [] };
-  const now = Date.now(), weekAgo = now - 7 * 864e5;
+  const out = { configured: !!cfg, fetched_at: new Date().toISOString(), errors: [] };
+  const now = Date.now();
   try {
-    const t = await gorgiasRequest(cfg, '/api/tickets?limit=1&trashed=false');
-    out.total_tickets = t.meta?.total_resources ?? null;
-  } catch (e) { out.errors.push(String(e.message)); }
-  try {
-    // weekly counts from the synced cache (complete), not from a 100-ticket sample
     const c = await pool.query(`SELECT
+      count(*)::int cached_total,
       count(*) FILTER (WHERE status='open')::int open_total,
       count(*) FILTER (WHERE created_datetime >= now()-interval '7 days')::int created_7d,
       count(*) FILTER (WHERE closed_datetime >= now()-interval '7 days')::int closed_7d
       FROM tickets_cache`);
-    out.open_total = c.rows[0].open_total;
-    out.created_last_7d = c.rows[0].created_7d;
-    out.closed_last_7d = c.rows[0].closed_7d;
+    Object.assign(out, {
+      cached_total: c.rows[0].cached_total,
+      open_total: c.rows[0].open_total,
+      created_last_7d: c.rows[0].created_7d,
+      closed_last_7d: c.rows[0].closed_7d
+    });
     const perDay = await pool.query(`SELECT created_datetime::date d, count(*)::int c FROM tickets_cache
       WHERE created_datetime >= now()-interval '7 days' GROUP BY 1 ORDER BY 1`);
     const days = {};
@@ -858,21 +864,29 @@ app.get('/api/gorgias/stats', async (_req, res) => {
     perDay.rows.forEach(r => { const d = String(r.d).slice(0, 10); if (d in days) days[d] = r.c; });
     out.created_per_day = days;
   } catch (e) { out.errors.push(String(e.message)); }
-  try {
-    const s = await gorgiasRequest(cfg, '/api/satisfaction-surveys?limit=100');
-    const scored = (s.data || []).filter(x => typeof x.score === 'number');
-    out.csat_responses = scored.length;
-    out.csat_avg_5 = scored.length ? +(scored.reduce((a, x) => a + x.score, 0) / scored.length).toFixed(2) : null;
-  } catch (e) { out.errors.push(String(e.message)); }
-  try {
-    const frt = await gorgiasRequest(cfg, '/api/reporting/stats?limit=1', {
-      method: 'POST',
-      body: JSON.stringify({ scope: 'first-response-time', measures: ['averageFirstResponseTime'], filters: [], timezone: 'UTC' })
-    });
-    const row = frt?.data?.[0] || frt?.data || {};
-    const v = row.averageFirstResponseTime ?? row['FirstResponseTime.averageFirstResponseTime'] ?? null;
-    out.avg_first_response_seconds = typeof v === 'number' ? v : (v ? Number(v) : null);
-  } catch (e) { out.errors.push(String(e.message)); }
+  if (cfg) {
+    try {
+      const t = await gorgiasRequest(cfg, '/api/tickets?limit=1&trashed=false');
+      out.total_tickets = t.meta?.total_resources ?? null;
+    } catch (e) { out.errors.push(String(e.message)); }
+    try {
+      const s = await gorgiasRequest(cfg, '/api/satisfaction-surveys?limit=100');
+      const scored = (s.data || []).filter(x => typeof x.score === 'number');
+      out.csat_responses = scored.length;
+      out.csat_avg_5 = scored.length ? +(scored.reduce((a, x) => a + x.score, 0) / scored.length).toFixed(2) : null;
+    } catch (e) { out.errors.push(String(e.message)); }
+    try {
+      const frt = await gorgiasRequest(cfg, '/api/reporting/stats?limit=1', {
+        method: 'POST',
+        body: JSON.stringify({ scope: 'first-response-time', measures: ['averageFirstResponseTime'], filters: [], timezone: 'UTC' })
+      });
+      const row = frt?.data?.[0] || frt?.data || {};
+      const v = row.averageFirstResponseTime ?? row['FirstResponseTime.averageFirstResponseTime'] ?? null;
+      out.avg_first_response_seconds = typeof v === 'number' ? v : (v ? Number(v) : null);
+    } catch (e) { out.errors.push(String(e.message)); }
+  } else {
+    out.message = 'Live Gorgias metrics unavailable — the connector needs re-adding on the ＋ page. Showing locally synced data.';
+  }
   res.json(out);
 });
 
