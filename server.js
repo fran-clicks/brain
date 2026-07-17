@@ -125,6 +125,11 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS sync_state (k TEXT PRIMARY KEY, v JSONB NOT NULL DEFAULT '{}');
     CREATE TABLE IF NOT EXISTS uk_stock (
       sku TEXT PRIMARY KEY, name TEXT DEFAULT '', qty INT, raw JSONB, updated_at TIMESTAMPTZ DEFAULT now());
+    ALTER TABLE uk_stock ADD COLUMN IF NOT EXISTS upc TEXT DEFAULT '';
+    ALTER TABLE uk_stock ADD COLUMN IF NOT EXISTS brand_new INT;
+    ALTER TABLE uk_stock ADD COLUMN IF NOT EXISTS non_pristine INT;
+    ALTER TABLE uk_stock ADD COLUMN IF NOT EXISTS damaged INT;
+    ALTER TABLE uk_stock ADD COLUMN IF NOT EXISTS founders INT;
     CREATE TABLE IF NOT EXISTS uk_stock_history (
       taken_at TIMESTAMPTZ DEFAULT now(), sku TEXT, qty INT);
     CREATE TABLE IF NOT EXISTS orders_cache (
@@ -628,17 +633,27 @@ async function syncUkStock() {
     const items = extractStockItems(j);
     if (!items) throw new Error(`unrecognized response shape — top-level keys: ${Object.keys(j || {}).slice(0, 10).join(', ')}`);
     let upserts = 0;
+    const num = (v) => Number.isFinite(+v) ? Math.trunc(+v) : null;
     for (const it of items) {
       const sku = String(pickField(it, ['sku', 'SKU', 'code', 'product_code', 'id', 'product_id']) ?? '').slice(0, 100);
       if (!sku) continue;
-      const name = String(pickField(it, ['name', 'title', 'product', 'product_name', 'description']) ?? '').slice(0, 300);
-      const qtyRaw = pickField(it, ['qty', 'quantity', 'stock', 'available', 'count', 'units', 'on_hand', 'level']);
-      const qty = Number.isFinite(+qtyRaw) ? Math.trunc(+qtyRaw) : null;
+      const name = String(pickField(it, ['description', 'name', 'title', 'product', 'product_name']) ?? '').slice(0, 300);
+      const upc = String(pickField(it, ['upc', 'UPC', 'barcode', 'ean']) ?? '').slice(0, 50);
+      const brandNew = num(pickField(it, ['brand_new', 'brandNew', 'brand new', 'new']));
+      const nonPristine = num(pickField(it, ['non_pristine', 'nonPristine', 'non-pristine', 'non pristine']));
+      const damaged = num(pickField(it, ['damaged']));
+      const founders = num(pickField(it, ['founders', 'founder']));
+      let qty = num(pickField(it, ['total', 'TOTAL', 'qty', 'quantity', 'stock', 'available', 'count', 'units', 'on_hand', 'level']));
+      if (qty == null) {
+        const parts = [brandNew, nonPristine, damaged, founders].filter(x => x != null);
+        if (parts.length) qty = parts.reduce((a, b) => a + b, 0);
+      }
       const prev = (await pool.query('SELECT qty FROM uk_stock WHERE sku=$1', [sku])).rows[0];
       await pool.query(
-        `INSERT INTO uk_stock (sku, name, qty, raw, updated_at) VALUES ($1,$2,$3,$4,now())
-         ON CONFLICT (sku) DO UPDATE SET name=$2, qty=$3, raw=$4, updated_at=now()`,
-        [sku, name, qty, JSON.stringify(it)]);
+        `INSERT INTO uk_stock (sku, name, upc, qty, brand_new, non_pristine, damaged, founders, raw, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
+         ON CONFLICT (sku) DO UPDATE SET name=$2, upc=$3, qty=$4, brand_new=$5, non_pristine=$6, damaged=$7, founders=$8, raw=$9, updated_at=now()`,
+        [sku, name, upc, qty, brandNew, nonPristine, damaged, founders, JSON.stringify(it)]);
       if (!prev || prev.qty !== qty) {
         await pool.query('INSERT INTO uk_stock_history (sku, qty) VALUES ($1,$2)', [sku, qty]);
       }
@@ -659,7 +674,7 @@ app.get('/api/stock', async (_req, res) => {
   const conn = await getConnector('uk_stock');
   const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='uk_stock'`)).rows[0]?.v || null;
   const [items, totals, history] = await Promise.all([
-    pool.query('SELECT sku, name, qty, updated_at FROM uk_stock ORDER BY qty ASC NULLS LAST LIMIT 300'),
+    pool.query('SELECT sku, name, upc, qty, brand_new, non_pristine, damaged, founders, updated_at FROM uk_stock ORDER BY qty ASC NULLS LAST LIMIT 300'),
     pool.query(`SELECT count(*)::int skus, coalesce(sum(qty),0)::int units,
                 count(*) FILTER (WHERE qty IS NOT NULL AND qty < 10 AND qty > 0)::int low,
                 count(*) FILTER (WHERE qty = 0)::int out_of_stock FROM uk_stock`),

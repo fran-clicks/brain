@@ -245,7 +245,7 @@ footer{color:rgba(16,17,20,.45)}
       <button class="btn" style="float:right;margin:0;padding:5px 12px" id="stockSyncBtn" onclick="stockSync()">🔄 Sync now</button>
     </h2>
     <input class="search" id="stockSearch" placeholder="Search SKU or product…">
-    <table id="stockTable"><thead><tr><th>SKU</th><th>Product</th><th>Units</th><th>Updated</th></tr></thead><tbody></tbody></table>
+    <table id="stockTable"><thead><tr><th>SKU</th><th>Description</th><th>Brand new</th><th>Non-pristine</th><th>Damaged</th><th>Founders</th><th>Total</th></tr></thead><tbody></tbody></table>
     <div class="note" id="stockNote">Loading stock…</div>
   </div>
   <div class="card">
@@ -734,12 +734,13 @@ let stockItems = [];
 function renderStockTable() {
   const q = (document.getElementById('stockSearch').value || '').toLowerCase();
   const rows = stockItems.filter(i => (i.sku + ' ' + i.name).toLowerCase().includes(q));
+  const cell = v => v == null ? '<span style="color:var(--muted)">—</span>' : v;
   document.querySelector('#stockTable tbody').innerHTML = rows.length ? rows.map(i =>
     `<tr${i.qty === 0 ? ' style="background:rgba(220,38,38,.12)"' : i.qty != null && i.qty < 10 ? ' style="background:rgba(220,38,38,.05)"' : ''}>
-     <td><span class="tag src">${esc(i.sku)}</span></td><td>${esc(i.name)}</td>
-     <td><b>${i.qty ?? '?'}</b>${i.qty === 0 ? ' 🚨' : i.qty != null && i.qty < 10 ? ' ⚠️' : ''}</td>
-     <td>${esc(String(i.updated_at).slice(0,10))}</td></tr>`).join('')
-    : '<tr><td colspan="4" class="empty">No matches</td></tr>';
+     <td><span class="tag src" title="UPC ${esc(i.upc || '—')}">${esc(i.sku)}</span></td><td>${esc(i.name)}</td>
+     <td>${cell(i.brand_new)}</td><td>${cell(i.non_pristine)}</td><td>${cell(i.damaged)}</td><td>${cell(i.founders)}</td>
+     <td><b>${i.qty ?? '?'}</b>${i.qty === 0 ? ' 🚨' : i.qty != null && i.qty < 10 ? ' ⚠️' : ''}</td></tr>`).join('')
+    : '<tr><td colspan="7" class="empty">No matches</td></tr>';
 }
 async function loadStock() {
   const note = document.getElementById('stockNote');
