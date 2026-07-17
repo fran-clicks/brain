@@ -369,6 +369,43 @@ const eventMarkers = {
 };
 Chart.register(eventMarkers);
 
+// custom "focus" scale: values ≤300 get 70% of the height (50-step ticks),
+// everything above is compressed with 100/200-step ticks
+const FOCUS_K = 300, FOCUS_SPLIT = 0.7;
+class FocusScale extends Chart.registry.getScale('linear').prototype.constructor {
+  getPixelForValue(v) {
+    if (this.max <= FOCUS_K) return super.getPixelForValue(v);
+    const { top, bottom } = this;
+    const h = bottom - top;
+    const val = Math.max(0, Math.min(v ?? 0, this.max));
+    const t = val <= FOCUS_K
+      ? (val / FOCUS_K) * FOCUS_SPLIT
+      : FOCUS_SPLIT + ((val - FOCUS_K) / (this.max - FOCUS_K)) * (1 - FOCUS_SPLIT);
+    return bottom - t * h;
+  }
+  getValueForPixel(px) {
+    if (this.max <= FOCUS_K) return super.getValueForPixel(px);
+    const { top, bottom } = this;
+    const t = (bottom - px) / (bottom - top);
+    return t <= FOCUS_SPLIT
+      ? (t / FOCUS_SPLIT) * FOCUS_K
+      : FOCUS_K + ((t - FOCUS_SPLIT) / (1 - FOCUS_SPLIT)) * (this.max - FOCUS_K);
+  }
+  buildTicks() {
+    if (this.max <= FOCUS_K) return super.buildTicks();
+    const step = (this.max - FOCUS_K) > 900 ? 200 : 100;
+    const ticks = [0, 50, 100, 150, 200, 250, 300];
+    const top = Math.ceil((this.max) / step) * step;
+    for (let v = FOCUS_K + step; v <= top; v += step) ticks.push(v);
+    this.min = 0;
+    this.max = top;
+    return ticks.map(value => ({ value }));
+  }
+}
+FocusScale.id = 'focus';
+FocusScale.defaults = Chart.registry.getScale('linear').defaults;
+Chart.register(FocusScale);
+
 // floating tooltip for event pins
 function bindEventHover(canvas) {
   if (canvas.$evtBound) return;
@@ -501,8 +538,8 @@ async function loadOverview() {
             }
           }
         },
-        scales:{ y:{beginAtZero:true, ticks:{precision:0},
-                    title:{display:true, text:'Count per day', color:'#5f6368', font:{size:11}}} } }
+        scales:{ y:{type:'focus', beginAtZero:true, ticks:{precision:0},
+                    title:{display:true, text:'Count per day (detail below 300)', color:'#5f6368', font:{size:11}}} } }
     });
     document.getElementById('syncInfo').textContent = s.last_sync
       ? `· synced ${new Date(s.last_sync).toLocaleString()} · ${s.sync?.cached ?? '?'} tickets cached` : '';
