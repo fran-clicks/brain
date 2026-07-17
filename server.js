@@ -146,6 +146,12 @@ async function initDb() {
       attachment_name TEXT, attachment_type TEXT, attachment_data TEXT,
       created_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS sync_state (k TEXT PRIMARY KEY, v JSONB NOT NULL DEFAULT '{}');
+    CREATE TABLE IF NOT EXISTS returns_cache (
+      redo_id TEXT PRIMARY KEY, order_name TEXT DEFAULT '', type TEXT DEFAULT '', status TEXT DEFAULT '',
+      created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
+      refund NUMERIC DEFAULT 0, exchange_value NUMERIC DEFAULT 0, store_credit NUMERIC DEFAULT 0,
+      items JSONB DEFAULT '[]', return_tags JSONB DEFAULT '[]', synced_at TIMESTAMPTZ DEFAULT now());
+    CREATE INDEX IF NOT EXISTS idx_rc_created ON returns_cache (created_at);
     CREATE TABLE IF NOT EXISTS campaigns_cache (
       klaviyo_id TEXT PRIMARY KEY, name TEXT DEFAULT '', channel TEXT DEFAULT '', status TEXT DEFAULT '',
       send_time TIMESTAMPTZ, recipients INT, opens INT, open_rate DOUBLE PRECISION,
@@ -238,6 +244,13 @@ const CONNECTOR_TYPES = {
     fields: [
       { key: 'bot_token', label: 'Bot User OAuth Token, starts with xoxb- (api.slack.com/apps → your app → OAuth & Permissions)', secret: true },
       { key: 'signing_secret', label: 'Signing Secret (api.slack.com/apps → your app → Basic Information)', secret: true }
+    ]
+  },
+  redo: {
+    label: 'Redo (returns)',
+    fields: [
+      { key: 'store_id', label: 'Store ID (Redo Dashboard → Settings → Developer → General)', secret: false },
+      { key: 'api_secret', label: 'API secret — create an API client with only the returns_read scope (Settings → Developer → Add API Client)', secret: true }
     ]
   },
   klaviyo: {
@@ -377,6 +390,9 @@ app.post('/api/connectors', async (req, res) => {
     } else if (type === 'shopify') {
       const d = await shopifyGraphql(config, 'query { shop { name } }');
       meta = { store: d?.shop?.name || config.store_domain, domain: config.store_domain };
+    } else if (type === 'redo') {
+      const t = await redoRequest(config, `/stores/${config.store_id}/returns`, { 'X-Page-Size': '1' });
+      meta = { returns_visible: (t.data.returns || []).length >= 0 ? 'ok' : 'none' };
     } else if (type === 'klaviyo') {
       const m = await klaviyoRequest(config, '/api/metrics/');
       meta = { metrics_visible: (m.data || []).length };
@@ -403,6 +419,7 @@ app.post('/api/connectors', async (req, res) => {
   if (type === 'shopify') syncShopify(30).catch(e => console.error('initial shopify sync:', e.message));
   if (type === 'uk_stock') syncUkStock().catch(e => console.error('initial stock sync:', e.message));
   if (type === 'klaviyo') syncKlaviyo().catch(e => console.error('initial klaviyo sync:', e.message));
+  if (type === 'redo') syncRedo(20).catch(e => console.error('initial redo sync:', e.message));
   res.status(201).json(rows[0]);
 });
 
@@ -626,6 +643,13 @@ setInterval(async () => {
       await syncKlaviyo();
     }
   } catch (e) { console.error('interval klaviyo sync:', e.message); }
+  try {
+    const rs = (await pool.query(`SELECT v FROM sync_state WHERE k='redo'`)).rows[0]?.v;
+    if (await getConnector('redo')) {
+      if (!rs || !rs.backfill_done) await syncRedo(10);
+      else if (!rs.last_run || Date.now() - Date.parse(rs.last_run) > 55 * 60 * 1000) await syncRedo(6);
+    }
+  } catch (e) { console.error('interval redo sync:', e.message); }
 }, 5 * 60 * 1000);
 
 async function bootSync() {
@@ -640,6 +664,115 @@ async function bootSync() {
 
 app.post('/api/gorgias/sync', async (_req, res) => {
   try { res.json(await syncGorgias(50)); }
+  catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ---------- Redo (returns) ----------
+async function redoRequest(cfg, pathAndQuery, pageHeaders = {}) {
+  const r = await fetch(`https://api.getredo.com/v2.2${pathAndQuery}`, {
+    headers: { Authorization: `Bearer ${cfg.api_secret}`, Accept: 'application/json', ...pageHeaders }
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Redo ${pathAndQuery.split('?')[0]} → ${r.status}: ${(j.detail || j.title || '').slice(0, 200)}`);
+  return { data: j, next: r.headers.get('x-page-next') || null };
+}
+const moneyNum = (m) => { const v = parseFloat(m?.amount ?? m); return Number.isFinite(v) ? v : 0; };
+
+async function upsertRedoReturn(x) {
+  await pool.query(
+    `INSERT INTO returns_cache (redo_id, order_name, type, status, created_at, updated_at, refund, exchange_value, store_credit, items, return_tags, synced_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+     ON CONFLICT (redo_id) DO UPDATE SET order_name=$2, type=$3, status=$4, created_at=$5, updated_at=$6,
+       refund=$7, exchange_value=$8, store_credit=$9, items=$10, return_tags=$11, synced_at=now()`,
+    [x.id, x.order?.name || '', x.type || 'return', x.status || '',
+     x.createdAt || null, x.updatedAt || null,
+     moneyNum(x.totals?.refund?.amount), moneyNum(x.totals?.exchange?.amount), moneyNum(x.totals?.storeCredit?.amount),
+     JSON.stringify((x.items || []).map(i => ({ sku: i.sku || '', qty: i.quantity || 1, reason: i.reason || '', green: !!i.greenReturn }))),
+     JSON.stringify((x.tags || []).map(t => t.name))]);
+}
+
+let redoSyncRunning = false;
+async function syncRedo(maxPages = 6) {
+  if (redoSyncRunning) return { skipped: true };
+  const conn = await getConnector('redo');
+  if (!conn) return { configured: false };
+  const cfg = conn.config;
+  redoSyncRunning = true;
+  const st = (await pool.query(`SELECT v FROM sync_state WHERE k='redo'`)).rows[0]?.v || {};
+  let pages = 0, upserts = 0, lastError = null;
+  const horizon = Date.now() - BACKFILL_HORIZON_DAYS * 864e5;
+  try {
+    // incremental: everything updated since last run
+    if (st.last_updated) {
+      let cursor = null, newest = st.last_updated;
+      while (pages < maxPages) {
+        const { data, next } = await redoRequest(cfg,
+          `/stores/${cfg.store_id}/returns?updated_at_min=${encodeURIComponent(st.last_updated)}`,
+          { 'X-Page-Size': '100', ...(cursor ? { 'X-Page-Continue': cursor } : {}) });
+        const rows = data.returns || [];
+        if (!rows.length) break;
+        for (const x of rows) { await upsertRedoReturn(x); upserts++; if (x.updatedAt > newest) newest = x.updatedAt; }
+        pages++;
+        cursor = next;
+        if (!cursor) break;
+      }
+      st.last_updated = newest;
+    }
+    // backfill history to the horizon, resumable
+    while (!st.backfill_done && pages < maxPages) {
+      const { data, next } = await redoRequest(cfg, `/stores/${cfg.store_id}/returns`,
+        { 'X-Page-Size': '100', ...(st.backfill_cursor ? { 'X-Page-Continue': st.backfill_cursor } : {}) });
+      const rows = data.returns || [];
+      if (!rows.length) { st.backfill_done = true; break; }
+      for (const x of rows) { await upsertRedoReturn(x); upserts++; }
+      pages++;
+      if (!st.last_updated) st.last_updated = new Date().toISOString();
+      const oldest = rows[rows.length - 1]?.createdAt;
+      st.backfill_oldest = oldest || st.backfill_oldest;
+      st.backfill_cursor = next;
+      if (!next || (oldest && Date.parse(oldest) < horizon)) st.backfill_done = true;
+    }
+  } catch (e) {
+    lastError = String(e.message);
+    console.error('redo sync:', lastError);
+  } finally {
+    const cached = (await pool.query('SELECT count(*)::int c FROM returns_cache')).rows[0].c;
+    await pool.query(`INSERT INTO sync_state (k, v) VALUES ('redo', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
+      [JSON.stringify({ ...st, last_run: new Date().toISOString(), upserts, pages, cached, last_error: lastError })])
+      .catch(() => {});
+    redoSyncRunning = false;
+    overviewCache.clear();
+  }
+  return { configured: true, pages, upserts, backfill_done: !!st.backfill_done, error: lastError };
+}
+
+app.get('/api/redo/summary', async (_req, res) => {
+  try {
+    const conn = await getConnector('redo');
+    const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='redo'`)).rows[0]?.v || null;
+    const has = (await pool.query('SELECT 1 FROM returns_cache LIMIT 1')).rows.length > 0;
+    if (!has) return res.json({ configured: !!conn, empty: true, sync: ss });
+    const [tot, reasons, statuses, recent] = await Promise.all([
+      pool.query(`SELECT count(*)::int returns,
+        count(*) FILTER (WHERE type='claim')::int claims,
+        count(*) FILTER (WHERE type='warranty')::int warranties,
+        round(coalesce(sum(refund),0))::int refund_total,
+        round(coalesce(sum(exchange_value),0))::int exchange_total,
+        round(coalesce(sum(store_credit),0))::int credit_total
+        FROM returns_cache WHERE created_at >= now()-interval '30 days'`),
+      pool.query(`SELECT coalesce(nullif(i->>'reason',''),'(no reason)') reason, count(*)::int c
+        FROM returns_cache, LATERAL jsonb_array_elements(items) i
+        WHERE created_at >= now()-interval '30 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 8`),
+      pool.query(`SELECT status, count(*)::int c FROM returns_cache
+        WHERE status NOT IN ('complete','rejected','deleted') GROUP BY 1 ORDER BY 2 DESC`),
+      pool.query(`SELECT redo_id, order_name, type, status, created_at::date d, refund, exchange_value, store_credit, items, return_tags
+        FROM returns_cache ORDER BY created_at DESC NULLS LAST LIMIT 12`)
+    ]);
+    res.json({ configured: true, totals_30d: tot.rows[0], top_reasons: reasons.rows, open_by_status: statuses.rows, recent: recent.rows, sync: ss });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/redo/sync', async (_req, res) => {
+  try { res.json(await syncRedo(20)); }
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 
@@ -1318,6 +1451,20 @@ const TOOLS = [
     }
   },
   {
+    name: 'query_returns_redo',
+    description: 'Redo returns/claims/warranties from the local sync: counts, refund vs exchange vs store-credit amounts, reasons, statuses. Filterable by type, status, reason regex, sku regex, and recency.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', enum: ['return', 'claim', 'warranty'] },
+        status: { type: 'string', description: 'open, in_transit, delivered, needs_review, in_review, complete, rejected, flagged, pre_shipment' },
+        reason_match: { type: 'string', description: 'case-insensitive regex against item return reasons' },
+        sku_match: { type: 'string', description: 'case-insensitive regex against returned item SKUs' },
+        days: { type: 'integer', description: 'only returns created in the last N days' }
+      }
+    }
+  },
+  {
     name: 'query_campaigns',
     description: 'Klaviyo email/SMS campaign performance from the local sync: send date, recipients, open/click rates, attributed revenue. Filter by name regex and/or recency.',
     input_schema: {
@@ -1434,6 +1581,26 @@ async function runTool(name, input, ctx) {
     return { ...agg.rows[0], sample: sample.rows,
       note: `From the local Shopify sync. Last sync: ${ss?.last_run || 'unknown'}${ss?.backfill_done ? '' : ' (history backfill still in progress — older orders may be missing)'}.` };
   }
+  if (name === 'query_returns_redo') {
+    const conn = await getConnector('redo');
+    if (!conn) return { error: 'Redo is not connected yet — an admin can add it on the ＋ page.' };
+    const conds = [], p = [];
+    const add = (v, fn) => { p.push(v); conds.push(fn(`$${p.length}`)); };
+    if (input.type) add(input.type, x => `type = ${x}`);
+    if (input.status) add(input.status, x => `status = ${x}`);
+    if (input.reason_match) add(String(input.reason_match).slice(0, 200), x => `items::text ~* ${x}`);
+    if (input.sku_match) add(String(input.sku_match).slice(0, 200), x => `items::text ~* ${x}`);
+    if (input.days) add(`${Math.min(+input.days || 30, 400)} days`, x => `created_at >= now()-${x}::interval`);
+    const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
+    const agg = await pool.query(
+      `SELECT count(*)::int returns, round(coalesce(sum(refund),0))::int refund_total,
+       round(coalesce(sum(exchange_value),0))::int exchange_total, round(coalesce(sum(store_credit),0))::int store_credit_total
+       FROM returns_cache ${where}`, p);
+    const sample = await pool.query(
+      `SELECT order_name, type, status, created_at::date created, refund, items FROM returns_cache ${where}
+       ORDER BY created_at DESC LIMIT 10`, p);
+    return { ...agg.rows[0], sample: sample.rows, note: 'exchange_total = value kept as exchanges instead of refunded.' };
+  }
   if (name === 'query_campaigns') {
     const conn = await getConnector('klaviyo');
     if (!conn) return { error: 'Klaviyo is not connected yet — an admin can add it on the ＋ page.' };
@@ -1523,7 +1690,7 @@ CONNECTION REQUESTS are a core part of your job. Members cannot add connectors �
 2. Once you have service + reason, call create_connection_request to log it.
 3. Tell them: an admin reviews it in the Requests list on this page; if approved, the admin sets up the credentials and the dev team wires the sync.
 For ADMINS preparing an approved request, you may call create_connector_type to add a tailored credentials form to the dropdown (clear field labels saying where to find each value; every credential secret:true).
-gorgias, anthropic, slack, shopify, klaviyo and uk_stock connectors are fully wired: they test the connection and work immediately once an admin saves them. Shopify sync unlocks sales/order/delivery data (query_sales) and the sales line on Overview. klaviyo unlocks campaign performance (query_campaigns) and auto-marks campaign sends as ✉️ on the Overview chart. uk_stock unlocks UK warehouse stock levels (query_uk_stock).
+gorgias, anthropic, slack, shopify, klaviyo, redo and uk_stock connectors are fully wired: they test the connection and work immediately once an admin saves them. redo unlocks returns/claims/warranties data (query_returns_redo). Shopify sync unlocks sales/order/delivery data (query_sales) and the sales line on Overview. klaviyo unlocks campaign performance (query_campaigns) and auto-marks campaign sends as ✉️ on the Overview chart. uk_stock unlocks UK warehouse stock levels (query_uk_stock).
 Use list_pending_integrations to report request/wiring status. You cannot approve anything yourself.
 Use your tools to answer data questions with real numbers. If a question needs sales/order/delivery data, use query_sales and relay its guidance. Be concise. Answer in the user's language.${opts.slack ? '\nYou are replying inside Slack: use Slack formatting (*bold*, bullet lines with •), keep replies short, no markdown headers or tables.' : ''}`;
 

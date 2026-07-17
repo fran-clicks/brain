@@ -161,6 +161,7 @@ footer{color:rgba(16,17,20,.45)}
   <button data-s="sales">🛒 Shopify</button>
   <button data-s="stock">📦 UK Stock</button>
   <button data-s="klaviyo">✉️ Klaviyo</button>
+  <button data-s="redo">↩️ Returns</button>
   <button data-s="kb">💡 Knowledge Bases</button>
   <button data-s="conn" title="Connectors" style="font-size:16px;padding:8px 16px;font-weight:800">＋</button>
 </nav>
@@ -302,6 +303,26 @@ footer{color:rgba(16,17,20,.45)}
   </div>
 </div>
 
+<!-- REDO RETURNS -->
+<div class="section" id="s-redo">
+  <div class="grid kpis" id="rdKpis"></div>
+  <div class="grid two" style="margin-top:14px">
+    <div class="card">
+      <h2>Top return reasons (30d)</h2>
+      <table id="rdReasons"><thead><tr><th>Reason</th><th>Items</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>In progress by status</h2>
+      <table id="rdStatuses"><thead><tr><th>Status</th><th>Returns</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Recent returns <button class="btn" style="float:right;margin:0;padding:5px 12px" id="rdSyncBtn" onclick="rdSync()">🔄 Sync now</button></h2>
+    <table id="rdRecent"><thead><tr><th>Order</th><th>Type</th><th>Status</th><th>Date</th><th>Items · reason</th><th>Refund</th><th>Tags</th></tr></thead><tbody></tbody></table>
+    <div class="note" id="rdNote">Loading Redo data…</div>
+  </div>
+</div>
+
 <!-- KNOWLEDGE BASES -->
 <div class="section" id="s-kb">
   <div class="card">
@@ -427,6 +448,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (s === 'sales') loadShopify();
   if (s === 'stock') loadStock();
   if (s === 'klaviyo') loadKlaviyo();
+  if (s === 'redo') loadRedo();
   if (s === 'home') loadOverview();
   if (s === 'kb') loadKbs();
   if (s === 'conn') { loadConnectors(); loadRequests(); loadMembers(); }
@@ -956,6 +978,49 @@ async function stockSync() {
   catch (e) { document.getElementById('stockNote').textContent = '⚠️ ' + e.message; }
   finally { b.disabled = false; b.textContent = '🔄 Sync'; }
 }
+// redo returns tab
+async function loadRedo() {
+  const note = document.getElementById('rdNote');
+  try {
+    const s = await api('/api/redo/summary');
+    if (!s.configured) { note.textContent = 'Redo is not connected — an admin can add it on the ＋ page.'; return; }
+    if (s.empty) { note.textContent = 'Connected — waiting for the first returns to sync' + (s.sync?.last_error ? ` (⚠️ ${s.sync.last_error})` : '…'); return; }
+    const t = s.totals_30d || {};
+    document.getElementById('rdKpis').innerHTML = [
+      {l:'Returns (30d)', v: t.returns ?? '—'},
+      {l:'Claims / warranties (30d)', v: `${t.claims ?? 0} / ${t.warranties ?? 0}`},
+      {l:'Refunded (30d)', v: (t.refund_total ?? 0).toLocaleString()},
+      {l:'Kept as exchanges (30d)', v: (t.exchange_total ?? 0).toLocaleString()},
+      {l:'Store credit (30d)', v: (t.credit_total ?? 0).toLocaleString()}
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    document.querySelector('#rdReasons tbody').innerHTML = (s.top_reasons || []).map(r =>
+      `<tr><td>${esc(r.reason)}</td><td>${r.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
+    document.querySelector('#rdStatuses tbody').innerHTML = (s.open_by_status || []).map(r =>
+      `<tr><td><span class="tag pending">${esc(r.status)}</span></td><td>${r.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">Nothing in progress 🎉</td></tr>';
+    document.querySelector('#rdRecent tbody').innerHTML = (s.recent || []).map(r => {
+      const items = (r.items || []).map(i => `${i.qty}× ${i.sku || '?'}${i.reason ? ` (${i.reason})` : ''}${i.green ? ' 🌱' : ''}`).join(', ');
+      return `<tr><td><b>${esc(r.order_name)}</b></td>
+        <td><span class="tag src">${esc(r.type)}</span></td>
+        <td><span class="tag ${r.status === 'complete' ? 'approved' : r.status === 'rejected' ? 'src' : 'pending'}">${esc(r.status)}</span></td>
+        <td>${esc(String(r.d).slice(0,10))}</td><td>${esc(items)}</td>
+        <td>${(+r.refund) ? (+r.refund).toLocaleString() : '—'}</td>
+        <td>${(r.return_tags || []).map(t => `<span class="tag src">${esc(t)}</span>`).join(' ') || '—'}</td></tr>`;
+    }).join('');
+    note.textContent = s.sync
+      ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · ${s.sync.cached ?? '?'} returns cached`
+        + (s.sync.backfill_done ? '' : ' · ⏳ history backfill in progress') + (s.sync.last_error ? ` · ⚠️ ${s.sync.last_error}` : '')
+        + ' · 🌱 = green return (no shipment needed)'
+      : '';
+  } catch (e) { note.textContent = '⚠️ ' + e.message; }
+}
+async function rdSync() {
+  const b = document.getElementById('rdSyncBtn');
+  b.disabled = true; b.textContent = '⏳ Syncing…';
+  try { await api('/api/redo/sync', {method:'POST', body:'{}'}); loadRedo(); }
+  catch (e) { document.getElementById('rdNote').textContent = '⚠️ ' + e.message; }
+  finally { b.disabled = false; b.textContent = '🔄 Sync now'; }
+}
+
 // klaviyo tab
 async function loadKlaviyo() {
   const note = document.getElementById('kvNote');
@@ -1327,7 +1392,7 @@ api('/api/auth/me').then(m => {
   }
 }).catch(() => {});
 
-loadOverview().then(prefetchPeriods); loadEvents(); loadShopify(); loadStock(); loadKlaviyo(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors(); loadRequests();
+loadOverview().then(prefetchPeriods); loadEvents(); loadShopify(); loadStock(); loadKlaviyo(); loadRedo(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors(); loadRequests();
 </script>
 </body>
 </html>
