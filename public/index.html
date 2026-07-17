@@ -233,19 +233,30 @@ footer{color:rgba(16,17,20,.45)}
       <h2>Top products (30d)</h2>
       <table id="shopProducts"><thead><tr><th>Product</th><th>Units</th></tr></thead><tbody></tbody></table>
     </div>
+    <div class="card">
+      <h2>Top order tags (30d)</h2>
+      <table id="shopTags"><thead><tr><th>Tag</th><th>Orders</th></tr></thead><tbody></tbody></table>
+    </div>
   </div>
   <div class="card">
     <h2>Recent orders <button class="btn" style="float:right;margin:0;padding:5px 12px" id="shopSyncBtn" onclick="shopSync()">🔄 Sync now</button></h2>
-    <table id="shopRecent"><thead><tr><th>Order</th><th>Date</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th></tr></thead><tbody></tbody></table>
+    <table id="shopRecent"><thead><tr><th>Order</th><th>Date</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th><th>Tags</th></tr></thead><tbody></tbody></table>
     <div class="note" id="shopNote">Loading Shopify data…</div>
   </div>
 </div>
 
 <!-- GORGIAS -->
 <div class="section" id="s-gorgias">
+  <div class="periods" id="gPeriods">
+    <button data-d="7" class="active">7 days</button>
+    <button data-d="30">1 month</button>
+    <button data-d="90">3 months</button>
+    <button data-d="180">6 months</button>
+    <button data-d="365">1 year</button>
+  </div>
   <div class="grid kpis" id="gorgiasKpis"></div>
   <div class="card" style="margin-top:14px">
-    <h2>Tickets created — last 7 days</h2>
+    <h2 id="gChartTitle">Tickets created</h2>
     <div class="chart-wrap"><canvas id="gorgiasChart"></canvas></div>
     <div class="note" id="gorgiasNote">Loading Gorgias data…</div>
   </div>
@@ -287,7 +298,7 @@ footer{color:rgba(16,17,20,.45)}
   <div class="grid kpis" id="kvKpis"></div>
   <div class="card" style="margin-top:14px">
     <h2>Recent campaigns <button class="btn" style="float:right;margin:0;padding:5px 12px" id="kvSyncBtn" onclick="kvSync()">🔄 Sync now</button></h2>
-    <table id="kvTable"><thead><tr><th>Campaign</th><th>Channel</th><th>Sent</th><th>Recipients</th><th>Opens</th><th>Clicks</th><th>Attributed revenue</th></tr></thead><tbody></tbody></table>
+    <table id="kvTable"><thead><tr><th>Campaign</th><th>Channel</th><th>Sent</th><th>Recipients</th><th>Opens</th><th>Clicks</th><th>Attributed revenue</th><th>Tickets created</th><th>Tickets closed</th></tr></thead><tbody></tbody></table>
     <div class="note" id="kvNote">Loading Klaviyo data…</div>
   </div>
 </div>
@@ -893,11 +904,14 @@ async function loadShopify() {
       `<tr><td><b>${esc(c.country)}</b></td><td>${(c.revenue ?? 0).toLocaleString()}</td><td>${c.orders}</td></tr>`).join('') || '<tr><td colspan="3" class="empty">—</td></tr>';
     document.querySelector('#shopProducts tbody').innerHTML = s.top_products.map(p =>
       `<tr><td>${esc(p.product)}</td><td>${p.qty}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
+    document.querySelector('#shopTags tbody').innerHTML = (s.top_order_tags || []).map(t =>
+      `<tr><td><span class="tag src">${esc(t.tag)}</span></td><td>${t.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">— (tags fill in as the re-sync runs)</td></tr>';
     document.querySelector('#shopRecent tbody').innerHTML = s.recent.map(o =>
       `<tr${o.cancelled ? ' style="opacity:.5"' : ''}><td><b>${esc(o.order_number)}</b>${o.cancelled ? ' <span class="tag src">cancelled</span>' : ''}</td>
        <td>${esc(String(o.d).slice(0,10))}</td><td>${esc(o.country)}</td><td>${(+o.total_price).toLocaleString()} ${esc(o.currency)}</td>
        <td><span class="tag ${o.financial_status === 'paid' ? 'approved' : 'pending'}">${esc(o.financial_status)}</span></td>
-       <td><span class="tag ${o.fulfillment_status === 'fulfilled' ? 'approved' : 'pending'}">${esc(o.fulfillment_status)}</span></td></tr>`).join('');
+       <td><span class="tag ${o.fulfillment_status === 'fulfilled' ? 'approved' : 'pending'}">${esc(o.fulfillment_status)}</span></td>
+       <td>${(o.order_tags || []).map(t => `<span class="tag src">${esc(t)}</span>`).join(' ') || '—'}</td></tr>`).join('');
     note.textContent = s.sync
       ? `Synced from Shopify · last run ${new Date(s.sync.last_run).toLocaleString()} · ${s.sync.cached ?? '?'} orders cached`
         + (s.sync.backfill_done ? '' : ' · ⏳ history backfill in progress') + (s.sync.last_error ? ` · ⚠️ ${s.sync.last_error}` : '')
@@ -972,11 +986,14 @@ async function loadKlaviyo() {
        <td>${c.recipients != null ? c.recipients.toLocaleString() : '—'}</td>
        <td>${c.open_rate != null ? Math.round(c.open_rate*100) + '%' : '—'}</td>
        <td>${c.click_rate != null ? Math.round(c.click_rate*100) + '%' : '—'}</td>
-       <td>${c.revenue != null ? Math.round(+c.revenue).toLocaleString() : '—'}</td></tr>`).join('')
-      : '<tr><td colspan="7" class="empty">No campaigns synced yet — hit Sync now</td></tr>';
-    note.textContent = s.sync
+       <td>${c.revenue != null ? Math.round(+c.revenue).toLocaleString() : '—'}</td>
+       <td>${c.tickets_created ?? '—'}</td>
+       <td>${c.tickets_closed ?? '—'}</td></tr>`).join('')
+      : '<tr><td colspan="9" class="empty">No campaigns synced yet — hit Sync now</td></tr>';
+    note.textContent = (s.sync
       ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · refreshes hourly${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''} · sends appear as ✉️ on the Overview chart`
-      : '';
+      : '')
+      + ' · ticket counts = Gorgias tickets whose subject contains the email subject, within 21 days of the send ("—" until the subject is synced)';
   } catch (e) { note.textContent = '⚠️ ' + e.message; }
 }
 async function openMail(id) {
@@ -1024,16 +1041,25 @@ async function shopSync() {
 
 // ---------- gorgias live tab ----------
 let gChart;
+let gDays = 7;
+document.querySelectorAll('#gPeriods button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#gPeriods button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  gDays = +b.dataset.d;
+  loadGorgias();
+});
+const gLabel = () => ({7:'7d',30:'30d',90:'3m',180:'6m',365:'1y'})[gDays] || gDays + 'd';
 async function loadGorgias() {
   const note = document.getElementById('gorgiasNote');
   try {
-    const g = await api('/api/gorgias/stats');
+    const g = await api('/api/gorgias/stats?days=' + gDays);
+    document.getElementById('gChartTitle').textContent = `Tickets created — last ${gLabel()}${g.bucket === 'week' ? ' (weekly)' : ''}`;
     const frt = g.avg_first_response_seconds != null ? (g.avg_first_response_seconds/3600).toFixed(1) + 'h' : '—';
     document.getElementById('gorgiasKpis').innerHTML = [
       {l:'Total tickets (all time)', v: g.total_tickets ?? (g.cached_total != null ? `${g.cached_total} synced` : '—')},
       {l:'Open now', v: g.open_total ?? '—'},
-      {l:'Created last 7d', v: g.created_last_7d ?? '—'},
-      {l:'Closed last 7d', v: g.closed_last_7d ?? '—'},
+      {l:`Created (${gLabel()})`, v: g.created_last_7d ?? '—'},
+      {l:`Closed (${gLabel()})`, v: g.closed_last_7d ?? '—'},
       {l:'Avg first response', v: frt},
       {l:`CSAT (${g.csat_responses ?? 0} responses)`, v: g.csat_avg_5 != null ? g.csat_avg_5 + '/5' : '—'}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');

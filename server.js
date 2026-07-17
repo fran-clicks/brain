@@ -170,6 +170,7 @@ async function initDb() {
       currency TEXT DEFAULT '', total_price NUMERIC DEFAULT 0,
       country TEXT DEFAULT '', financial_status TEXT DEFAULT '', fulfillment_status TEXT DEFAULT '',
       items JSONB DEFAULT '[]', updated_at TIMESTAMPTZ, synced_at TIMESTAMPTZ DEFAULT now());
+    ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS order_tags JSONB DEFAULT '[]';
     CREATE INDEX IF NOT EXISTS idx_oc_created ON orders_cache (created_at);
     CREATE TABLE IF NOT EXISTS connector_types (
       slug TEXT PRIMARY KEY, label TEXT NOT NULL, fields JSONB NOT NULL,
@@ -764,8 +765,19 @@ app.get('/api/klaviyo/summary', async (_req, res) => {
       round(avg(click_rate) FILTER (WHERE click_rate IS NOT NULL) * 100)::int avg_click_pct,
       round(coalesce(sum(revenue),0))::int revenue
       FROM campaigns_cache WHERE send_time >= now()-interval '30 days'`),
-    pool.query(`SELECT klaviyo_id, name, channel, status, send_time, recipients, open_rate, click_rate, revenue
-      FROM campaigns_cache WHERE send_time IS NOT NULL ORDER BY send_time DESC LIMIT 20`)
+    pool.query(`SELECT c.klaviyo_id, c.name, c.channel, c.status, c.send_time, c.recipients, c.open_rate, c.click_rate, c.revenue,
+      CASE WHEN length(coalesce(c.subject,'')) >= 6 THEN
+        (SELECT count(*)::int FROM tickets_cache t
+         WHERE strpos(lower(t.subject), lower(c.subject)) > 0
+           AND t.created_datetime >= c.send_time AND t.created_datetime < c.send_time + interval '21 days')
+      END tickets_created,
+      CASE WHEN length(coalesce(c.subject,'')) >= 6 THEN
+        (SELECT count(*)::int FROM tickets_cache t
+         WHERE strpos(lower(t.subject), lower(c.subject)) > 0
+           AND t.created_datetime >= c.send_time AND t.created_datetime < c.send_time + interval '21 days'
+           AND t.status = 'closed')
+      END tickets_closed
+      FROM campaigns_cache c WHERE c.send_time IS NOT NULL ORDER BY c.send_time DESC LIMIT 20`)
   ]);
   res.json({ configured: !!conn, totals_30d: totals.rows[0], recent: recent.rows, sync: ss });
 });
@@ -931,7 +943,7 @@ query Orders($cursor: String, $q: String, $sortKey: OrderSortKeys!) {
   orders(first: 50, after: $cursor, query: $q, sortKey: $sortKey, reverse: true) {
     pageInfo { hasNextPage endCursor }
     nodes {
-      legacyResourceId name createdAt updatedAt cancelledAt
+      legacyResourceId name createdAt updatedAt cancelledAt tags
       currencyCode
       totalPriceSet { shopMoney { amount } }
       displayFinancialStatus displayFulfillmentStatus
@@ -953,6 +965,7 @@ function normalizeOrder(n) {
     country: n.shippingAddress?.countryCodeV2 || '',
     financial_status: (n.displayFinancialStatus || '').toLowerCase(),
     fulfillment_status: (n.displayFulfillmentStatus || 'unfulfilled').toLowerCase(),
+    tags: Array.isArray(n.tags) ? n.tags : [],
     line_items: (n.lineItems?.nodes || []).map(li => ({ title: li.title, sku: li.sku, quantity: li.quantity }))
   };
 }
@@ -973,8 +986,8 @@ async function syncShopify(maxPages = 8) {
   const cfg = conn.config;
   shopifySyncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || {};
-  if (st.engine !== 'graphql') { // one-time reset: cursors from the old REST engine are incompatible
-    st.engine = 'graphql'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
+  if (st.engine !== 'graphql-v2') { // v2: re-backfill to pick up order tags
+    st.engine = 'graphql-v2'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
   }
   let pages = 0, upserts = 0, lastError = null;
   const horizonIso = new Date(Date.now() - BACKFILL_HORIZON_DAYS * 864e5).toISOString();
@@ -982,15 +995,16 @@ async function syncShopify(maxPages = 8) {
   const upsertOrders = async (orders) => {
     for (const o of orders) {
       await pool.query(
-        `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, updated_at, synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+        `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, order_tags, updated_at, synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
          ON CONFLICT (shopify_id) DO UPDATE SET order_number=$2, created_at=$3, cancelled_at=$4, currency=$5,
-           total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, updated_at=$11, synced_at=now()`,
+           total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, order_tags=$11, updated_at=$12, synced_at=now()`,
         [o.id, o.name || '', o.created_at || null, o.cancelled_at || null, o.currency || '',
          Number(o.total_price) || 0,
          o.country || '',
          o.financial_status || '', o.fulfillment_status || 'unfulfilled',
          JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity }))),
+         JSON.stringify(o.tags || []),
          o.updated_at || null]);
       upserts++;
     }
@@ -1071,9 +1085,12 @@ app.get('/api/shopify/summary', async (_req, res) => {
         WHERE created_at >= now()-interval '30 days' AND cancelled_at IS NULL
         GROUP BY 1 ORDER BY 2 DESC LIMIT 6`),
       pool.query(`SELECT order_number, created_at::date d, country, total_price, currency, financial_status, fulfillment_status,
-        (cancelled_at IS NOT NULL) cancelled FROM orders_cache ORDER BY created_at DESC LIMIT 12`)
+        order_tags, (cancelled_at IS NOT NULL) cancelled FROM orders_cache ORDER BY created_at DESC LIMIT 12`)
     ]);
-    res.json({ configured: true, totals_30d: tot.rows[0], top_countries: countries.rows, top_products: products.rows, recent: recent.rows, sync: ss });
+    const orderTags = (await pool.query(
+      `SELECT t.tag, count(*)::int c FROM orders_cache, LATERAL jsonb_array_elements_text(order_tags) t(tag)
+       WHERE created_at >= now()-interval '30 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 8`)).rows;
+    res.json({ configured: true, totals_30d: tot.rows[0], top_countries: countries.rows, top_products: products.rows, top_order_tags: orderTags, recent: recent.rows, sync: ss });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1183,29 +1200,30 @@ app.get('/api/stats/overview', async (req, res) => {
 });
 
 // Gorgias tab: synced-cache stats always; live extras (CSAT, FRT, all-time total) when the connector is available
-app.get('/api/gorgias/stats', async (_req, res) => {
+app.get('/api/gorgias/stats', async (req, res) => {
   const cfg = await getGorgiasConfig();
-  const out = { configured: !!cfg, fetched_at: new Date().toISOString(), errors: [] };
-  const now = Date.now();
+  const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 366);
+  const bucket = days <= 31 ? 'day' : 'week';
+  const out = { configured: !!cfg, days, bucket, fetched_at: new Date().toISOString(), errors: [] };
   try {
     const c = await pool.query(`SELECT
       count(*)::int cached_total,
       count(*) FILTER (WHERE status='open')::int open_total,
-      count(*) FILTER (WHERE created_datetime >= now()-interval '7 days')::int created_7d,
-      count(*) FILTER (WHERE closed_datetime >= now()-interval '7 days')::int closed_7d
-      FROM tickets_cache`);
+      count(*) FILTER (WHERE created_datetime >= now()-$1::interval)::int created_period,
+      count(*) FILTER (WHERE closed_datetime >= now()-$1::interval)::int closed_period
+      FROM tickets_cache`, [`${days} days`]);
     Object.assign(out, {
       cached_total: c.rows[0].cached_total,
       open_total: c.rows[0].open_total,
-      created_last_7d: c.rows[0].created_7d,
-      closed_last_7d: c.rows[0].closed_7d
+      created_last_7d: c.rows[0].created_period,
+      closed_last_7d: c.rows[0].closed_period
     });
-    const perDay = await pool.query(`SELECT to_char(created_datetime::date, 'YYYY-MM-DD') d, count(*)::int c FROM tickets_cache
-      WHERE created_datetime >= now()-interval '7 days' GROUP BY 1 ORDER BY 1`);
-    const days = {};
-    for (let i = 6; i >= 0; i--) days[new Date(now - i * 864e5).toISOString().slice(0, 10)] = 0;
-    perDay.rows.forEach(r => { if (r.d in days) days[r.d] = r.c; });
-    out.created_per_day = days;
+    const perDay = await pool.query(
+      `SELECT to_char(date_trunc('${bucket}', created_datetime)::date, 'YYYY-MM-DD') d, count(*)::int c FROM tickets_cache
+       WHERE created_datetime >= now()-$1::interval GROUP BY 1 ORDER BY 1`, [`${days} days`]);
+    const daysMap = {};
+    perDay.rows.forEach(r => { daysMap[r.d] = r.c; });
+    out.created_per_day = daysMap;
     const [tags, channels, recent] = await Promise.all([
       pool.query(`SELECT t.tag, count(*)::int c FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
                   WHERE created_datetime >= now()-interval '30 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 8`),
