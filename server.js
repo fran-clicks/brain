@@ -589,9 +589,16 @@ app.post('/api/gorgias/sync', async (_req, res) => {
 
 // ---------- UK stock (simple keyed JSON API) ----------
 async function ukStockFetch(cfg) {
-  const r = await fetch(cfg.base_url, { headers: { 'X-API-Key': cfg.api_key, Accept: 'application/json' } });
-  if (!r.ok) throw new Error(`UK stock API → ${r.status}`);
-  return r.json();
+  // the stock service sleeps on Render's free tier — retry through the cold-start 502/503s
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt) await new Promise(r => setTimeout(r, 8000));
+    const r = await fetch(cfg.base_url, { headers: { 'X-API-Key': cfg.api_key, Accept: 'application/json' } });
+    if (r.ok) return r.json();
+    lastStatus = r.status;
+    if (![502, 503, 504].includes(r.status)) break; // real error (401/403/404) — don't retry
+  }
+  throw new Error(`UK stock API → ${lastStatus}${[502, 503, 504].includes(lastStatus) ? ' (service may be waking from sleep — try again in ~1 min)' : ''}`);
 }
 const pickField = (o, keys) => { for (const k of keys) { if (o?.[k] != null) return o[k]; } return null; };
 function extractStockItems(j) {
