@@ -766,11 +766,28 @@ async function loadEvents() {
   const evts = await api('/api/events');
   const today = new Date().toISOString().slice(0,10);
   const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString().slice(0,10);
-  const recent = evts.filter(e => { const d = String(e.event_date).slice(0,10); return d <= today && d >= weekAgo; });
+  const recent = evts.filter(e => { const d = String(e.event_date).slice(0,10); return d <= today && d >= weekAgo; })
+    .map(e => ({ ...e, _pin: '📌' }));
+  // recent Klaviyo sends join the box automatically
+  try {
+    const kv = await api('/api/klaviyo/summary');
+    (kv.recent || []).forEach(c => {
+      const d = String(c.send_time).slice(0,10);
+      if (d <= today && d >= weekAgo) {
+        recent.push({ _pin: '✉️', title: c.name, event_date: d, added_by: `Klaviyo (${c.channel})`,
+          description: [
+            c.recipients != null ? `${c.recipients.toLocaleString()} recipients` : null,
+            c.open_rate != null ? `${Math.round(c.open_rate*100)}% opens` : null,
+            c.revenue ? `${Math.round(+c.revenue).toLocaleString()} attributed` : null
+          ].filter(Boolean).join(' · ') });
+      }
+    });
+  } catch {}
+  recent.sort((a, b) => String(b.event_date).localeCompare(String(a.event_date)));
   const upcoming = evts.filter(e => String(e.event_date).slice(0,10) > today)
     .sort((a, b) => String(a.event_date).localeCompare(String(b.event_date)));
   document.getElementById('evtRecent').innerHTML = recent.length
-    ? recent.map(e => evtRow(e, '📌')).join('')
+    ? recent.map(e => evtRow(e, e._pin)).join('')
     : '<div class="empty">Nothing in the last 7 days.</div>';
   document.getElementById('evtUpcoming').innerHTML = upcoming.length
     ? upcoming.map(e => evtRow(e, '📅')).join('')
