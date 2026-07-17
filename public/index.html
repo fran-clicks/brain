@@ -749,8 +749,12 @@ async function loadStock() {
     if (!s.configured) { note.textContent = 'UK stock is not connected — an admin can add it on the ＋ page.'; return; }
     const t = s.totals || {};
     document.getElementById('stockKpis').innerHTML = [
-      {l:'Products (SKUs)', v: t.skus ?? '—'},
       {l:'Total units', v: (t.units ?? 0).toLocaleString()},
+      {l:'Brand new', v: (t.brand_new ?? 0).toLocaleString()},
+      {l:'Non-pristine', v: (t.non_pristine ?? 0).toLocaleString()},
+      {l:'Damaged', v: (t.damaged ?? 0).toLocaleString()},
+      {l:'Founders', v: (t.founders ?? 0).toLocaleString()},
+      {l:'Products (SKUs)', v: t.skus ?? '—'},
       {l:'Low stock (<10)', v: t.low ?? '—'},
       {l:'Out of stock', v: t.out_of_stock ?? '—'}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');

@@ -676,6 +676,8 @@ app.get('/api/stock', async (_req, res) => {
   const [items, totals, history] = await Promise.all([
     pool.query('SELECT sku, name, upc, qty, brand_new, non_pristine, damaged, founders, updated_at FROM uk_stock ORDER BY qty ASC NULLS LAST LIMIT 300'),
     pool.query(`SELECT count(*)::int skus, coalesce(sum(qty),0)::int units,
+                coalesce(sum(brand_new),0)::int brand_new, coalesce(sum(non_pristine),0)::int non_pristine,
+                coalesce(sum(damaged),0)::int damaged, coalesce(sum(founders),0)::int founders,
                 count(*) FILTER (WHERE qty IS NOT NULL AND qty < 10 AND qty > 0)::int low,
                 count(*) FILTER (WHERE qty = 0)::int out_of_stock FROM uk_stock`),
     pool.query(`SELECT h.taken_at, h.sku, h.qty, s.name FROM uk_stock_history h
