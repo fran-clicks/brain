@@ -330,6 +330,14 @@ footer{color:rgba(16,17,20,.45)}
     <table id="kbTable"><thead><tr><th>Name</th><th>Description</th><th>Suggested by</th><th>Status</th></tr></thead><tbody></tbody></table>
   </div>
   <div class="card">
+    <h2>🔍 Look for flaws
+      <button class="btn" style="float:right;margin:0;padding:5px 12px;display:none" id="kbAuditBtn" onclick="runKbAudit()">Run audit</button>
+    </h2>
+    <p style="font-size:13px;color:var(--muted)">Cross-checks all knowledge bases against each other and against live synced data (stock, products, return reasons, ticket tags) for contradictions, outdated claims, and gaps. Admin-triggered · one Claude call per run.</p>
+    <div id="kbAuditResults"></div>
+    <div class="note" id="kbAuditNote">No audit run yet.</div>
+  </div>
+  <div class="card">
     <h2>💡 Suggest a new knowledge base</h2>
     <div class="grid two">
       <div><label>Name</label><input id="kName"></div>
@@ -450,7 +458,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (s === 'klaviyo') loadKlaviyo();
   if (s === 'redo') loadRedo();
   if (s === 'home') loadOverview();
-  if (s === 'kb') loadKbs();
+  if (s === 'kb') { loadKbs(); loadKbAudit(); }
   if (s === 'conn') { loadConnectors(); loadRequests(); loadMembers(); }
 });
 
@@ -1151,6 +1159,31 @@ async function loadKbs() {
      </td></tr>`).join('')
     : '<tr><td colspan="4" class="empty">No knowledge bases yet — suggest one below</td></tr>';
 }
+function renderAudit(a) {
+  const note = document.getElementById('kbAuditNote');
+  const box = document.getElementById('kbAuditResults');
+  if (!a || !a.findings) { note.textContent = 'No audit run yet.'; box.innerHTML = ''; return; }
+  const sev = s => s === 'high' ? 'background:#fee2e2;color:#b91c1c' : s === 'medium' ? 'background:#fef3c7;color:#b45309' : 'background:#f3f4f6;color:#5f6368';
+  box.innerHTML = a.findings.length ? a.findings.map(f => `
+    <div class="evt"><div class="pin">${f.severity === 'high' ? '🚨' : f.severity === 'medium' ? '⚠️' : 'ℹ️'}</div><div>
+      <div class="t">${esc(f.kb)} <span class="tag" style="${sev(f.severity)}">${esc(f.severity)}</span></div>
+      <div>${esc(f.issue)}</div>
+      <div class="m">fix: ${esc(f.suggestion)}</div>
+    </div></div>`).join('')
+    : '<div class="empty">✅ No flaws found — the bases are consistent with each other and the live data.</div>';
+  note.textContent = `Last audit ${new Date(a.at).toLocaleString()} by ${a.by}`;
+}
+async function loadKbAudit() {
+  try { renderAudit(await api('/api/kb/audit')); } catch {}
+  if (window.isAdmin) document.getElementById('kbAuditBtn').style.display = 'inline-block';
+}
+async function runKbAudit() {
+  const b = document.getElementById('kbAuditBtn');
+  b.disabled = true; b.textContent = '⏳ Auditing…';
+  try { renderAudit(await api('/api/kb/audit', {method:'POST', body:'{}'})); }
+  catch (e) { document.getElementById('kbAuditNote').textContent = '⚠️ ' + e.message; }
+  finally { b.disabled = false; b.textContent = 'Run audit'; }
+}
 async function decideKb(id, decision) {
   try { await api(`/api/kb/${id}/decision`, {method:'POST', body: JSON.stringify({ decision })}); loadKbs(); }
   catch (e) { alert(e.message); }
@@ -1392,7 +1425,7 @@ api('/api/auth/me').then(m => {
   }
 }).catch(() => {});
 
-loadOverview().then(prefetchPeriods); loadEvents(); loadShopify(); loadStock(); loadKlaviyo(); loadRedo(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors(); loadRequests();
+loadOverview().then(prefetchPeriods); loadEvents(); loadShopify(); loadStock(); loadKlaviyo(); loadRedo(); loadGorgias(); loadKbs(); loadKbAudit(); loadConnectorTypes(); loadConnectors(); loadRequests();
 </script>
 </body>
 </html>

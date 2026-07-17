@@ -461,6 +461,57 @@ app.post('/api/kb', rejectSecrets(['name', 'description']), async (req, res) => 
   res.status(201).json(rows[0]);
 });
 
+// admin-triggered audit: cross-check knowledge bases against each other and live data
+app.post('/api/kb/audit', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('anthropic');
+  const apiKey = conn?.config?.api_key || process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return res.status(400).json({ error: 'The Claude assistant connector is required for audits — add it on the ＋ page.' });
+  try {
+    const [kbs, stock, products, reasons, tags] = await Promise.all([
+      pool.query(`SELECT name, description, status, suggested_by FROM kb_suggestions WHERE status <> 'rejected' ORDER BY created_at`),
+      pool.query(`SELECT sku, name, qty FROM uk_stock ORDER BY qty DESC LIMIT 40`),
+      pool.query(`SELECT it->>'title' product, sum(coalesce((it->>'qty')::int,0))::int units FROM orders_cache, LATERAL jsonb_array_elements(items) it
+                  WHERE created_at >= now()-interval '90 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 20`),
+      pool.query(`SELECT coalesce(nullif(i->>'reason',''),'(none)') reason, count(*)::int c FROM returns_cache, LATERAL jsonb_array_elements(items) i
+                  WHERE created_at >= now()-interval '90 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 12`),
+      pool.query(`SELECT t.tag, count(*)::int c FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
+                  WHERE created_datetime >= now()-interval '90 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 15`)
+    ]);
+    if (!kbs.rows.length) return res.json({ findings: [], note: 'No knowledge bases to audit yet.' });
+    const prompt = `Audit these internal knowledge base entries for a phone-keyboard company (Clicks Technology).
+Cross-check them: (a) against each other for contradictions and overlaps, (b) against the live company data below for outdated or incorrect claims, (c) for vagueness, missing ownership, or entries too thin to be useful.
+
+KNOWLEDGE BASES:
+${JSON.stringify(kbs.rows, null, 1)}
+
+LIVE DATA SNAPSHOT (from synced systems):
+Current UK stock (top SKUs): ${JSON.stringify(stock.rows)}
+Products sold last 90d: ${JSON.stringify(products.rows)}
+Top return reasons 90d: ${JSON.stringify(reasons.rows)}
+Top support ticket tags 90d: ${JSON.stringify(tags.rows)}
+
+Respond with ONLY a JSON array (no prose), each element:
+{"kb": "<kb name or 'cross-cutting'>", "severity": "high"|"medium"|"low", "issue": "<what is wrong or risky>", "suggestion": "<concrete fix>"}
+Order by severity. If everything is genuinely fine, return [].`;
+    const j = await anthropic(apiKey, { messages: [{ role: 'user', content: prompt }], max_tokens: 2000 });
+    const text = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+    let findings = [];
+    try {
+      const m = text.match(/\[[\s\S]*\]/);
+      findings = m ? JSON.parse(m[0]) : [];
+    } catch { findings = [{ kb: 'audit', severity: 'low', issue: 'Could not parse audit output', suggestion: text.slice(0, 500) }]; }
+    const record = { at: new Date().toISOString(), by: req.userEmail || 'admin', findings };
+    await pool.query(`INSERT INTO sync_state (k, v) VALUES ('kb_audit', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
+      [JSON.stringify(record)]);
+    res.json(record);
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+app.get('/api/kb/audit', async (_req, res) => {
+  const st = (await pool.query(`SELECT v FROM sync_state WHERE k='kb_audit'`)).rows[0]?.v || null;
+  res.json(st || { findings: null });
+});
+
 app.post('/api/kb/:id/decision', async (req, res) => {
   const { decision } = req.body || {};
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'Only admins can approve or reject knowledge bases.' });
