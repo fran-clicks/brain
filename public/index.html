@@ -326,8 +326,39 @@ footer{color:rgba(16,17,20,.45)}
 <!-- KNOWLEDGE BASES -->
 <div class="section" id="s-kb">
   <div class="card">
+    <h2>🔎 Search the knowledge base</h2>
+    <div style="display:flex;gap:8px">
+      <input id="kbQ" placeholder="Search all pages — warranty, shipping times, how to process X…">
+      <button class="btn" style="margin:0" onclick="kbDoSearch()">Search</button>
+    </div>
+    <div id="kbSearchResults" style="margin-top:10px"></div>
+  </div>
+  <div class="card">
     <h2>Knowledge bases</h2>
     <table id="kbTable"><thead><tr><th>Name</th><th>Description</th><th>Suggested by</th><th>Status</th></tr></thead><tbody></tbody></table>
+    <div class="note">Click an approved knowledge base to browse and add its pages. Page edits keep full revision history — nothing is ever lost.</div>
+  </div>
+  <div class="card" id="kbDetail" style="display:none">
+    <h2 id="kbDetailTitle"></h2>
+    <table id="kbPages"><thead><tr><th>Page</th><th>By</th><th>Updated</th><th>Size</th></tr></thead><tbody></tbody></table>
+    <div id="kbPageView" style="display:none;border-top:1px solid var(--line);margin-top:10px;padding-top:10px">
+      <h2 id="kbPageTitle" style="display:inline"></h2>
+      <button class="btn" style="float:right;margin:0;padding:4px 12px" onclick="kbEditToggle()" id="kbEditBtn">✏️ Edit</button>
+      <div id="kbPageContent" style="white-space:pre-wrap;font-size:13px;margin-top:10px"></div>
+      <div id="kbPageEdit" style="display:none;margin-top:10px">
+        <label>Title</label><input id="kbEditTitle">
+        <label>Content</label><textarea id="kbEditContent" rows="12"></textarea>
+        <button class="btn" onclick="kbSavePage()">Save (previous version is kept)</button>
+        <div class="err" id="kbEditErr"></div>
+      </div>
+    </div>
+    <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:10px">
+      <b style="font-size:13px">＋ Add page</b>
+      <label>Title</label><input id="kbNewTitle" placeholder="e.g. Warranty policy — EU">
+      <label>Content</label><textarea id="kbNewContent" rows="6" placeholder="The actual knowledge. No API keys or passwords — the server rejects them."></textarea>
+      <button class="btn" onclick="kbAddPage()">Add page</button>
+      <div class="err" id="kbNewErr"></div>
+    </div>
   </div>
   <div class="card">
     <h2>🔍 Look for flaws
@@ -1151,7 +1182,9 @@ async function loadGorgias() {
 async function loadKbs() {
   const kbs = await api('/api/kb');
   document.querySelector('#kbTable tbody').innerHTML = kbs.length ? kbs.map(k =>
-    `<tr><td><b>${esc(k.name)}</b></td><td>${esc(k.description)}</td><td>${esc(k.suggested_by)}</td>
+    `<tr><td>${k.status === 'approved'
+        ? `<a href="#" onclick="openKb(${k.id},'${esc(k.name).replace(/'/g, '&#39;')}');return false"><b>${esc(k.name)}</b></a>`
+        : `<b>${esc(k.name)}</b>`}</td><td>${esc(k.description)}</td><td>${esc(k.suggested_by)}</td>
      <td><span class="tag ${k.status === 'rejected' ? 'src' : esc(k.status)}">${esc(k.status)}</span>
      ${window.isAdmin && k.status === 'pending' ? `
        <button class="btn" style="margin:2px 0 0;padding:3px 10px;font-size:12px" onclick="decideKb(${k.id},'approved')">✓</button>
@@ -1159,6 +1192,75 @@ async function loadKbs() {
      </td></tr>`).join('')
     : '<tr><td colspan="4" class="empty">No knowledge bases yet — suggest one below</td></tr>';
 }
+// KB pages: browse, view, edit, add, search
+let curKb = null, curPage = null;
+async function openKb(id, name) {
+  curKb = id;
+  document.getElementById('kbDetail').style.display = 'block';
+  document.getElementById('kbDetailTitle').textContent = '📚 ' + name;
+  document.getElementById('kbPageView').style.display = 'none';
+  const pages = await api(`/api/kb/${id}/pages`);
+  document.querySelector('#kbPages tbody').innerHTML = pages.length ? pages.map(p =>
+    `<tr><td><a href="#" onclick="openKbPage(${p.id});return false"><b>${esc(p.title)}</b></a></td>
+     <td>${esc(p.updated_by || p.added_by)}</td><td>${esc(String(p.updated_at).slice(0,10))}</td><td>${p.chars} chars</td></tr>`).join('')
+    : '<tr><td colspan="4" class="empty">No pages yet — add the first below</td></tr>';
+  document.getElementById('kbDetail').scrollIntoView({ behavior: 'smooth' });
+}
+async function openKbPage(pageId) {
+  const p = await api('/api/kb/pages/' + pageId);
+  curPage = p;
+  document.getElementById('kbPageView').style.display = 'block';
+  document.getElementById('kbPageTitle').textContent = p.title;
+  document.getElementById('kbPageContent').textContent = p.content || '(empty)';
+  document.getElementById('kbPageEdit').style.display = 'none';
+  document.getElementById('kbEditBtn').textContent = '✏️ Edit';
+}
+function kbEditToggle() {
+  const e = document.getElementById('kbPageEdit');
+  const showing = e.style.display !== 'none';
+  e.style.display = showing ? 'none' : 'block';
+  document.getElementById('kbEditBtn').textContent = showing ? '✏️ Edit' : '✕ Cancel';
+  if (!showing) {
+    document.getElementById('kbEditTitle').value = curPage.title;
+    document.getElementById('kbEditContent').value = curPage.content;
+  }
+}
+async function kbSavePage() {
+  try {
+    await api('/api/kb/pages/' + curPage.id, {method:'PUT', body: JSON.stringify({
+      title: document.getElementById('kbEditTitle').value.trim(),
+      content: document.getElementById('kbEditContent').value
+    })});
+    await openKb(curKb, document.getElementById('kbDetailTitle').textContent.replace('📚 ', ''));
+    openKbPage(curPage.id);
+  } catch (e) { document.getElementById('kbEditErr').textContent = e.message; }
+}
+async function kbAddPage() {
+  try {
+    await api(`/api/kb/${curKb}/pages`, {method:'POST', body: JSON.stringify({
+      title: document.getElementById('kbNewTitle').value.trim(),
+      content: document.getElementById('kbNewContent').value
+    })});
+    document.getElementById('kbNewTitle').value = '';
+    document.getElementById('kbNewContent').value = '';
+    openKb(curKb, document.getElementById('kbDetailTitle').textContent.replace('📚 ', ''));
+  } catch (e) { document.getElementById('kbNewErr').textContent = e.message; }
+}
+async function kbDoSearch() {
+  const q = document.getElementById('kbQ').value.trim();
+  const box = document.getElementById('kbSearchResults');
+  if (!q) { box.innerHTML = ''; return; }
+  const hits = await api('/api/kb/search?q=' + encodeURIComponent(q));
+  box.innerHTML = hits.length ? hits.map(h => `
+    <div class="evt"><div class="pin">📄</div><div>
+      <div class="t"><a href="#" onclick="openKb(${h.kb_id},'${esc(h.kb).replace(/'/g, '&#39;')}').then(()=>openKbPage(${h.id}));return false">${esc(h.title)}</a>
+        <span class="tag src">${esc(h.kb)}</span></div>
+      <div class="m">${(h.snippet || '').replace(/</g,'&lt;').replace(/\*\*(.*?)\*\*/g, '<b style="background:rgba(255,200,0,.35)">$1</b>')}</div>
+    </div></div>`).join('')
+    : '<div class="empty">No pages matched — maybe this knowledge doesn\'t exist yet. Suggest it below!</div>';
+}
+document.getElementById('kbQ').addEventListener('keydown', e => { if (e.key === 'Enter') kbDoSearch(); });
+
 function renderAudit(a) {
   const note = document.getElementById('kbAuditNote');
   const box = document.getElementById('kbAuditResults');

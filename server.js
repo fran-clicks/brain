@@ -130,6 +130,15 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS kb_suggestions (
       id SERIAL PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
       suggested_by TEXT DEFAULT 'anonymous', status TEXT DEFAULT 'pending', created_at TIMESTAMPTZ DEFAULT now());
+    CREATE TABLE IF NOT EXISTS kb_pages (
+      id SERIAL PRIMARY KEY, kb_id INT NOT NULL REFERENCES kb_suggestions(id),
+      title TEXT NOT NULL, content TEXT DEFAULT '',
+      added_by TEXT DEFAULT 'anonymous', updated_by TEXT,
+      created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+    CREATE INDEX IF NOT EXISTS idx_kb_pages_fts ON kb_pages USING GIN (to_tsvector('english', title || ' ' || content));
+    CREATE TABLE IF NOT EXISTS kb_page_revisions (
+      id SERIAL PRIMARY KEY, page_id INT NOT NULL, title TEXT, content TEXT,
+      replaced_by TEXT, replaced_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS connectors (
       id SERIAL PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL,
       config_encrypted TEXT NOT NULL, meta JSONB DEFAULT '{}',
@@ -461,6 +470,64 @@ app.post('/api/kb', rejectSecrets(['name', 'description']), async (req, res) => 
   res.status(201).json(rows[0]);
 });
 
+// ---------- KB pages (content, search, revisions) ----------
+async function kbSearch(q, limit = 12) {
+  const { rows } = await pool.query(
+    `SELECT p.id, p.kb_id, s.name kb, p.title, p.updated_at,
+       ts_headline('english', p.content, plainto_tsquery('english', $1),
+         'MaxWords=35, MinWords=10, StartSel=**, StopSel=**') snippet,
+       ts_rank(to_tsvector('english', p.title || ' ' || p.content), plainto_tsquery('english', $1)) rank
+     FROM kb_pages p JOIN kb_suggestions s ON s.id = p.kb_id
+     WHERE to_tsvector('english', p.title || ' ' || p.content) @@ plainto_tsquery('english', $1)
+        OR p.title ILIKE '%' || $1 || '%'
+     ORDER BY rank DESC NULLS LAST LIMIT $2`, [String(q).slice(0, 200), limit]);
+  return rows;
+}
+
+app.get('/api/kb/search', async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.json([]);
+  try { res.json(await kbSearch(q)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/kb/:id/pages', async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, title, added_by, updated_by, updated_at, length(content)::int chars
+     FROM kb_pages WHERE kb_id=$1 ORDER BY created_at`, [req.params.id]);
+  res.json(rows);
+});
+app.get('/api/kb/pages/:pageId', async (req, res) => {
+  const { rows } = await pool.query('SELECT * FROM kb_pages WHERE id=$1', [req.params.pageId]);
+  if (!rows[0]) return res.status(404).json({ error: 'not found' });
+  res.json(rows[0]);
+});
+app.post('/api/kb/:id/pages', rejectSecrets(['title', 'content']), async (req, res) => {
+  const { title, content } = req.body || {};
+  if (!title) return res.status(400).json({ error: 'title required' });
+  const kb = (await pool.query('SELECT status FROM kb_suggestions WHERE id=$1', [req.params.id])).rows[0];
+  if (!kb) return res.status(404).json({ error: 'knowledge base not found' });
+  if (kb.status !== 'approved') return res.status(400).json({ error: 'Pages can only be added to approved knowledge bases.' });
+  const { rows } = await pool.query(
+    `INSERT INTO kb_pages (kb_id, title, content, added_by) VALUES ($1,$2,$3,$4)
+     RETURNING id, title, added_by, updated_at`,
+    [req.params.id, String(title).slice(0, 300), String(content || '').slice(0, 100000), req.userEmail || 'anonymous']);
+  res.status(201).json(rows[0]);
+});
+app.put('/api/kb/pages/:pageId', rejectSecrets(['title', 'content']), async (req, res) => {
+  const { title, content } = req.body || {};
+  const old = (await pool.query('SELECT * FROM kb_pages WHERE id=$1', [req.params.pageId])).rows[0];
+  if (!old) return res.status(404).json({ error: 'not found' });
+  await pool.query( // previous version is preserved, never lost
+    'INSERT INTO kb_page_revisions (page_id, title, content, replaced_by) VALUES ($1,$2,$3,$4)',
+    [old.id, old.title, old.content, req.userEmail || 'anonymous']);
+  const { rows } = await pool.query(
+    `UPDATE kb_pages SET title=$2, content=$3, updated_by=$4, updated_at=now() WHERE id=$1
+     RETURNING id, title, updated_by, updated_at`,
+    [old.id, String(title || old.title).slice(0, 300), String(content ?? old.content).slice(0, 100000), req.userEmail || 'anonymous']);
+  res.json(rows[0]);
+});
+
 // admin-triggered audit: cross-check knowledge bases against each other and live data
 app.post('/api/kb/audit', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
@@ -469,7 +536,9 @@ app.post('/api/kb/audit', async (req, res) => {
   if (!apiKey) return res.status(400).json({ error: 'The Claude assistant connector is required for audits — add it on the ＋ page.' });
   try {
     const [kbs, stock, products, reasons, tags] = await Promise.all([
-      pool.query(`SELECT name, description, status, suggested_by FROM kb_suggestions WHERE status <> 'rejected' ORDER BY created_at`),
+      pool.query(`SELECT s.name, s.description, s.status, s.suggested_by,
+        coalesce((SELECT string_agg(p.title || ': ' || left(p.content, 800), E'\n---\n') FROM kb_pages p WHERE p.kb_id = s.id), '(no pages yet)') AS pages
+        FROM kb_suggestions s WHERE s.status <> 'rejected' ORDER BY s.created_at`),
       pool.query(`SELECT sku, name, qty FROM uk_stock ORDER BY qty DESC LIMIT 40`),
       pool.query(`SELECT it->>'title' product, sum(coalesce((it->>'qty')::int,0))::int units FROM orders_cache, LATERAL jsonb_array_elements(items) it
                   WHERE created_at >= now()-interval '90 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 20`),
@@ -1502,6 +1571,11 @@ const TOOLS = [
     }
   },
   {
+    name: 'search_knowledge',
+    description: 'Full-text search the team knowledge base pages (policies, product info, FAQs, processes). Use this FIRST for any question about company policy, procedures, or documented knowledge.',
+    input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }
+  },
+  {
     name: 'query_returns_redo',
     description: 'Redo returns/claims/warranties from the local sync: counts, refund vs exchange vs store-credit amounts, reasons, statuses. Filterable by type, status, reason regex, sku regex, and recency.',
     input_schema: {
@@ -1631,6 +1705,16 @@ async function runTool(name, input, ctx) {
     const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v;
     return { ...agg.rows[0], sample: sample.rows,
       note: `From the local Shopify sync. Last sync: ${ss?.last_run || 'unknown'}${ss?.backfill_done ? '' : ' (history backfill still in progress — older orders may be missing)'}.` };
+  }
+  if (name === 'search_knowledge') {
+    const hits = await kbSearch(String(input.query || ''), 5);
+    if (!hits.length) return { results: [], note: 'No knowledge base pages matched. The KB may not cover this yet — suggest the member proposes it.' };
+    const detailed = [];
+    for (const h of hits.slice(0, 3)) {
+      const page = (await pool.query('SELECT content FROM kb_pages WHERE id=$1', [h.id])).rows[0];
+      detailed.push({ kb: h.kb, title: h.title, updated_at: h.updated_at, content: (page?.content || '').slice(0, 2000) });
+    }
+    return { results: detailed, note: 'Answer from this content and cite the KB/page name. If content seems outdated vs live data, say so.' };
   }
   if (name === 'query_returns_redo') {
     const conn = await getConnector('redo');
