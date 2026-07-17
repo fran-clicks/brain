@@ -981,7 +981,7 @@ app.get('/api/stats/overview', async (req, res) => {
     maybeSync().catch(() => {}); // fire-and-forget, never blocks the response
     const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 366);
     const hit = overviewCache.get(days);
-    if (hit && Date.now() - hit.t < 60 * 1000) return res.json(hit.v);
+    if (hit && Date.now() - hit.t < 5 * 60 * 1000) return res.json(hit.v); // cleared early whenever a sync lands
     const v = await overviewStats(days);
     overviewCache.set(days, { t: Date.now(), v });
     res.json(v);

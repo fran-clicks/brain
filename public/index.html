@@ -133,6 +133,19 @@ a{color:#8a6800;font-weight:600}
 .msg.user{background:var(--ink);color:#fff}
 .msg.assistant{background:rgba(255,255,255,.7);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 footer{color:rgba(16,17,20,.45)}
+#chartLoading{
+  display:none;position:absolute;inset:0;z-index:5;
+  align-items:center;justify-content:center;gap:10px;flex-direction:column;
+  background:rgba(255,255,255,.45);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+  border-radius:12px;font-size:13px;font-weight:600;color:var(--muted);
+}
+#chartLoading.on{display:flex}
+#chartLoading .spin{
+  width:34px;height:34px;border-radius:50%;
+  border:4px solid rgba(255,200,0,.3);border-top-color:var(--yellow-deep);
+  animation:cbspin .8s linear infinite;
+}
+@keyframes cbspin{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
@@ -170,7 +183,10 @@ footer{color:rgba(16,17,20,.45)}
       <span style="font-weight:400;color:var(--muted);font-size:12px" id="syncInfo"></span>
       <button class="btn" style="float:right;margin:0;padding:5px 12px" id="syncBtn" onclick="syncNow()">🔄 Sync now</button>
     </h2>
-    <div class="chart-wrap" style="height:clamp(340px,52vh,500px)"><canvas id="homeChart"></canvas></div>
+    <div class="chart-wrap" style="height:clamp(340px,52vh,500px)">
+      <canvas id="homeChart"></canvas>
+      <div id="chartLoading"><div class="spin"></div><span>Crunching the numbers…</span></div>
+    </div>
     <div class="note" id="homeNote"></div>
   </div>
   <div class="card">
@@ -360,18 +376,24 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
 // ---------- overview ----------
 let curDays = 7, homeChart;
 const ovCache = new Map(); // days → {t, v}
-async function fetchOverview(days) {
-  const hit = ovCache.get(days);
-  if (hit && Date.now() - hit.t < 60 * 1000) return hit.v;
-  const v = await api('/api/stats/overview?days=' + days);
-  ovCache.set(days, { t: Date.now(), v });
-  return v;
+const ovCached = (days) => { const h = ovCache.get(days); return h && Date.now() - h.t < 5 * 60 * 1000 ? h.v : null; };
+async function fetchOverview(days, silent = false) {
+  const hit = ovCached(days);
+  if (hit) return hit;
+  const loading = document.getElementById('chartLoading');
+  if (!silent) loading.classList.add('on');
+  try {
+    const v = await api('/api/stats/overview?days=' + days);
+    ovCache.set(days, { t: Date.now(), v });
+    return v;
+  } finally { if (!silent) loading.classList.remove('on'); }
 }
-async function prefetchPeriods() { // warm the other ranges so switching is instant
+async function prefetchPeriods() { // warm the other ranges in the background so switching is instant
   for (const d of [7, 30, 90, 180, 365]) {
-    if (d !== curDays && !ovCache.has(d)) { try { await fetchOverview(d); } catch {} }
+    if (d !== curDays && !ovCached(d)) { try { await fetchOverview(d, true); } catch {} }
   }
 }
+setInterval(prefetchPeriods, 4 * 60 * 1000); // re-warm before the cache expires
 document.querySelectorAll('#periods button').forEach(b => b.onclick = () => {
   document.querySelectorAll('#periods button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
