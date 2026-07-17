@@ -1006,11 +1006,11 @@ app.get('/api/gorgias/stats', async (_req, res) => {
       created_last_7d: c.rows[0].created_7d,
       closed_last_7d: c.rows[0].closed_7d
     });
-    const perDay = await pool.query(`SELECT created_datetime::date d, count(*)::int c FROM tickets_cache
+    const perDay = await pool.query(`SELECT to_char(created_datetime::date, 'YYYY-MM-DD') d, count(*)::int c FROM tickets_cache
       WHERE created_datetime >= now()-interval '7 days' GROUP BY 1 ORDER BY 1`);
     const days = {};
     for (let i = 6; i >= 0; i--) days[new Date(now - i * 864e5).toISOString().slice(0, 10)] = 0;
-    perDay.rows.forEach(r => { const d = String(r.d).slice(0, 10); if (d in days) days[d] = r.c; });
+    perDay.rows.forEach(r => { if (r.d in days) days[r.d] = r.c; });
     out.created_per_day = days;
     const [tags, channels, recent] = await Promise.all([
       pool.query(`SELECT t.tag, count(*)::int c FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
@@ -1043,7 +1043,7 @@ app.get('/api/gorgias/stats', async (_req, res) => {
       const row = frt?.data?.[0] || frt?.data || {};
       const v = row.averageFirstResponseTime ?? row['FirstResponseTime.averageFirstResponseTime'] ?? null;
       out.avg_first_response_seconds = typeof v === 'number' ? v : (v ? Number(v) : null);
-    } catch (e) { out.errors.push(String(e.message)); }
+    } catch (e) { console.error('gorgias FRT (best-effort):', e.message); } // quiet — metric shows "—"
   } else {
     out.message = 'Live Gorgias metrics unavailable — the connector needs re-adding on the ＋ page. Showing locally synced data.';
   }
