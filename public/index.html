@@ -183,7 +183,6 @@ footer{color:rgba(16,17,20,.45)}
     <h2>Tickets &amp; events
       <span style="font-weight:400;color:var(--muted);font-size:12px" id="syncInfo"></span>
       <button class="btn" style="float:right;margin:0;padding:5px 12px" id="syncBtn" onclick="syncNow()">🔄 Sync now</button>
-      <button class="btn" style="float:right;margin:0 8px 0 0;padding:5px 12px;display:none" id="digestBtn" onclick="sendDigestNow()">📣 Send digest</button>
     </h2>
     <div class="chart-wrap" style="height:clamp(340px,52vh,500px)">
       <canvas id="homeChart"></canvas>
@@ -787,16 +786,6 @@ async function loadOverview() {
     document.getElementById('homeNote').textContent = 'Overview error: ' + e.message;
   }
 }
-async function sendDigestNow() {
-  const b = document.getElementById('digestBtn');
-  b.disabled = true; b.textContent = '⏳';
-  try {
-    const r = await api('/api/slack/digest', {method:'POST', body:'{}'});
-    document.getElementById('homeNote').textContent = r.sent
-      ? `📣 Digest sent to ${r.channel}` : `Digest not sent: ${r.reason}`;
-  } catch (e) { document.getElementById('homeNote').textContent = '⚠️ ' + e.message; }
-  finally { b.disabled = false; b.textContent = '📣 Send digest'; }
-}
 async function syncNow() {
   const b = document.getElementById('syncBtn');
   b.disabled = true; b.textContent = '⏳ Syncing…';
@@ -1332,7 +1321,6 @@ api('/api/auth/me').then(m => {
       // admins act via their login — hide the password prompts
       document.getElementById('rqPw')?.closest('div')?.style.setProperty('display', 'none');
       document.getElementById('cPw')?.closest('div')?.style.setProperty('display', 'none');
-      document.getElementById('digestBtn').style.display = 'inline-block';
     }
     loadKbs(); // re-render with admin controls if applicable
     loadMembers();

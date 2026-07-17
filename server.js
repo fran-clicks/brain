@@ -237,8 +237,7 @@ const CONNECTOR_TYPES = {
     label: 'Slack bot (@clicksbot)',
     fields: [
       { key: 'bot_token', label: 'Bot User OAuth Token, starts with xoxb- (api.slack.com/apps → your app → OAuth & Permissions)', secret: true },
-      { key: 'signing_secret', label: 'Signing Secret (api.slack.com/apps → your app → Basic Information)', secret: true },
-      { key: 'digest_channel', label: 'Channel for the daily digest & alerts, e.g. #team (invite the bot there first) — optional', secret: false, optional: true }
+      { key: 'signing_secret', label: 'Signing Secret (api.slack.com/apps → your app → Basic Information)', secret: true }
     ]
   },
   klaviyo: {
@@ -1599,95 +1598,6 @@ app.post('/api/slack/events', async (req, res) => {
     console.error('slack assistant error:', e.message);
     await slackPost(conn.config.bot_token, ev.channel, `⚠️ Couldn't answer that: ${e.message}`, ev.thread_ts || ev.ts);
   }
-});
-
-// ---------- daily Slack digest + anomaly alerts ----------
-const DIGEST_HOUR_UTC = +process.env.DIGEST_HOUR_UTC || 7; // ~8am London
-
-async function buildDigestText() {
-  const [t, o, camps, stock, evts] = await Promise.all([
-    pool.query(`SELECT
-      count(*) FILTER (WHERE created_datetime >= date_trunc('day', now()) - interval '1 day' AND created_datetime < date_trunc('day', now()))::int created,
-      count(*) FILTER (WHERE closed_datetime >= date_trunc('day', now()) - interval '1 day' AND closed_datetime < date_trunc('day', now()))::int closed,
-      count(*) FILTER (WHERE status='open')::int open FROM tickets_cache`),
-    pool.query(`SELECT count(*) FILTER (WHERE cancelled_at IS NULL)::int orders,
-      round(coalesce(sum(total_price) FILTER (WHERE cancelled_at IS NULL),0))::int revenue, max(currency) currency,
-      count(*) FILTER (WHERE cancelled_at IS NOT NULL)::int cancelled
-      FROM orders_cache WHERE created_at >= date_trunc('day', now()) - interval '1 day' AND created_at < date_trunc('day', now())`),
-    pool.query(`SELECT name, channel FROM campaigns_cache
-      WHERE send_time >= date_trunc('day', now()) - interval '1 day' AND send_time < date_trunc('day', now())`),
-    pool.query(`SELECT count(*) FILTER (WHERE qty = 0)::int out, count(*) FILTER (WHERE qty > 0 AND qty < 10)::int low FROM uk_stock`),
-    pool.query(`SELECT title, event_date FROM events
-      WHERE event_date >= current_date AND event_date <= current_date + 3 ORDER BY event_date`)
-  ]);
-  const T = t.rows[0], O = o.rows[0], S = stock.rows[0];
-  const lines = [
-    `🧠 *clicks brain — daily digest* (yesterday)`,
-    `🎧 Tickets: *${T.created}* created · *${T.closed}* closed · *${T.open}* open now`,
-    `🛒 Orders: *${O.orders ?? 0}* (${(O.revenue ?? 0).toLocaleString()} ${O.currency || 'USD'})${O.cancelled ? ` · ${O.cancelled} cancelled` : ''}`
-  ];
-  if (camps.rows.length) lines.push(`✉️ Campaigns sent: ${camps.rows.map(c => `“${c.name}” (${c.channel})`).join(', ')}`);
-  if (S.out || S.low) lines.push(`📦 Stock: ${S.out ? `*${S.out} SKUs OUT of stock*` : ''}${S.out && S.low ? ' · ' : ''}${S.low ? `${S.low} low (<10)` : ''}`);
-  if (evts.rows.length) lines.push(`📅 Next 3 days: ${evts.rows.map(e => `${e.title} (${String(e.event_date).slice(5, 10)})`).join(', ')}`);
-  lines.push(`_Full picture → https://clicks-brain.onrender.com_`);
-  return lines.join('\n');
-}
-
-async function sendDigest(force = false) {
-  const conn = await getConnector('slack');
-  const channel = conn?.config?.digest_channel;
-  if (!conn || !channel) return { sent: false, reason: 'slack connector has no digest_channel configured' };
-  const st = (await pool.query(`SELECT v FROM sync_state WHERE k='digest'`)).rows[0]?.v || {};
-  const today = new Date().toISOString().slice(0, 10);
-  if (!force && st.last_sent === today) return { sent: false, reason: 'already sent today' };
-  const text = await buildDigestText();
-  await slackPost(conn.config.bot_token, channel, text);
-  await pool.query(`INSERT INTO sync_state (k, v) VALUES ('digest', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
-    [JSON.stringify({ last_sent: today, at: new Date().toISOString() })]);
-  return { sent: true, channel };
-}
-
-async function checkAnomalies() {
-  const conn = await getConnector('slack');
-  const channel = conn?.config?.digest_channel;
-  if (!conn || !channel) return;
-  const today = new Date().toISOString().slice(0, 10);
-  const st = (await pool.query(`SELECT v FROM sync_state WHERE k='alerts'`)).rows[0]?.v || {};
-  const fired = st.date === today ? (st.fired || []) : [];
-  const checks = await pool.query(`SELECT
-    (SELECT count(*)::int FROM tickets_cache WHERE created_datetime >= date_trunc('day', now())) AS tickets_today,
-    (SELECT count(*)::int FROM tickets_cache WHERE created_datetime >= date_trunc('day', now()) - interval '7 days' AND created_datetime < date_trunc('day', now()))/7 AS tickets_avg,
-    (SELECT count(*)::int FROM orders_cache WHERE cancelled_at >= date_trunc('day', now())) AS cancels_today,
-    (SELECT count(*)::int FROM orders_cache WHERE cancelled_at >= date_trunc('day', now()) - interval '7 days' AND cancelled_at < date_trunc('day', now()))/7 AS cancels_avg`);
-  const c = checks.rows[0];
-  const alerts = [];
-  if (!fired.includes('tickets') && c.tickets_today >= Math.max(30, c.tickets_avg * 2.5)) {
-    alerts.push(['tickets', `⚠️ *Ticket spike*: ${c.tickets_today} created today vs ~${c.tickets_avg}/day average`]);
-  }
-  if (!fired.includes('cancels') && c.cancels_today >= Math.max(8, c.cancels_avg * 3)) {
-    alerts.push(['cancels', `⚠️ *Order cancellation spike*: ${c.cancels_today} today vs ~${c.cancels_avg}/day average`]);
-  }
-  for (const [key, msg] of alerts) {
-    await slackPost(conn.config.bot_token, channel, msg + '\n_Check the brain → https://clicks-brain.onrender.com_');
-    fired.push(key);
-  }
-  if (alerts.length) {
-    await pool.query(`INSERT INTO sync_state (k, v) VALUES ('alerts', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
-      [JSON.stringify({ date: today, fired })]);
-  }
-}
-
-setInterval(async () => {
-  try {
-    if (new Date().getUTCHours() >= DIGEST_HOUR_UTC) await sendDigest(); // sends once/day; catches up after sleep
-    await checkAnomalies();
-  } catch (e) { console.error('digest/alerts:', e.message); }
-}, 5 * 60 * 1000);
-
-app.post('/api/slack/digest', async (req, res) => {
-  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
-  try { res.json(await sendDigest(true)); }
-  catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
