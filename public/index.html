@@ -484,18 +484,19 @@ async function loadOverview() {
       buildBreakdownMap(s.tickets.breakdowns?.closed)
     ];
     if (homeChart) homeChart.destroy();
+    // Gorgias = solid lines + circles · Shopify = dashed lines + squares
     const datasets = [
-      {label:'Created', data:m.created, borderColor:'#101114', backgroundColor:'rgba(16,17,20,.06)', tension:.25, fill:true, pointRadius:3, pointHoverRadius:6},
-      {label:'Still open', data:m.open, borderColor:'#dc2626', tension:.25, pointRadius:3, pointHoverRadius:6},
-      {label:'Closed', data:m.closed, borderColor:'#f0b400', backgroundColor:'rgba(255,200,0,.15)', tension:.25, pointRadius:3, pointHoverRadius:6}
+      {label:'🎧 Created', data:m.created, borderColor:'#101114', backgroundColor:'rgba(16,17,20,.06)', tension:.25, fill:true, pointRadius:3, pointHoverRadius:6, pointStyle:'circle'},
+      {label:'🎧 Still open', data:m.open, borderColor:'#dc2626', tension:.25, pointRadius:3, pointHoverRadius:6, pointStyle:'circle'},
+      {label:'🎧 Closed', data:m.closed, borderColor:'#f0b400', backgroundColor:'rgba(255,200,0,.15)', tension:.25, pointRadius:3, pointHoverRadius:6, pointStyle:'circle'}
     ];
     if (s.sales?.series?.length) {
       const ord = Object.fromEntries(s.sales.series.map(r => [String(r.d).slice(0,10), r.orders]));
-      datasets.push({label:'Orders', data:m.labels.map(l => ord[l] ?? 0), borderColor:'#2563eb',
-        backgroundColor:'rgba(37,99,235,.07)', fill:true, tension:.25, pointRadius:3, pointHoverRadius:6});
+      datasets.push({label:'🛒 Orders', data:m.labels.map(l => ord[l] ?? 0), borderColor:'#2563eb',
+        backgroundColor:'rgba(37,99,235,.07)', fill:true, borderDash:[7,4], tension:.25, pointRadius:4, pointHoverRadius:7, pointStyle:'rectRot'});
       const canc = Object.fromEntries((s.sales.cancel_series || []).map(r => [String(r.d).slice(0,10), r.c]));
-      datasets.push({label:'Cancelled orders', data:m.labels.map(l => canc[l] ?? 0), borderColor:'#7c3aed',
-        tension:.25, pointRadius:3, pointHoverRadius:6});
+      datasets.push({label:'🛒 Cancelled', data:m.labels.map(l => canc[l] ?? 0), borderColor:'#7c3aed',
+        borderDash:[7,4], tension:.25, pointRadius:4, pointHoverRadius:7, pointStyle:'rectRot'});
     }
     const homeCanvas = document.getElementById('homeChart');
     bindEventHover(homeCanvas);
@@ -505,7 +506,7 @@ async function loadOverview() {
       options: { responsive:true, maintainAspectRatio:false,
         interaction: { mode: 'nearest', intersect: true },
         plugins:{
-          legend:{position:'bottom'},
+          legend:{position:'bottom', labels:{usePointStyle:true}},
           eventMarkers:{ events: s.events },
           tooltip: {
             displayColors: false,
@@ -516,16 +517,16 @@ async function loadOverview() {
               },
               label(it) {
                 const l = it.dataset.label;
-                return `${it.formattedValue} ${l === 'Orders' || l === 'Cancelled orders' ? 'orders' : 'tickets'}`;
+                return `${it.formattedValue} ${l.startsWith('🛒') ? 'orders' : 'tickets'}`;
               },
               afterBody(items) {
                 const it = items[0];
-                if (it.dataset.label === 'Orders') {
+                if (it.dataset.label === '🛒 Orders') {
                   const o = (s.sales?.series || []).find(r => String(r.d).slice(0,10) === it.label);
                   return o ? [`revenue: ${(o.revenue ?? 0).toLocaleString()} ${s.sales?.totals?.currency || ''}`,
                               ...(o.refunded ? [`${o.refunded} refunded`] : [])] : '';
                 }
-                if (it.dataset.label === 'Cancelled orders') return '';
+                if (it.dataset.label === '🛒 Cancelled') return '';
                 const b = bdByDataset[it.datasetIndex]?.[it.label];
                 if (!b) return '';
                 const lines = [];
