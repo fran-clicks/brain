@@ -82,7 +82,12 @@ app.post('/api/auth/logout', (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/auth/me', (req, res) => res.json({ email: readSession(req) }));
+app.get('/api/auth/me', async (req, res) => {
+  const email = readSession(req);
+  if (!email) return res.json({ email: null });
+  const { rows } = await pool.query('SELECT role FROM users WHERE email=$1', [email]);
+  res.json({ email, role: rows[0]?.role || 'member' });
+});
 
 // ---------- Postgres ----------
 const pool = new Pool({
@@ -133,14 +138,22 @@ async function initDb() {
     ALTER TABLE connectors ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
     CREATE TABLE IF NOT EXISTS users (
       email TEXT PRIMARY KEY, pass_hash TEXT, created_at TIMESTAMPTZ DEFAULT now());
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'member';
     CREATE TABLE IF NOT EXISTS connection_requests (
       id SERIAL PRIMARY KEY, service TEXT NOT NULL, reason TEXT NOT NULL,
       requested_by TEXT DEFAULT 'anonymous', status TEXT DEFAULT 'pending',
       decided_by TEXT, decided_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
   `);
   for (const em of ['fran@clicks.tech', 'kp@clicks.tech']) {
-    await pool.query('INSERT INTO users (email) VALUES ($1) ON CONFLICT (email) DO NOTHING', [em]);
+    await pool.query(`INSERT INTO users (email, role) VALUES ($1, 'admin')
+                      ON CONFLICT (email) DO UPDATE SET role='admin'`, [em]);
   }
+}
+
+async function isAdminReq(req) {
+  if (!req.userEmail) return false;
+  const { rows } = await pool.query('SELECT role FROM users WHERE email=$1', [req.userEmail]);
+  return rows[0]?.role === 'admin';
 }
 
 // ---------- crypto ----------
@@ -247,7 +260,7 @@ app.post('/api/requests', async (req, res) => {
 });
 app.post('/api/requests/:id/decision', async (req, res) => {
   const { decision, admin_password } = req.body || {};
-  if (!adminOk(admin_password)) return res.status(403).json({ error: 'Wrong admin password.' });
+  if (!(await isAdminReq(req)) && !adminOk(admin_password)) return res.status(403).json({ error: 'Only admins can decide requests.' });
   if (!['approved', 'rejected'].includes(decision)) return res.status(400).json({ error: 'decision must be approved or rejected' });
   const { rows } = await pool.query(
     `UPDATE connection_requests SET status=$1, decided_by=$2, decided_at=now()
@@ -266,10 +279,8 @@ app.get('/api/integrations/pending', async (_req, res) => {
 
 app.post('/api/connectors/:id/decision', async (req, res) => {
   const { decision, admin_password, decided_by } = req.body || {};
-  if (!process.env.ADMIN_PASSWORD)
-    return res.status(400).json({ error: 'No ADMIN_PASSWORD is set on the server. Set it in Render → Environment to enable approvals.' });
-  if (!adminOk(admin_password))
-    return res.status(403).json({ error: 'Wrong admin password. Only authorized members can approve or reject integrations.' });
+  if (!(await isAdminReq(req)) && !adminOk(admin_password))
+    return res.status(403).json({ error: 'Only admins can approve or reject integrations.' });
   if (!['approved', 'rejected'].includes(decision))
     return res.status(400).json({ error: 'decision must be "approved" or "rejected"' });
   const { rows } = await pool.query(
@@ -283,7 +294,7 @@ app.post('/api/connectors/:id/decision', async (req, res) => {
 
 app.post('/api/connectors', async (req, res) => {
   const { type, name, config, added_by, admin_password } = req.body || {};
-  if (!adminOk(admin_password)) {
+  if (!(await isAdminReq(req)) && !adminOk(admin_password)) {
     return res.status(403).json({ error: 'Only admins can add connectors. Members: request the connection in the chat above (idea + reason) — an admin will take it from there.' });
   }
   const types = await getAllConnectorTypes();
@@ -365,6 +376,17 @@ app.post('/api/kb', rejectSecrets(['name', 'description']), async (req, res) => 
     'INSERT INTO kb_suggestions (name, description, suggested_by) VALUES ($1,$2,$3) RETURNING *',
     [name, description, suggested_by || 'anonymous']);
   res.status(201).json(rows[0]);
+});
+
+app.post('/api/kb/:id/decision', async (req, res) => {
+  const { decision } = req.body || {};
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'Only admins can approve or reject knowledge bases.' });
+  if (!['approved', 'rejected'].includes(decision)) return res.status(400).json({ error: 'decision must be approved or rejected' });
+  const { rows } = await pool.query(
+    `UPDATE kb_suggestions SET status=$1 WHERE id=$2 AND status='pending' RETURNING *`,
+    [decision, req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'not found or already decided' });
+  res.json(rows[0]);
 });
 
 // ---------- events (member-added, with optional attachment, pinned on charts) ----------
@@ -863,6 +885,17 @@ app.get('/api/gorgias/stats', async (_req, res) => {
     for (let i = 6; i >= 0; i--) days[new Date(now - i * 864e5).toISOString().slice(0, 10)] = 0;
     perDay.rows.forEach(r => { const d = String(r.d).slice(0, 10); if (d in days) days[d] = r.c; });
     out.created_per_day = days;
+    const [tags, channels, recent] = await Promise.all([
+      pool.query(`SELECT t.tag, count(*)::int c FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
+                  WHERE created_datetime >= now()-interval '30 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 8`),
+      pool.query(`SELECT coalesce(nullif(channel,''),'unknown') channel, count(*)::int c FROM tickets_cache
+                  WHERE created_datetime >= now()-interval '30 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 8`),
+      pool.query(`SELECT subject, status, channel, created_datetime::date d FROM tickets_cache
+                  ORDER BY created_datetime DESC LIMIT 10`)
+    ]);
+    out.top_tags = tags.rows;
+    out.channels = channels.rows;
+    out.recent = recent.rows;
   } catch (e) { out.errors.push(String(e.message)); }
   if (cfg) {
     try {

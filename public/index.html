@@ -216,9 +216,23 @@ footer{color:rgba(16,17,20,.45)}
 <div class="section" id="s-gorgias">
   <div class="grid kpis" id="gorgiasKpis"></div>
   <div class="card" style="margin-top:14px">
-    <h2>Tickets created — last 7 days (live)</h2>
+    <h2>Tickets created — last 7 days</h2>
     <div class="chart-wrap"><canvas id="gorgiasChart"></canvas></div>
-    <div class="note" id="gorgiasNote">Loading live data from Gorgias…</div>
+    <div class="note" id="gorgiasNote">Loading Gorgias data…</div>
+  </div>
+  <div class="grid two">
+    <div class="card">
+      <h2>Top tags (30d)</h2>
+      <table id="gTags"><thead><tr><th>Tag</th><th>Tickets</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>By channel (30d)</h2>
+      <table id="gChannels"><thead><tr><th>Channel</th><th>Tickets</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Latest tickets</h2>
+    <table id="gRecent"><thead><tr><th>Subject</th><th>Channel</th><th>Status</th><th>Date</th></tr></thead><tbody></tbody></table>
   </div>
 </div>
 
@@ -310,12 +324,18 @@ const api = async (p, opts) => {
   return j;
 };
 
-// tabs
+// tabs — reload the tab's data on activation (also fixes charts initialized while hidden)
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button').forEach(x => x.classList.remove('active'));
   document.querySelectorAll('.section').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
   document.getElementById('s-' + b.dataset.s).classList.add('active');
+  const s = b.dataset.s;
+  if (s === 'gorgias') loadGorgias();
+  if (s === 'sales') loadShopify();
+  if (s === 'home') loadOverview();
+  if (s === 'kb') loadKbs();
+  if (s === 'conn') { loadConnectors(); loadRequests(); }
 });
 
 // ---------- overview ----------
@@ -680,6 +700,14 @@ async function loadGorgias() {
       ? 'Synced data + live Gorgias metrics · ' + new Date(g.fetched_at).toLocaleString()
       : '⚠️ ' + (g.message || 'Live metrics unavailable'))
       + (g.errors?.length ? ' · issues: ' + g.errors.join('; ') : '');
+    document.querySelector('#gTags tbody').innerHTML = (g.top_tags || []).map(t =>
+      `<tr><td><span class="tag src">${esc(t.tag)}</span></td><td>${t.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
+    document.querySelector('#gChannels tbody').innerHTML = (g.channels || []).map(c =>
+      `<tr><td>${esc(c.channel)}</td><td>${c.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
+    document.querySelector('#gRecent tbody').innerHTML = (g.recent || []).map(t =>
+      `<tr><td>${esc(t.subject || '(no subject)')}</td><td>${esc(t.channel)}</td>
+       <td><span class="tag ${t.status === 'open' ? 'pending' : 'approved'}">${esc(t.status)}</span></td>
+       <td>${esc(String(t.d).slice(0,10))}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">—</td></tr>';
   } catch (e) { note.textContent = 'Gorgias error: ' + e.message; }
 }
 
@@ -687,8 +715,17 @@ async function loadGorgias() {
 async function loadKbs() {
   const kbs = await api('/api/kb');
   document.querySelector('#kbTable tbody').innerHTML = kbs.length ? kbs.map(k =>
-    `<tr><td><b>${esc(k.name)}</b></td><td>${esc(k.description)}</td><td>${esc(k.suggested_by)}</td><td><span class="tag ${esc(k.status)}">${esc(k.status)}</span></td></tr>`).join('')
+    `<tr><td><b>${esc(k.name)}</b></td><td>${esc(k.description)}</td><td>${esc(k.suggested_by)}</td>
+     <td><span class="tag ${k.status === 'rejected' ? 'src' : esc(k.status)}">${esc(k.status)}</span>
+     ${window.isAdmin && k.status === 'pending' ? `
+       <button class="btn" style="margin:2px 0 0;padding:3px 10px;font-size:12px" onclick="decideKb(${k.id},'approved')">✓</button>
+       <button class="btn" style="margin:2px 0 0;padding:3px 10px;font-size:12px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="decideKb(${k.id},'rejected')">✕</button>` : ''}
+     </td></tr>`).join('')
     : '<tr><td colspan="4" class="empty">No knowledge bases yet — suggest one below</td></tr>';
+}
+async function decideKb(id, decision) {
+  try { await api(`/api/kb/${id}/decision`, {method:'POST', body: JSON.stringify({ decision })}); loadKbs(); }
+  catch (e) { alert(e.message); }
 }
 async function addKb() {
   const el = id => document.getElementById(id);
@@ -887,12 +924,20 @@ async function aiSend() {
   finally { aiBusy = false; }
 }
 
-// signed-in identity + sign out
+// signed-in identity + role + sign out
+window.isAdmin = false;
 api('/api/auth/me').then(m => {
   const w = document.getElementById('whoami');
   if (m.email) {
-    w.textContent = `👤 ${m.email} · sign out`;
+    window.isAdmin = m.role === 'admin';
+    w.textContent = `👤 ${m.email}${window.isAdmin ? ' · admin' : ''} · sign out`;
     w.onclick = async () => { await api('/api/auth/logout', {method:'POST', body:'{}'}); location.href = '/login.html'; };
+    if (window.isAdmin) {
+      // admins act via their login — hide the password prompts
+      document.getElementById('rqPw')?.closest('div')?.style.setProperty('display', 'none');
+      document.getElementById('cPw')?.closest('div')?.style.setProperty('display', 'none');
+    }
+    loadKbs(); // re-render with admin controls if applicable
   }
 }).catch(() => {});
 
