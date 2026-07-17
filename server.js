@@ -146,6 +146,10 @@ async function initDb() {
       attachment_name TEXT, attachment_type TEXT, attachment_data TEXT,
       created_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS sync_state (k TEXT PRIMARY KEY, v JSONB NOT NULL DEFAULT '{}');
+    CREATE TABLE IF NOT EXISTS campaigns_cache (
+      klaviyo_id TEXT PRIMARY KEY, name TEXT DEFAULT '', channel TEXT DEFAULT '', status TEXT DEFAULT '',
+      send_time TIMESTAMPTZ, recipients INT, opens INT, open_rate DOUBLE PRECISION,
+      clicks INT, click_rate DOUBLE PRECISION, revenue NUMERIC, synced_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS uk_stock (
       sku TEXT PRIMARY KEY, name TEXT DEFAULT '', qty INT, raw JSONB, updated_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE uk_stock ADD COLUMN IF NOT EXISTS upc TEXT DEFAULT '';
@@ -228,6 +232,12 @@ const CONNECTOR_TYPES = {
     fields: [
       { key: 'bot_token', label: 'Bot User OAuth Token, starts with xoxb- (api.slack.com/apps → your app → OAuth & Permissions)', secret: true },
       { key: 'signing_secret', label: 'Signing Secret (api.slack.com/apps → your app → Basic Information)', secret: true }
+    ]
+  },
+  klaviyo: {
+    label: 'Klaviyo (email/SMS campaigns)',
+    fields: [
+      { key: 'api_key', label: 'Private API key, read-only scopes: campaigns, metrics, flows (Klaviyo → Settings → API keys)', secret: true }
     ]
   },
   uk_stock: {
@@ -361,6 +371,9 @@ app.post('/api/connectors', async (req, res) => {
     } else if (type === 'shopify') {
       const d = await shopifyGraphql(config, 'query { shop { name } }');
       meta = { store: d?.shop?.name || config.store_domain, domain: config.store_domain };
+    } else if (type === 'klaviyo') {
+      const m = await klaviyoRequest(config, '/api/metrics/?page[size]=1');
+      meta = { metrics_visible: (m.data || []).length >= 0 ? 'ok' : 'none' };
     } else if (type === 'uk_stock') {
       const j = await ukStockFetch(config);
       const items = extractStockItems(j);
@@ -383,6 +396,7 @@ app.post('/api/connectors', async (req, res) => {
   if (type === 'gorgias') syncGorgias(15).catch(e => console.error('initial sync:', e.message));
   if (type === 'shopify') syncShopify(30).catch(e => console.error('initial shopify sync:', e.message));
   if (type === 'uk_stock') syncUkStock().catch(e => console.error('initial stock sync:', e.message));
+  if (type === 'klaviyo') syncKlaviyo().catch(e => console.error('initial klaviyo sync:', e.message));
   res.status(201).json(rows[0]);
 });
 
@@ -600,6 +614,12 @@ setInterval(async () => {
       await syncUkStock();
     }
   } catch (e) { console.error('interval stock sync:', e.message); }
+  try {
+    const ks = (await pool.query(`SELECT v FROM sync_state WHERE k='klaviyo'`)).rows[0]?.v;
+    if (await getConnector('klaviyo') && (!ks?.last_run || Date.now() - Date.parse(ks.last_run) > 55 * 60 * 1000)) {
+      await syncKlaviyo();
+    }
+  } catch (e) { console.error('interval klaviyo sync:', e.message); }
 }, 5 * 60 * 1000);
 
 async function bootSync() {
@@ -614,6 +634,116 @@ async function bootSync() {
 
 app.post('/api/gorgias/sync', async (_req, res) => {
   try { res.json(await syncGorgias(50)); }
+  catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ---------- Klaviyo (campaigns + attribution) ----------
+const KLAVIYO_REVISION = process.env.KLAVIYO_REVISION || '2025-04-15';
+async function klaviyoRequest(cfg, pathAndQuery, opts = {}) {
+  const r = await fetch(`https://a.klaviyo.com${pathAndQuery}`, {
+    ...opts,
+    headers: {
+      Authorization: `Klaviyo-API-Key ${cfg.api_key}`,
+      revision: KLAVIYO_REVISION,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      ...(opts.headers || {})
+    }
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Klaviyo ${pathAndQuery.split('?')[0]} → ${r.status}: ${(j.errors || []).map(e => e.detail).join('; ').slice(0, 200)}`);
+  return j;
+}
+
+async function syncKlaviyo() {
+  const conn = await getConnector('klaviyo');
+  if (!conn) return { configured: false };
+  const cfg = conn.config;
+  const st = (await pool.query(`SELECT v FROM sync_state WHERE k='klaviyo'`)).rows[0]?.v || {};
+  let campaigns = 0, statsApplied = 0;
+  try {
+    // conversion metric (Placed Order) for revenue attribution — resolved once
+    if (!st.conversion_metric_id) {
+      let url = '/api/metrics/';
+      for (let p = 0; p < 5 && url; p++) {
+        const m = await klaviyoRequest(cfg, url);
+        const hit = (m.data || []).find(x => x.attributes?.name === 'Placed Order');
+        if (hit) { st.conversion_metric_id = hit.id; break; }
+        url = m.links?.next ? m.links.next.replace('https://a.klaviyo.com', '') : null;
+      }
+    }
+    // campaigns per channel
+    for (const channel of ['email', 'sms']) {
+      let url = `/api/campaigns/?filter=equals(messages.channel,'${channel}')&sort=-scheduled_at`;
+      for (let p = 0; p < 5 && url; p++) {
+        const res = await klaviyoRequest(cfg, url);
+        for (const c of res.data || []) {
+          const a = c.attributes || {};
+          await pool.query(
+            `INSERT INTO campaigns_cache (klaviyo_id, name, channel, status, send_time, synced_at)
+             VALUES ($1,$2,$3,$4,$5,now())
+             ON CONFLICT (klaviyo_id) DO UPDATE SET name=$2, channel=$3, status=$4, send_time=$5, synced_at=now()`,
+            [c.id, (a.name || '').slice(0, 300), channel, a.status || '', a.send_time || a.scheduled_at || null]);
+          campaigns++;
+        }
+        url = res.links?.next ? res.links.next.replace('https://a.klaviyo.com', '') : null;
+      }
+    }
+    // performance stats (best effort — requires the conversion metric)
+    if (st.conversion_metric_id) {
+      const rep = await klaviyoRequest(cfg, '/api/campaign-values-reports/', {
+        method: 'POST',
+        body: JSON.stringify({
+          data: {
+            type: 'campaign-values-report',
+            attributes: {
+              timeframe: { key: 'last_12_months' },
+              conversion_metric_id: st.conversion_metric_id,
+              statistics: ['recipients', 'opens', 'open_rate', 'clicks', 'click_rate', 'conversion_value']
+            }
+          }
+        })
+      });
+      for (const row of rep.data?.attributes?.results || []) {
+        const id = row.groupings?.campaign_id;
+        const s = row.statistics || {};
+        if (!id) continue;
+        await pool.query(
+          `UPDATE campaigns_cache SET recipients=$2, opens=$3, open_rate=$4, clicks=$5, click_rate=$6, revenue=$7, synced_at=now()
+           WHERE klaviyo_id=$1`,
+          [id, s.recipients ?? null, s.opens ?? null, s.open_rate ?? null, s.clicks ?? null, s.click_rate ?? null, s.conversion_value ?? null]);
+        statsApplied++;
+      }
+    }
+    st.last_error = null;
+  } catch (e) {
+    st.last_error = String(e.message);
+    console.error('klaviyo sync:', st.last_error);
+  }
+  st.last_run = new Date().toISOString();
+  st.campaigns = campaigns; st.stats_applied = statsApplied;
+  await pool.query(`INSERT INTO sync_state (k, v) VALUES ('klaviyo', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
+    [JSON.stringify(st)]).catch(() => {});
+  overviewCache.clear();
+  return { configured: true, campaigns, stats_applied: statsApplied, error: st.last_error };
+}
+
+app.get('/api/klaviyo/summary', async (_req, res) => {
+  const conn = await getConnector('klaviyo');
+  const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='klaviyo'`)).rows[0]?.v || null;
+  const [totals, recent] = await Promise.all([
+    pool.query(`SELECT count(*)::int campaigns,
+      round(avg(open_rate) FILTER (WHERE open_rate IS NOT NULL) * 100)::int avg_open_pct,
+      round(avg(click_rate) FILTER (WHERE click_rate IS NOT NULL) * 100)::int avg_click_pct,
+      round(coalesce(sum(revenue),0))::int revenue
+      FROM campaigns_cache WHERE send_time >= now()-interval '30 days'`),
+    pool.query(`SELECT klaviyo_id, name, channel, status, send_time, recipients, open_rate, click_rate, revenue
+      FROM campaigns_cache WHERE send_time IS NOT NULL ORDER BY send_time DESC LIMIT 20`)
+  ]);
+  res.json({ configured: !!conn, totals_30d: totals.rows[0], recent: recent.rows, sync: ss });
+});
+app.post('/api/klaviyo/sync', async (_req, res) => {
+  try { res.json(await syncKlaviyo()); }
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 
@@ -983,6 +1113,9 @@ async function overviewStats(days) {
     pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)
   ]);
   const hasSales = (await pool.query('SELECT 1 FROM orders_cache LIMIT 1')).rows.length > 0;
+  const campaigns = (await pool.query(
+    `SELECT klaviyo_id, name, channel, to_char(send_time::date,'YYYY-MM-DD') d, recipients, open_rate, click_rate, revenue
+     FROM campaigns_cache WHERE send_time >= now()-$1::interval AND send_time <= now() ORDER BY send_time`, params)).rows;
   return {
     days, bucket,
     tickets: {
@@ -996,6 +1129,7 @@ async function overviewStats(days) {
     },
     sales: hasSales ? { series: salesSeries.rows, cancel_series: cancelSeries.rows, totals: salesTotals.rows[0], sync: shopifySt.rows[0]?.v || null } : null,
     events: events.rows,
+    campaigns,
     last_sync: st.rows[0]?.v?.last_run || null,
     sync: st.rows[0]?.v || null
   };
@@ -1133,6 +1267,17 @@ const TOOLS = [
     }
   },
   {
+    name: 'query_campaigns',
+    description: 'Klaviyo email/SMS campaign performance from the local sync: send date, recipients, open/click rates, attributed revenue. Filter by name regex and/or recency.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        text_match: { type: 'string', description: 'case-insensitive regex against campaign name' },
+        days: { type: 'integer', description: 'only campaigns sent in the last N days' }
+      }
+    }
+  },
+  {
     name: 'query_uk_stock',
     description: 'Current UK warehouse stock levels from the clicks-uk-returns API (synced hourly). Optionally filter by product name/SKU regex.',
     input_schema: { type: 'object', properties: { text_match: { type: 'string', description: 'case-insensitive regex against sku and name' } } }
@@ -1238,6 +1383,18 @@ async function runTool(name, input, ctx) {
     return { ...agg.rows[0], sample: sample.rows,
       note: `From the local Shopify sync. Last sync: ${ss?.last_run || 'unknown'}${ss?.backfill_done ? '' : ' (history backfill still in progress — older orders may be missing)'}.` };
   }
+  if (name === 'query_campaigns') {
+    const conn = await getConnector('klaviyo');
+    if (!conn) return { error: 'Klaviyo is not connected yet — an admin can add it on the ＋ page.' };
+    const conds = [], p = [];
+    if (input.text_match) { p.push(String(input.text_match).slice(0, 200)); conds.push(`name ~* $${p.length}`); }
+    if (input.days) { p.push(`${Math.min(+input.days || 30, 400)} days`); conds.push(`send_time >= now()-$${p.length}::interval`); }
+    const { rows } = await pool.query(
+      `SELECT name, channel, status, send_time::date sent, recipients,
+       round(open_rate*100)::int open_pct, round(click_rate*100)::int click_pct, round(coalesce(revenue,0))::int revenue
+       FROM campaigns_cache ${conds.length ? 'WHERE ' + conds.join(' AND ') : ''} ORDER BY send_time DESC NULLS LAST LIMIT 25`, p);
+    return { campaigns: rows, note: 'revenue = Klaviyo-attributed conversion value (Placed Order).' };
+  }
   if (name === 'query_uk_stock') {
     const conn = await getConnector('uk_stock');
     if (!conn) return { error: 'UK stock is not connected yet — an admin can add the "UK stock" connector on the ＋ page.' };
@@ -1315,7 +1472,7 @@ CONNECTION REQUESTS are a core part of your job. Members cannot add connectors �
 2. Once you have service + reason, call create_connection_request to log it.
 3. Tell them: an admin reviews it in the Requests list on this page; if approved, the admin sets up the credentials and the dev team wires the sync.
 For ADMINS preparing an approved request, you may call create_connector_type to add a tailored credentials form to the dropdown (clear field labels saying where to find each value; every credential secret:true).
-gorgias, anthropic, slack, shopify and uk_stock connectors are fully wired: they test the connection and work immediately once an admin saves them. Shopify sync unlocks sales/order/delivery data (query_sales) and the sales line on Overview. uk_stock unlocks UK warehouse stock levels (query_uk_stock).
+gorgias, anthropic, slack, shopify, klaviyo and uk_stock connectors are fully wired: they test the connection and work immediately once an admin saves them. Shopify sync unlocks sales/order/delivery data (query_sales) and the sales line on Overview. klaviyo unlocks campaign performance (query_campaigns) and auto-marks campaign sends as ✉️ on the Overview chart. uk_stock unlocks UK warehouse stock levels (query_uk_stock).
 Use list_pending_integrations to report request/wiring status. You cannot approve anything yourself.
 Use your tools to answer data questions with real numbers. If a question needs sales/order/delivery data, use query_sales and relay its guidance. Be concise. Answer in the user's language.${opts.slack ? '\nYou are replying inside Slack: use Slack formatting (*bold*, bullet lines with •), keep replies short, no markdown headers or tables.' : ''}`;
 

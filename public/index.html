@@ -160,6 +160,7 @@ footer{color:rgba(16,17,20,.45)}
   <button data-s="gorgias">🎧 Gorgias</button>
   <button data-s="sales">🛒 Shopify</button>
   <button data-s="stock">📦 UK Stock</button>
+  <button data-s="klaviyo">✉️ Klaviyo</button>
   <button data-s="kb">💡 Knowledge Bases</button>
   <button data-s="conn" title="Connectors" style="font-size:16px;padding:8px 16px;font-weight:800">＋</button>
 </nav>
@@ -280,6 +281,16 @@ footer{color:rgba(16,17,20,.45)}
   </div>
 </div>
 
+<!-- KLAVIYO -->
+<div class="section" id="s-klaviyo">
+  <div class="grid kpis" id="kvKpis"></div>
+  <div class="card" style="margin-top:14px">
+    <h2>Recent campaigns <button class="btn" style="float:right;margin:0;padding:5px 12px" id="kvSyncBtn" onclick="kvSync()">🔄 Sync now</button></h2>
+    <table id="kvTable"><thead><tr><th>Campaign</th><th>Channel</th><th>Sent</th><th>Recipients</th><th>Opens</th><th>Clicks</th><th>Attributed revenue</th></tr></thead><tbody></tbody></table>
+    <div class="note" id="kvNote">Loading Klaviyo data…</div>
+  </div>
+</div>
+
 <!-- KNOWLEDGE BASES -->
 <div class="section" id="s-kb">
   <div class="card">
@@ -389,6 +400,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (s === 'gorgias') loadGorgias();
   if (s === 'sales') loadShopify();
   if (s === 'stock') loadStock();
+  if (s === 'klaviyo') loadKlaviyo();
   if (s === 'home') loadOverview();
   if (s === 'kb') loadKbs();
   if (s === 'conn') { loadConnectors(); loadRequests(); loadMembers(); }
@@ -437,14 +449,15 @@ const eventMarkers = {
       if (idx === -1 && labels.length && d <= labels[labels.length-1]) idx = labels.length - 1;
       if (idx === -1) return;
       const px = x.getPixelForValue(idx);
+      const camp = e.kind === 'campaign';
       chart.$pins.push({ x: px, top, bottom, ev: e });
       ctx.save();
-      ctx.strokeStyle = 'rgba(220,38,38,.55)';
+      ctx.strokeStyle = camp ? 'rgba(37,99,235,.45)' : 'rgba(220,38,38,.55)';
       ctx.setLineDash([4, 4]);
       ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, bottom); ctx.stroke();
       ctx.setLineDash([]);
       ctx.font = '14px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText('📌', px, top + 12);
+      ctx.fillText(camp ? '✉️' : '📌', px, top + (camp ? 28 : 12)); // offset so both show on shared dates
       ctx.restore();
     });
   }
@@ -549,7 +562,7 @@ function bindEventHover(canvas) {
     const hit = pins.find(p => Math.abs(mx - p.x) < 10 && my >= p.top && my <= p.bottom);
     if (hit) {
       const ev = hit.ev;
-      tip.innerHTML = `<b>📌 ${esc(ev.title)}</b><br>
+      tip.innerHTML = `<b>${ev.kind === 'campaign' ? '✉️' : '📌'} ${esc(ev.title)}</b><br>
         <span class="tag date">${esc(String(ev.event_date).slice(0,10))}</span> by <b>${esc(ev.added_by)}</b>
         ${ev.description ? `<br>${esc(ev.description)}` : ''}
         ${ev.attachment_name ? `<br>📎 <a href="/api/events/${ev.id}/attachment" target="_blank">${esc(ev.attachment_name)}</a>` : ''}`;
@@ -649,7 +662,19 @@ async function loadOverview() {
           delay: (ctx) => ctx.type === 'data' ? ctx.dataIndex * 6 + ctx.datasetIndex * 90 : 0 },
         plugins:{
           legend:{position:'bottom', labels:{usePointStyle:true, padding:18, font:{size:12, weight:600}}},
-          eventMarkers:{ events: s.events },
+          eventMarkers:{ events: [
+            ...s.events.map(e => ({ ...e, kind: 'event' })),
+            ...(s.campaigns || []).map(c => ({
+              id: 'kv' + c.klaviyo_id, kind: 'campaign', title: c.name, event_date: c.d,
+              added_by: `Klaviyo (${c.channel})`,
+              description: [
+                c.recipients != null ? `${c.recipients.toLocaleString()} recipients` : null,
+                c.open_rate != null ? `${Math.round(c.open_rate * 100)}% opens` : null,
+                c.click_rate != null ? `${Math.round(c.click_rate * 100)}% clicks` : null,
+                c.revenue ? `${Math.round(+c.revenue).toLocaleString()} attributed` : null
+              ].filter(Boolean).join(' · ')
+            }))
+          ] },
           futureZone:{ today: m.today },
           tooltip: {
             displayColors: false,
@@ -860,6 +885,39 @@ async function stockSync() {
   try { await api('/api/stock/sync', {method:'POST', body:'{}'}); loadStock(); }
   catch (e) { document.getElementById('stockNote').textContent = '⚠️ ' + e.message; }
   finally { b.disabled = false; b.textContent = '🔄 Sync'; }
+}
+// klaviyo tab
+async function loadKlaviyo() {
+  const note = document.getElementById('kvNote');
+  try {
+    const s = await api('/api/klaviyo/summary');
+    if (!s.configured) { note.textContent = 'Klaviyo is not connected — an admin can add it on the ＋ page.'; return; }
+    const t = s.totals_30d || {};
+    document.getElementById('kvKpis').innerHTML = [
+      {l:'Campaigns sent (30d)', v: t.campaigns ?? '—'},
+      {l:'Avg open rate (30d)', v: t.avg_open_pct != null ? t.avg_open_pct + '%' : '—'},
+      {l:'Avg click rate (30d)', v: t.avg_click_pct != null ? t.avg_click_pct + '%' : '—'},
+      {l:'Attributed revenue (30d)', v: (t.revenue ?? 0).toLocaleString()}
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    document.querySelector('#kvTable tbody').innerHTML = (s.recent || []).length ? s.recent.map(c =>
+      `<tr><td><b>${esc(c.name)}</b></td><td><span class="tag src">${esc(c.channel)}</span></td>
+       <td>${esc(String(c.send_time).slice(0,10))}</td>
+       <td>${c.recipients != null ? c.recipients.toLocaleString() : '—'}</td>
+       <td>${c.open_rate != null ? Math.round(c.open_rate*100) + '%' : '—'}</td>
+       <td>${c.click_rate != null ? Math.round(c.click_rate*100) + '%' : '—'}</td>
+       <td>${c.revenue != null ? Math.round(+c.revenue).toLocaleString() : '—'}</td></tr>`).join('')
+      : '<tr><td colspan="7" class="empty">No campaigns synced yet — hit Sync now</td></tr>';
+    note.textContent = s.sync
+      ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · refreshes hourly${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''} · sends appear as ✉️ on the Overview chart`
+      : '';
+  } catch (e) { note.textContent = '⚠️ ' + e.message; }
+}
+async function kvSync() {
+  const b = document.getElementById('kvSyncBtn');
+  b.disabled = true; b.textContent = '⏳ Syncing…';
+  try { await api('/api/klaviyo/sync', {method:'POST', body:'{}'}); loadKlaviyo(); ovCache.clear(); loadOverview(); }
+  catch (e) { document.getElementById('kvNote').textContent = '⚠️ ' + e.message; }
+  finally { b.disabled = false; b.textContent = '🔄 Sync now'; }
 }
 async function shopSync() {
   const b = document.getElementById('shopSyncBtn');
@@ -1159,7 +1217,7 @@ api('/api/auth/me').then(m => {
   }
 }).catch(() => {});
 
-loadOverview().then(prefetchPeriods); loadEvents(); loadShopify(); loadStock(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors(); loadRequests();
+loadOverview().then(prefetchPeriods); loadEvents(); loadShopify(); loadStock(); loadKlaviyo(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors(); loadRequests();
 </script>
 </body>
 </html>
