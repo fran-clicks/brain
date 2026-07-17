@@ -146,6 +146,7 @@ footer{color:rgba(16,17,20,.45)}
   <button data-s="home" class="active">🏠 Overview</button>
   <button data-s="gorgias">🎧 Gorgias</button>
   <button data-s="sales">🛒 Shopify</button>
+  <button data-s="stock">📦 UK Stock</button>
   <button data-s="kb">💡 Knowledge Bases</button>
   <button data-s="conn" title="Connectors" style="font-size:16px;padding:8px 16px;font-weight:800">＋</button>
 </nav>
@@ -205,11 +206,6 @@ footer{color:rgba(16,17,20,.45)}
       <table id="shopProducts"><thead><tr><th>Product</th><th>Units</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
-  <div class="card" id="stockCard" style="display:none">
-    <h2>📦 UK stock <button class="btn" style="float:right;margin:0;padding:5px 12px" id="stockSyncBtn" onclick="stockSync()">🔄 Sync</button></h2>
-    <table id="stockTable"><thead><tr><th>SKU</th><th>Product</th><th>Units</th><th>Updated</th></tr></thead><tbody></tbody></table>
-    <div class="note" id="stockNote"></div>
-  </div>
   <div class="card">
     <h2>Recent orders <button class="btn" style="float:right;margin:0;padding:5px 12px" id="shopSyncBtn" onclick="shopSync()">🔄 Sync now</button></h2>
     <table id="shopRecent"><thead><tr><th>Order</th><th>Date</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th></tr></thead><tbody></tbody></table>
@@ -238,6 +234,23 @@ footer{color:rgba(16,17,20,.45)}
   <div class="card">
     <h2>Latest tickets</h2>
     <table id="gRecent"><thead><tr><th>Subject</th><th>Channel</th><th>Status</th><th>Date</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+
+<!-- UK STOCK -->
+<div class="section" id="s-stock">
+  <div class="grid kpis" id="stockKpis"></div>
+  <div class="card" style="margin-top:14px">
+    <h2>📦 Stock levels
+      <button class="btn" style="float:right;margin:0;padding:5px 12px" id="stockSyncBtn" onclick="stockSync()">🔄 Sync now</button>
+    </h2>
+    <input class="search" id="stockSearch" placeholder="Search SKU or product…">
+    <table id="stockTable"><thead><tr><th>SKU</th><th>Product</th><th>Units</th><th>Updated</th></tr></thead><tbody></tbody></table>
+    <div class="note" id="stockNote">Loading stock…</div>
+  </div>
+  <div class="card">
+    <h2>Recent changes</h2>
+    <table id="stockHistory"><thead><tr><th>When</th><th>SKU</th><th>Product</th><th>Units</th></tr></thead><tbody></tbody></table>
   </div>
 </div>
 
@@ -337,7 +350,8 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.getElementById('s-' + b.dataset.s).classList.add('active');
   const s = b.dataset.s;
   if (s === 'gorgias') loadGorgias();
-  if (s === 'sales') { loadShopify(); loadStock(); }
+  if (s === 'sales') loadShopify();
+  if (s === 'stock') loadStock();
   if (s === 'home') loadOverview();
   if (s === 'kb') loadKbs();
   if (s === 'conn') { loadConnectors(); loadRequests(); }
@@ -716,23 +730,41 @@ async function loadShopify() {
       : '';
   } catch (e) { note.textContent = 'Shopify error: ' + e.message; }
 }
+let stockItems = [];
+function renderStockTable() {
+  const q = (document.getElementById('stockSearch').value || '').toLowerCase();
+  const rows = stockItems.filter(i => (i.sku + ' ' + i.name).toLowerCase().includes(q));
+  document.querySelector('#stockTable tbody').innerHTML = rows.length ? rows.map(i =>
+    `<tr${i.qty === 0 ? ' style="background:rgba(220,38,38,.12)"' : i.qty != null && i.qty < 10 ? ' style="background:rgba(220,38,38,.05)"' : ''}>
+     <td><span class="tag src">${esc(i.sku)}</span></td><td>${esc(i.name)}</td>
+     <td><b>${i.qty ?? '?'}</b>${i.qty === 0 ? ' 🚨' : i.qty != null && i.qty < 10 ? ' ⚠️' : ''}</td>
+     <td>${esc(String(i.updated_at).slice(0,10))}</td></tr>`).join('')
+    : '<tr><td colspan="4" class="empty">No matches</td></tr>';
+}
 async function loadStock() {
+  const note = document.getElementById('stockNote');
   try {
     const s = await api('/api/stock');
-    const card = document.getElementById('stockCard');
-    card.style.display = s.configured ? 'block' : 'none';
-    if (!s.configured) return;
-    document.querySelector('#stockTable tbody').innerHTML = s.items.length ? s.items.map(i =>
-      `<tr${i.qty != null && i.qty < 10 ? ' style="background:rgba(220,38,38,.06)"' : ''}>
-       <td><span class="tag src">${esc(i.sku)}</span></td><td>${esc(i.name)}</td>
-       <td><b>${i.qty ?? '?'}</b>${i.qty != null && i.qty < 10 ? ' ⚠️' : ''}</td>
-       <td>${esc(String(i.updated_at).slice(0,10))}</td></tr>`).join('')
-      : '<tr><td colspan="4" class="empty">No stock rows yet — hit Sync</td></tr>';
-    document.getElementById('stockNote').textContent = s.sync
-      ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''}${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''} · low stock (<10) highlighted`
+    if (!s.configured) { note.textContent = 'UK stock is not connected — an admin can add it on the ＋ page.'; return; }
+    const t = s.totals || {};
+    document.getElementById('stockKpis').innerHTML = [
+      {l:'Products (SKUs)', v: t.skus ?? '—'},
+      {l:'Total units', v: (t.units ?? 0).toLocaleString()},
+      {l:'Low stock (<10)', v: t.low ?? '—'},
+      {l:'Out of stock', v: t.out_of_stock ?? '—'}
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    stockItems = s.items || [];
+    renderStockTable();
+    document.querySelector('#stockHistory tbody').innerHTML = (s.history || []).length ? s.history.map(h =>
+      `<tr><td>${esc(new Date(h.taken_at).toLocaleString())}</td><td><span class="tag src">${esc(h.sku)}</span></td>
+       <td>${esc(h.name || '')}</td><td><b>${h.qty ?? '?'}</b></td></tr>`).join('')
+      : '<tr><td colspan="4" class="empty">No changes recorded yet — history builds as levels move</td></tr>';
+    note.textContent = s.sync
+      ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · refreshes hourly${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''} · low stock highlighted`
       : '';
-  } catch (e) { document.getElementById('stockNote').textContent = '⚠️ ' + e.message; }
+  } catch (e) { note.textContent = '⚠️ ' + e.message; }
 }
+document.getElementById('stockSearch').oninput = renderStockTable;
 async function stockSync() {
   const b = document.getElementById('stockSyncBtn');
   b.disabled = true; b.textContent = '⏳';

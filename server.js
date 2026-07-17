@@ -658,8 +658,15 @@ async function syncUkStock() {
 app.get('/api/stock', async (_req, res) => {
   const conn = await getConnector('uk_stock');
   const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='uk_stock'`)).rows[0]?.v || null;
-  const { rows } = await pool.query('SELECT sku, name, qty, updated_at FROM uk_stock ORDER BY qty ASC NULLS LAST LIMIT 200');
-  res.json({ configured: !!conn, items: rows, sync: ss });
+  const [items, totals, history] = await Promise.all([
+    pool.query('SELECT sku, name, qty, updated_at FROM uk_stock ORDER BY qty ASC NULLS LAST LIMIT 300'),
+    pool.query(`SELECT count(*)::int skus, coalesce(sum(qty),0)::int units,
+                count(*) FILTER (WHERE qty IS NOT NULL AND qty < 10 AND qty > 0)::int low,
+                count(*) FILTER (WHERE qty = 0)::int out_of_stock FROM uk_stock`),
+    pool.query(`SELECT h.taken_at, h.sku, h.qty, s.name FROM uk_stock_history h
+                LEFT JOIN uk_stock s ON s.sku = h.sku ORDER BY h.taken_at DESC LIMIT 15`)
+  ]);
+  res.json({ configured: !!conn, items: items.rows, totals: totals.rows[0], history: history.rows, sync: ss });
 });
 app.post('/api/stock/sync', async (_req, res) => {
   try { res.json(await syncUkStock()); }
