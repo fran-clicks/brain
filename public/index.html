@@ -451,6 +451,26 @@ const eventMarkers = {
 };
 Chart.register(eventMarkers);
 
+// subtle divider + tint for the 3-day peek ahead
+const futureZone = {
+  id: 'futureZone',
+  beforeDatasetsDraw(chart, _a, opts) {
+    if (!opts.today) return;
+    const idx = chart.data.labels.findIndex(l => l > opts.today);
+    if (idx === -1) return;
+    const { ctx, chartArea: { top, bottom, right } } = chart;
+    const x = chart.scales.x.getPixelForValue(Math.max(idx - 0.5, 0));
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,200,0,.05)';
+    ctx.fillRect(x, top, right - x, bottom - top);
+    ctx.strokeStyle = 'rgba(16,17,20,.3)';
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+    ctx.restore();
+  }
+};
+Chart.register(futureZone);
+
 // crosshair: subtle vertical guide following the hovered point
 const crosshair = {
   id: 'crosshair',
@@ -545,15 +565,22 @@ function bindEventHover(canvas) {
   canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
 }
 
-function mergeSeries(series) {
+function mergeSeries(series, bucket) {
   const all = new Set();
   Object.values(series).forEach(rows => rows.forEach(r => all.add(String(r.d).slice(0,10))));
   const labels = [...all].sort();
+  const today = new Date().toISOString().slice(0,10);
+  if (bucket === 'day') { // peek 3 days ahead so imminent events show on the chart
+    for (let i = 1; i <= 3; i++) {
+      const d = new Date(Date.now() + i * 864e5).toISOString().slice(0,10);
+      if (!labels.includes(d)) labels.push(d);
+    }
+  }
   const line = rows => {
     const m = Object.fromEntries(rows.map(r => [String(r.d).slice(0,10), r.c]));
-    return labels.map(l => m[l] ?? 0);
+    return labels.map(l => l > today ? (m[l] ?? null) : (m[l] ?? 0));
   };
-  return { labels, created: line(series.created), open: line(series.still_open), closed: line(series.closed) };
+  return { labels, today, created: line(series.created), open: line(series.still_open), closed: line(series.closed) };
 }
 
 const CAT_LABELS = {
@@ -588,7 +615,7 @@ async function loadOverview() {
       {l:`Cancelled / refunded (${curDays}d)`, v: sv ? `${sv.cancelled} / ${sv.refunded}` : t.cancel_refund + ' tickets'},
       {l:`Events (${curDays}d)`, v:s.events.length}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
-    const m = mergeSeries(s.tickets.series);
+    const m = mergeSeries(s.tickets.series, s.bucket);
     const bdByDataset = [
       buildBreakdownMap(s.tickets.breakdowns?.created),
       buildBreakdownMap(s.tickets.breakdowns?.still_open),
@@ -623,6 +650,7 @@ async function loadOverview() {
         plugins:{
           legend:{position:'bottom', labels:{usePointStyle:true, padding:18, font:{size:12, weight:600}}},
           eventMarkers:{ events: s.events },
+          futureZone:{ today: m.today },
           tooltip: {
             displayColors: false,
             backgroundColor: 'rgba(16,17,20,.92)',
