@@ -123,6 +123,10 @@ async function initDb() {
       attachment_name TEXT, attachment_type TEXT, attachment_data TEXT,
       created_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS sync_state (k TEXT PRIMARY KEY, v JSONB NOT NULL DEFAULT '{}');
+    CREATE TABLE IF NOT EXISTS uk_stock (
+      sku TEXT PRIMARY KEY, name TEXT DEFAULT '', qty INT, raw JSONB, updated_at TIMESTAMPTZ DEFAULT now());
+    CREATE TABLE IF NOT EXISTS uk_stock_history (
+      taken_at TIMESTAMPTZ DEFAULT now(), sku TEXT, qty INT);
     CREATE TABLE IF NOT EXISTS orders_cache (
       shopify_id BIGINT PRIMARY KEY, order_number TEXT DEFAULT '',
       created_at TIMESTAMPTZ, cancelled_at TIMESTAMPTZ,
@@ -194,6 +198,13 @@ const CONNECTOR_TYPES = {
     fields: [
       { key: 'bot_token', label: 'Bot User OAuth Token, starts with xoxb- (api.slack.com/apps → your app → OAuth & Permissions)', secret: true },
       { key: 'signing_secret', label: 'Signing Secret (api.slack.com/apps → your app → Basic Information)', secret: true }
+    ]
+  },
+  uk_stock: {
+    label: 'UK stock (clicks-uk-returns)',
+    fields: [
+      { key: 'base_url', label: 'Stock endpoint URL, e.g. https://clicks-uk-returns.onrender.com/api/v1/stock', secret: false },
+      { key: 'api_key', label: 'X-API-Key (rotate it first if it was ever shared in chat)', secret: true }
     ]
   },
   shopify: {
@@ -320,6 +331,10 @@ app.post('/api/connectors', async (req, res) => {
     } else if (type === 'shopify') {
       const d = await shopifyGraphql(config, 'query { shop { name } }');
       meta = { store: d?.shop?.name || config.store_domain, domain: config.store_domain };
+    } else if (type === 'uk_stock') {
+      const j = await ukStockFetch(config);
+      const items = extractStockItems(j);
+      meta = { endpoint: config.base_url.replace(/^https?:\/\//, '').split('/')[0], items_seen: items ? items.length : 'unknown shape — will diagnose on sync' };
     } else {
       // dynamic connector: store credentials now, integration wired later.
       // Non-secret fields go into visible meta; secrets never do.
@@ -337,6 +352,7 @@ app.post('/api/connectors', async (req, res) => {
     [type, name || def.label, encrypt(config), meta, added_by || 'anonymous', approval]);
   if (type === 'gorgias') syncGorgias(15).catch(e => console.error('initial sync:', e.message));
   if (type === 'shopify') syncShopify(30).catch(e => console.error('initial shopify sync:', e.message));
+  if (type === 'uk_stock') syncUkStock().catch(e => console.error('initial stock sync:', e.message));
   res.status(201).json(rows[0]);
 });
 
@@ -548,6 +564,12 @@ setInterval(async () => {
       await syncShopify(8);
     }
   } catch (e) { console.error('interval shopify sync:', e.message); }
+  try {
+    const us = (await pool.query(`SELECT v FROM sync_state WHERE k='uk_stock'`)).rows[0]?.v;
+    if (await getConnector('uk_stock') && (!us?.last_run || Date.now() - Date.parse(us.last_run) > 55 * 60 * 1000)) {
+      await syncUkStock();
+    }
+  } catch (e) { console.error('interval stock sync:', e.message); }
 }, 5 * 60 * 1000);
 
 async function bootSync() {
@@ -562,6 +584,68 @@ async function bootSync() {
 
 app.post('/api/gorgias/sync', async (_req, res) => {
   try { res.json(await syncGorgias(50)); }
+  catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ---------- UK stock (simple keyed JSON API) ----------
+async function ukStockFetch(cfg) {
+  const r = await fetch(cfg.base_url, { headers: { 'X-API-Key': cfg.api_key, Accept: 'application/json' } });
+  if (!r.ok) throw new Error(`UK stock API → ${r.status}`);
+  return r.json();
+}
+const pickField = (o, keys) => { for (const k of keys) { if (o?.[k] != null) return o[k]; } return null; };
+function extractStockItems(j) {
+  if (Array.isArray(j)) return j;
+  for (const k of ['items', 'stock', 'data', 'products', 'results', 'inventory']) {
+    if (Array.isArray(j?.[k])) return j[k];
+  }
+  return null;
+}
+
+async function syncUkStock() {
+  const conn = await getConnector('uk_stock');
+  if (!conn) return { configured: false };
+  const st = {};
+  try {
+    const j = await ukStockFetch(conn.config);
+    const items = extractStockItems(j);
+    if (!items) throw new Error(`unrecognized response shape — top-level keys: ${Object.keys(j || {}).slice(0, 10).join(', ')}`);
+    let upserts = 0;
+    for (const it of items) {
+      const sku = String(pickField(it, ['sku', 'SKU', 'code', 'product_code', 'id', 'product_id']) ?? '').slice(0, 100);
+      if (!sku) continue;
+      const name = String(pickField(it, ['name', 'title', 'product', 'product_name', 'description']) ?? '').slice(0, 300);
+      const qtyRaw = pickField(it, ['qty', 'quantity', 'stock', 'available', 'count', 'units', 'on_hand', 'level']);
+      const qty = Number.isFinite(+qtyRaw) ? Math.trunc(+qtyRaw) : null;
+      const prev = (await pool.query('SELECT qty FROM uk_stock WHERE sku=$1', [sku])).rows[0];
+      await pool.query(
+        `INSERT INTO uk_stock (sku, name, qty, raw, updated_at) VALUES ($1,$2,$3,$4,now())
+         ON CONFLICT (sku) DO UPDATE SET name=$2, qty=$3, raw=$4, updated_at=now()`,
+        [sku, name, qty, JSON.stringify(it)]);
+      if (!prev || prev.qty !== qty) {
+        await pool.query('INSERT INTO uk_stock_history (sku, qty) VALUES ($1,$2)', [sku, qty]);
+      }
+      upserts++;
+    }
+    st.items = upserts;
+  } catch (e) {
+    st.last_error = String(e.message);
+    console.error('uk stock sync:', st.last_error);
+  }
+  st.last_run = new Date().toISOString();
+  await pool.query(`INSERT INTO sync_state (k, v) VALUES ('uk_stock', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
+    [JSON.stringify(st)]).catch(() => {});
+  return { configured: true, ...st };
+}
+
+app.get('/api/stock', async (_req, res) => {
+  const conn = await getConnector('uk_stock');
+  const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='uk_stock'`)).rows[0]?.v || null;
+  const { rows } = await pool.query('SELECT sku, name, qty, updated_at FROM uk_stock ORDER BY qty ASC NULLS LAST LIMIT 200');
+  res.json({ configured: !!conn, items: rows, sync: ss });
+});
+app.post('/api/stock/sync', async (_req, res) => {
+  try { res.json(await syncUkStock()); }
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 
@@ -980,6 +1064,11 @@ const TOOLS = [
     }
   },
   {
+    name: 'query_uk_stock',
+    description: 'Current UK warehouse stock levels from the clicks-uk-returns API (synced hourly). Optionally filter by product name/SKU regex.',
+    input_schema: { type: 'object', properties: { text_match: { type: 'string', description: 'case-insensitive regex against sku and name' } } }
+  },
+  {
     name: 'create_connection_request',
     description: 'Log a member\'s request to connect a new data source. Use once you know WHAT service they want and WHY (what data/benefit). Admins review requests on the ＋ page. Never include credentials.',
     input_schema: {
@@ -1080,6 +1169,17 @@ async function runTool(name, input, ctx) {
     return { ...agg.rows[0], sample: sample.rows,
       note: `From the local Shopify sync. Last sync: ${ss?.last_run || 'unknown'}${ss?.backfill_done ? '' : ' (history backfill still in progress — older orders may be missing)'}.` };
   }
+  if (name === 'query_uk_stock') {
+    const conn = await getConnector('uk_stock');
+    if (!conn) return { error: 'UK stock is not connected yet — an admin can add the "UK stock" connector on the ＋ page.' };
+    const conds = [], p = [];
+    if (input.text_match) { p.push(String(input.text_match).slice(0, 200)); conds.push(`(sku ~* $1 OR name ~* $1)`); }
+    const { rows } = await pool.query(
+      `SELECT sku, name, qty, updated_at::date updated FROM uk_stock ${conds.length ? 'WHERE ' + conds.join(' AND ') : ''}
+       ORDER BY qty ASC NULLS LAST LIMIT 50`, p);
+    const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='uk_stock'`)).rows[0]?.v;
+    return { items: rows, last_sync: ss?.last_run || null, note: 'qty = units in UK stock; sorted lowest first.' };
+  }
   if (name === 'create_connection_request') {
     const service = String(input.service || '').slice(0, 200);
     const reason = String(input.reason || '').slice(0, 2000);
@@ -1146,7 +1246,7 @@ CONNECTION REQUESTS are a core part of your job. Members cannot add connectors �
 2. Once you have service + reason, call create_connection_request to log it.
 3. Tell them: an admin reviews it in the Requests list on this page; if approved, the admin sets up the credentials and the dev team wires the sync.
 For ADMINS preparing an approved request, you may call create_connector_type to add a tailored credentials form to the dropdown (clear field labels saying where to find each value; every credential secret:true).
-gorgias, anthropic, slack and shopify connectors are fully wired: they test the connection and work immediately once an admin saves them. Shopify sync unlocks sales/order/delivery data (query_sales) and the sales line on Overview.
+gorgias, anthropic, slack, shopify and uk_stock connectors are fully wired: they test the connection and work immediately once an admin saves them. Shopify sync unlocks sales/order/delivery data (query_sales) and the sales line on Overview. uk_stock unlocks UK warehouse stock levels (query_uk_stock).
 Use list_pending_integrations to report request/wiring status. You cannot approve anything yourself.
 Use your tools to answer data questions with real numbers. If a question needs sales/order/delivery data, use query_sales and relay its guidance. Be concise. Answer in the user's language.${opts.slack ? '\nYou are replying inside Slack: use Slack formatting (*bold*, bullet lines with •), keep replies short, no markdown headers or tables.' : ''}`;
 

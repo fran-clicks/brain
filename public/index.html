@@ -205,6 +205,11 @@ footer{color:rgba(16,17,20,.45)}
       <table id="shopProducts"><thead><tr><th>Product</th><th>Units</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
+  <div class="card" id="stockCard" style="display:none">
+    <h2>📦 UK stock <button class="btn" style="float:right;margin:0;padding:5px 12px" id="stockSyncBtn" onclick="stockSync()">🔄 Sync</button></h2>
+    <table id="stockTable"><thead><tr><th>SKU</th><th>Product</th><th>Units</th><th>Updated</th></tr></thead><tbody></tbody></table>
+    <div class="note" id="stockNote"></div>
+  </div>
   <div class="card">
     <h2>Recent orders <button class="btn" style="float:right;margin:0;padding:5px 12px" id="shopSyncBtn" onclick="shopSync()">🔄 Sync now</button></h2>
     <table id="shopRecent"><thead><tr><th>Order</th><th>Date</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th></tr></thead><tbody></tbody></table>
@@ -332,7 +337,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.getElementById('s-' + b.dataset.s).classList.add('active');
   const s = b.dataset.s;
   if (s === 'gorgias') loadGorgias();
-  if (s === 'sales') loadShopify();
+  if (s === 'sales') { loadShopify(); loadStock(); }
   if (s === 'home') loadOverview();
   if (s === 'kb') loadKbs();
   if (s === 'conn') { loadConnectors(); loadRequests(); }
@@ -534,20 +539,20 @@ async function loadOverview() {
     ];
     if (homeChart) homeChart.destroy();
     // Gorgias = solid lines + circles · Shopify = dashed lines + diamonds
-    const base = { tension:.35, borderWidth:2.5, pointRadius:0, pointHitRadius:14, pointHoverRadius:6,
-                   pointHoverBorderWidth:2, pointHoverBackgroundColor:'#fff' };
+    const base = { tension:.35, borderWidth:2.5, pointRadius:3.5, pointBackgroundColor:'#fff', pointBorderWidth:1.5,
+                   pointHitRadius:14, pointHoverRadius:7, pointHoverBorderWidth:2, pointHoverBackgroundColor:'#fff' };
     const datasets = [
-      {...base, label:'🎧 Created', data:m.created, borderColor:'#101114', backgroundColor:vGradient('16,17,20',.14), fill:true, pointStyle:'circle', pointHoverBorderColor:'#101114'},
-      {...base, label:'🎧 Still open', data:m.open, borderColor:'#dc2626', pointStyle:'circle', pointHoverBorderColor:'#dc2626'},
-      {...base, label:'🎧 Closed', data:m.closed, borderColor:'#f0b400', backgroundColor:vGradient('255,200,0',.22), fill:true, pointStyle:'circle', pointHoverBorderColor:'#f0b400'}
+      {...base, label:'🎧 Tickets created', data:m.created, borderColor:'#101114', backgroundColor:vGradient('16,17,20',.14), fill:true, pointStyle:'circle', pointBorderColor:'#101114', pointHoverBorderColor:'#101114'},
+      {...base, label:'🎧 Tickets opened', data:m.open, borderColor:'#dc2626', pointStyle:'circle', pointBorderColor:'#dc2626', pointHoverBorderColor:'#dc2626'},
+      {...base, label:'🎧 Tickets closed', data:m.closed, borderColor:'#f0b400', backgroundColor:vGradient('255,200,0',.22), fill:true, pointStyle:'circle', pointBorderColor:'#f0b400', pointHoverBorderColor:'#f0b400'}
     ];
     if (s.sales?.series?.length) {
       const ord = Object.fromEntries(s.sales.series.map(r => [String(r.d).slice(0,10), r.orders]));
       datasets.push({...base, label:'🛒 Orders', data:m.labels.map(l => ord[l] ?? 0), borderColor:'#2563eb',
-        backgroundColor:vGradient('37,99,235',.16), fill:true, borderDash:[7,4], pointStyle:'rectRot', pointHoverRadius:7, pointHoverBorderColor:'#2563eb'});
+        backgroundColor:vGradient('37,99,235',.16), fill:true, borderDash:[7,4], pointStyle:'rectRot', pointRadius:4.5, pointBorderColor:'#2563eb', pointHoverRadius:8, pointHoverBorderColor:'#2563eb'});
       const canc = Object.fromEntries((s.sales.cancel_series || []).map(r => [String(r.d).slice(0,10), r.c]));
-      datasets.push({...base, label:'🛒 Cancelled', data:m.labels.map(l => canc[l] ?? 0), borderColor:'#7c3aed',
-        borderDash:[7,4], pointStyle:'rectRot', pointHoverRadius:7, pointHoverBorderColor:'#7c3aed'});
+      datasets.push({...base, label:'🛒 Cancelled orders', data:m.labels.map(l => canc[l] ?? 0), borderColor:'#7c3aed',
+        borderDash:[7,4], pointStyle:'rectRot', pointRadius:4.5, pointBorderColor:'#7c3aed', pointHoverRadius:8, pointHoverBorderColor:'#7c3aed'});
     }
     const homeCanvas = document.getElementById('homeChart');
     bindEventHover(homeCanvas);
@@ -587,7 +592,7 @@ async function loadOverview() {
                   return o ? [`revenue: ${(o.revenue ?? 0).toLocaleString()} ${s.sales?.totals?.currency || ''}`,
                               ...(o.refunded ? [`${o.refunded} refunded`] : [])] : '';
                 }
-                if (it.dataset.label === '🛒 Cancelled') return '';
+                if (it.dataset.label === '🛒 Cancelled orders') return '';
                 const b = bdByDataset[it.datasetIndex]?.[it.label];
                 if (!b) return '';
                 const lines = [];
@@ -710,6 +715,30 @@ async function loadShopify() {
         + (s.sync.backfill_done ? '' : ' · ⏳ history backfill in progress') + (s.sync.last_error ? ` · ⚠️ ${s.sync.last_error}` : '')
       : '';
   } catch (e) { note.textContent = 'Shopify error: ' + e.message; }
+}
+async function loadStock() {
+  try {
+    const s = await api('/api/stock');
+    const card = document.getElementById('stockCard');
+    card.style.display = s.configured ? 'block' : 'none';
+    if (!s.configured) return;
+    document.querySelector('#stockTable tbody').innerHTML = s.items.length ? s.items.map(i =>
+      `<tr${i.qty != null && i.qty < 10 ? ' style="background:rgba(220,38,38,.06)"' : ''}>
+       <td><span class="tag src">${esc(i.sku)}</span></td><td>${esc(i.name)}</td>
+       <td><b>${i.qty ?? '?'}</b>${i.qty != null && i.qty < 10 ? ' ⚠️' : ''}</td>
+       <td>${esc(String(i.updated_at).slice(0,10))}</td></tr>`).join('')
+      : '<tr><td colspan="4" class="empty">No stock rows yet — hit Sync</td></tr>';
+    document.getElementById('stockNote').textContent = s.sync
+      ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''}${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''} · low stock (<10) highlighted`
+      : '';
+  } catch (e) { document.getElementById('stockNote').textContent = '⚠️ ' + e.message; }
+}
+async function stockSync() {
+  const b = document.getElementById('stockSyncBtn');
+  b.disabled = true; b.textContent = '⏳';
+  try { await api('/api/stock/sync', {method:'POST', body:'{}'}); loadStock(); }
+  catch (e) { document.getElementById('stockNote').textContent = '⚠️ ' + e.message; }
+  finally { b.disabled = false; b.textContent = '🔄 Sync'; }
 }
 async function shopSync() {
   const b = document.getElementById('shopSyncBtn');
@@ -986,7 +1015,7 @@ api('/api/auth/me').then(m => {
   }
 }).catch(() => {});
 
-loadOverview().then(prefetchPeriods); loadEvents(); loadShopify(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors(); loadRequests();
+loadOverview().then(prefetchPeriods); loadEvents(); loadShopify(); loadStock(); loadGorgias(); loadKbs(); loadConnectorTypes(); loadConnectors(); loadRequests();
 </script>
 </body>
 </html>
