@@ -959,7 +959,8 @@ async function overviewStats(days) {
                 count(*) FILTER (WHERE created_datetime >= now()-$1::interval AND (subject ~* '${CANCEL_RX}' OR tags::text ~* '${CANCEL_RX}'))::int cancel_refund
                 FROM tickets_cache`, params),
     pool.query(`SELECT id, title, description, event_date, added_by, attachment_name FROM events
-                WHERE event_date >= (now()-$1::interval)::date ORDER BY event_date`, params),
+                WHERE event_date >= (now()-$1::interval)::date AND event_date <= (now()+interval '30 days')::date
+                ORDER BY event_date`, params),
     pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)
   ]);
   const [salesSeries, cancelSeries, salesTotals, shopifySt] = await Promise.all([
