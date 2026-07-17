@@ -150,6 +150,11 @@ async function initDb() {
       klaviyo_id TEXT PRIMARY KEY, name TEXT DEFAULT '', channel TEXT DEFAULT '', status TEXT DEFAULT '',
       send_time TIMESTAMPTZ, recipients INT, opens INT, open_rate DOUBLE PRECISION,
       clicks INT, click_rate DOUBLE PRECISION, revenue NUMERIC, synced_at TIMESTAMPTZ DEFAULT now());
+    ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS subject TEXT;
+    ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS preview TEXT;
+    ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS from_email TEXT;
+    ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS html TEXT;
+    ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS text_body TEXT;
     CREATE TABLE IF NOT EXISTS uk_stock (
       sku TEXT PRIMARY KEY, name TEXT DEFAULT '', qty INT, raw JSONB, updated_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE uk_stock ADD COLUMN IF NOT EXISTS upc TEXT DEFAULT '';
@@ -715,6 +720,27 @@ async function syncKlaviyo() {
         statsApplied++;
       }
     }
+    // email content (subject/preview + template body) for recent campaigns, a few per run
+    const need = await pool.query(
+      `SELECT klaviyo_id FROM campaigns_cache WHERE subject IS NULL ORDER BY send_time DESC NULLS LAST LIMIT 10`);
+    for (const row of need.rows) {
+      try {
+        const msgs = await klaviyoRequest(cfg, `/api/campaigns/${row.klaviyo_id}/campaign-messages`);
+        const msg = msgs.data?.[0];
+        const content = msg?.attributes?.definition?.content || msg?.attributes?.content || {};
+        let html = null, textBody = null;
+        if (msg) {
+          try {
+            const tpl = await klaviyoRequest(cfg, `/api/campaign-messages/${msg.id}/template`);
+            html = tpl.data?.attributes?.html || null;
+            textBody = tpl.data?.attributes?.text || null;
+          } catch (e) { console.error('template fetch (need templates:read scope?):', e.message); }
+        }
+        await pool.query(
+          `UPDATE campaigns_cache SET subject=$2, preview=$3, from_email=$4, html=$5, text_body=$6 WHERE klaviyo_id=$1`,
+          [row.klaviyo_id, content.subject || '', content.preview_text || '', content.from_email || '', html, textBody]);
+      } catch (e) { console.error('campaign content', row.klaviyo_id, e.message); }
+    }
     st.last_error = null;
   } catch (e) {
     st.last_error = String(e.message);
@@ -741,6 +767,13 @@ app.get('/api/klaviyo/summary', async (_req, res) => {
       FROM campaigns_cache WHERE send_time IS NOT NULL ORDER BY send_time DESC LIMIT 20`)
   ]);
   res.json({ configured: !!conn, totals_30d: totals.rows[0], recent: recent.rows, sync: ss });
+});
+app.get('/api/klaviyo/campaign/:id', async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT klaviyo_id, name, channel, send_time, subject, preview, from_email, html, text_body,
+     recipients, open_rate, click_rate, revenue FROM campaigns_cache WHERE klaviyo_id=$1`, [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'not found' });
+  res.json(rows[0]);
 });
 app.post('/api/klaviyo/sync', async (_req, res) => {
   try { res.json(await syncKlaviyo()); }
