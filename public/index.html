@@ -477,7 +477,10 @@ async function loadOverview() {
                 const it = items[0];
                 return `${it.dataset.label} · ${it.label}`;
               },
-              label(it) { return `${it.formattedValue} tickets`; },
+              label(it) {
+                const l = it.dataset.label;
+                return `${it.formattedValue} ${l === 'Orders' || l === 'Cancelled orders' ? 'orders' : 'tickets'}`;
+              },
               afterBody(items) {
                 const it = items[0];
                 if (it.dataset.label === 'Orders') {
