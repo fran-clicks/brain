@@ -482,7 +482,7 @@ const eventMarkers = {
       const camp = e.kind === 'campaign';
       const key = Math.round(px);
       const slot = slots[key] || 0; slots[key] = slot + 1;
-      const py = top + 14 + slot * 26;
+      const py = top - 14 - slot * 24; // pins live in the padding strip above the plot
       chart.$pins.push({ x: px, py, top, bottom, ev: e });
       ctx.save();
       ctx.strokeStyle = camp ? 'rgba(37,99,235,.45)' : 'rgba(220,38,38,.55)';
@@ -591,9 +591,8 @@ function bindEventHover(canvas) {
     const pins = homeChart?.$pins || [];
     const r = canvas.getBoundingClientRect();
     const mx = e.clientX - r.left, my = e.clientY - r.top;
-    // prefer the exact pin circle under the cursor (stacked pins share x), fall back to the line
-    const hit = pins.find(p => Math.abs(mx - p.x) < 13 && Math.abs(my - p.py) < 13)
-      || pins.find(p => Math.abs(mx - p.x) < 8 && my >= p.top && my <= p.bottom);
+    // only the pin icon itself triggers the tooltip
+    const hit = pins.find(p => Math.abs(mx - p.x) < 12 && Math.abs(my - p.py) < 12);
     if (hit) {
       const ev = hit.ev;
       tip.innerHTML = `<b>${ev.kind === 'campaign' ? '✉️' : '📌'} ${esc(ev.title)}</b><br>
@@ -687,28 +686,34 @@ async function loadOverview() {
     }
     const homeCanvas = document.getElementById('homeChart');
     bindEventHover(homeCanvas);
+    const markers = [
+      ...s.events.map(e => ({ ...e, kind: 'event' })),
+      ...(s.campaigns || []).map(c => ({
+        id: 'kv' + c.klaviyo_id, kind: 'campaign', title: c.name, event_date: c.d,
+        added_by: `Klaviyo (${c.channel})`,
+        description: [
+          c.recipients != null ? `${c.recipients.toLocaleString()} recipients` : null,
+          c.open_rate != null ? `${Math.round(c.open_rate * 100)}% opens` : null,
+          c.click_rate != null ? `${Math.round(c.click_rate * 100)}% clicks` : null,
+          c.revenue ? `${Math.round(+c.revenue).toLocaleString()} attributed` : null
+        ].filter(Boolean).join(' · ')
+      }))
+    ];
+    // headroom: tallest same-date pin stack determines top padding
+    const stackCounts = {};
+    markers.forEach(e => { const d = String(e.event_date).slice(0,10); stackCounts[d] = (stackCounts[d] || 0) + 1; });
+    const maxStack = Math.max(0, ...Object.values(stackCounts));
     homeChart = new Chart(homeCanvas, {
       type: 'line',
       data: { labels: m.labels, datasets },
       options: { responsive:true, maintainAspectRatio:false,
+        layout: { padding: { top: maxStack ? 16 + maxStack * 24 : 8 } },
         interaction: { mode: 'nearest', intersect: true },
         animation: { duration: 700, easing: 'easeOutQuart',
           delay: (ctx) => ctx.type === 'data' ? ctx.dataIndex * 6 + ctx.datasetIndex * 90 : 0 },
         plugins:{
           legend:{position:'bottom', labels:{usePointStyle:true, padding:18, font:{size:12, weight:600}}},
-          eventMarkers:{ events: [
-            ...s.events.map(e => ({ ...e, kind: 'event' })),
-            ...(s.campaigns || []).map(c => ({
-              id: 'kv' + c.klaviyo_id, kind: 'campaign', title: c.name, event_date: c.d,
-              added_by: `Klaviyo (${c.channel})`,
-              description: [
-                c.recipients != null ? `${c.recipients.toLocaleString()} recipients` : null,
-                c.open_rate != null ? `${Math.round(c.open_rate * 100)}% opens` : null,
-                c.click_rate != null ? `${Math.round(c.click_rate * 100)}% clicks` : null,
-                c.revenue ? `${Math.round(+c.revenue).toLocaleString()} attributed` : null
-              ].filter(Boolean).join(' · ')
-            }))
-          ] },
+          eventMarkers:{ events: markers },
           futureZone:{ today: m.today },
           tooltip: {
             displayColors: false,
