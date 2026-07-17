@@ -372,8 +372,8 @@ app.post('/api/connectors', async (req, res) => {
       const d = await shopifyGraphql(config, 'query { shop { name } }');
       meta = { store: d?.shop?.name || config.store_domain, domain: config.store_domain };
     } else if (type === 'klaviyo') {
-      const m = await klaviyoRequest(config, '/api/metrics/?page[size]=1');
-      meta = { metrics_visible: (m.data || []).length >= 0 ? 'ok' : 'none' };
+      const m = await klaviyoRequest(config, '/api/metrics/');
+      meta = { metrics_visible: (m.data || []).length };
     } else if (type === 'uk_stock') {
       const j = await ukStockFetch(config);
       const items = extractStockItems(j);
