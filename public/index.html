@@ -459,6 +459,7 @@ footer{color:rgba(16,17,20,.45)}
 </div>
 
 <div id="evtTip" style="display:none;position:fixed;z-index:60;max-width:260px;font-size:12px;line-height:1.5;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);border:1px solid rgba(16,17,20,.12);border-radius:10px;padding:10px 12px;box-shadow:0 8px 28px rgba(16,17,20,.18);pointer-events:none"></div>
+<div id="evtPop" style="display:none;position:fixed;z-index:61;width:300px;max-height:60vh;overflow-y:auto;font-size:12px;line-height:1.5;background:rgba(255,255,255,.97);backdrop-filter:blur(12px);border:1px solid rgba(16,17,20,.14);border-radius:12px;padding:12px 14px;box-shadow:0 12px 40px rgba(16,17,20,.22)"></div>
 
 <button id="aiFab" title="Ask the brain">🧠</button>
 <div id="aiPanel">
@@ -521,7 +522,8 @@ document.querySelectorAll('#periods button').forEach(b => b.onclick = () => {
   loadOverview();
 });
 
-// inline Chart.js plugin: vertical 📌 markers for events (hoverable — pins recorded on the chart)
+// inline Chart.js plugin: markers grouped by (date, type). One badge per group with a count;
+// click to unfold the list (handled outside the chart, so the plot is never occluded).
 const eventMarkers = {
   id: 'eventMarkers',
   afterDatasetsDraw(chart, _a, opts) {
@@ -530,38 +532,51 @@ const eventMarkers = {
     if (!evts.length) return;
     const { ctx, chartArea: { top, bottom }, scales: { x } } = chart;
     const labels = chart.data.labels;
-    const slots = {}; // stack pins sharing the same date
-    const drawPin = (px, py, camp) => {
+    // group by column index + kind
+    const groups = {};
+    evts.forEach(e => {
+      const d = String(e.event_date).slice(0, 10);
+      let idx = labels.findIndex(l => l >= d);
+      if (idx === -1 && labels.length && d <= labels[labels.length - 1]) idx = labels.length - 1;
+      if (idx === -1) return;
+      const kind = e.kind === 'campaign' ? 'campaign' : 'event';
+      const key = idx + '|' + kind;
+      (groups[key] = groups[key] || { idx, kind, items: [] }).items.push(e);
+    });
+    const drawPin = (px, py, camp, count) => {
       ctx.beginPath(); ctx.arc(px, py, 11, 0, Math.PI * 2);
       ctx.fillStyle = '#ffc800'; ctx.fill();
       ctx.strokeStyle = 'rgba(16,17,20,.35)'; ctx.lineWidth = 1.5; ctx.stroke();
       ctx.strokeStyle = '#101114'; ctx.fillStyle = '#101114'; ctx.lineWidth = 1.6;
       ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-      if (camp) { // envelope
+      if (camp) {
         ctx.strokeRect(px - 5.5, py - 4, 11, 8);
         ctx.beginPath(); ctx.moveTo(px - 5.5, py - 4); ctx.lineTo(px, py + 0.5); ctx.lineTo(px + 5.5, py - 4); ctx.stroke();
-      } else { // map pin: head + stem
+      } else {
         ctx.beginPath(); ctx.arc(px, py - 2, 3.4, 0, Math.PI * 2); ctx.fill();
         ctx.beginPath(); ctx.moveTo(px, py + 1); ctx.lineTo(px, py + 5.5); ctx.stroke();
       }
+      if (count > 1) { // count badge, top-right corner
+        ctx.beginPath(); ctx.arc(px + 9, py - 9, 7, 0, Math.PI * 2);
+        ctx.fillStyle = '#dc2626'; ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(String(count), px + 9, py - 8.5);
+        ctx.textBaseline = 'alphabetic';
+      }
     };
-    evts.forEach(e => {
-      const d = String(e.event_date).slice(0, 10);
-      let idx = labels.findIndex(l => l >= d);
-      if (idx === -1 && labels.length && d <= labels[labels.length-1]) idx = labels.length - 1;
-      if (idx === -1) return;
-      const px = x.getPixelForValue(idx);
-      const camp = e.kind === 'campaign';
-      const key = Math.round(px);
-      const slot = slots[key] || 0; slots[key] = slot + 1;
-      const py = top - 14 - slot * 24; // pins live in the padding strip above the plot
-      chart.$pins.push({ x: px, py, top, bottom, ev: e });
+    // events on row 0, campaigns on row 1 (max two pins per date column)
+    Object.values(groups).forEach(g => {
+      const px = x.getPixelForValue(g.idx);
+      const camp = g.kind === 'campaign';
+      const py = top - 14 - (camp ? 1 : 0) * 26;
+      chart.$pins.push({ x: px, py, kind: g.kind, items: g.items });
       ctx.save();
       ctx.strokeStyle = camp ? 'rgba(37,99,235,.45)' : 'rgba(220,38,38,.55)';
       ctx.setLineDash([4, 4]);
       ctx.beginPath(); ctx.moveTo(px, top); ctx.lineTo(px, bottom); ctx.stroke();
       ctx.setLineDash([]);
-      drawPin(px, py, camp);
+      drawPin(px, py, camp, g.items.length);
       ctx.restore();
     });
   }
@@ -655,33 +670,61 @@ FocusScale.defaults = Chart.registry.getScale('linear').defaults;
 Chart.register(FocusScale);
 
 // floating tooltip for event pins
+function itemDetailHtml(ev) {
+  return `<b>${ev.kind === 'campaign' ? '✉️' : '📌'} ${esc(ev.title)}</b><br>
+    <span class="tag date">${esc(String(ev.event_date).slice(0,10))}</span> by <b>${esc(ev.added_by)}</b>
+    ${ev.description ? `<br>${esc(ev.description)}` : ''}
+    ${ev.attachment_name ? `<br>📎 <a href="/api/events/${ev.id}/attachment" target="_blank">${esc(ev.attachment_name)}</a>` : ''}
+    ${ev.klaviyo_id ? `<br><a href="#" onclick="closeEvtPop();document.querySelector('nav button[data-s=klaviyo]').click();return false">open in Klaviyo tab →</a>` : ''}`;
+}
+function closeEvtPop() { document.getElementById('evtPop').style.display = 'none'; }
 function bindEventHover(canvas) {
   if (canvas.$evtBound) return;
   canvas.$evtBound = true;
   const tip = document.getElementById('evtTip');
-  canvas.addEventListener('mousemove', (e) => {
+  const findHit = (e) => {
     const pins = homeChart?.$pins || [];
     const r = canvas.getBoundingClientRect();
     const mx = e.clientX - r.left, my = e.clientY - r.top;
-    // only the pin icon itself triggers the tooltip
-    const hit = pins.find(p => Math.abs(mx - p.x) < 12 && Math.abs(my - p.py) < 12);
+    return pins.find(p => Math.abs(mx - p.x) < 13 && Math.abs(my - p.py) < 13);
+  };
+  canvas.addEventListener('mousemove', (e) => {
+    if (document.getElementById('evtPop').style.display === 'block') return; // popover open: don't fight it
+    const hit = findHit(e);
     if (hit) {
-      const ev = hit.ev;
-      tip.innerHTML = `<b>${ev.kind === 'campaign' ? '✉️' : '📌'} ${esc(ev.title)}</b><br>
-        <span class="tag date">${esc(String(ev.event_date).slice(0,10))}</span> by <b>${esc(ev.added_by)}</b>
-        ${ev.description ? `<br>${esc(ev.description)}` : ''}
-        ${ev.attachment_name ? `<br>📎 <a href="/api/events/${ev.id}/attachment" target="_blank">${esc(ev.attachment_name)}</a>` : ''}`;
+      tip.innerHTML = hit.items.length === 1
+        ? itemDetailHtml(hit.items[0])
+        : `<b>${hit.kind === 'campaign' ? '✉️' : '📌'} ${hit.items.length} ${hit.kind === 'campaign' ? 'campaigns' : 'events'}</b> on ${esc(String(hit.items[0].event_date).slice(0,10))}<br><span style="color:var(--muted)">click to see each one</span>`;
       tip.style.display = 'block';
       tip.style.left = Math.min(e.clientX + 14, innerWidth - 280) + 'px';
       tip.style.top = (e.clientY + 14) + 'px';
       canvas.style.cursor = 'pointer';
-    } else {
-      tip.style.display = 'none';
-      canvas.style.cursor = '';
-    }
+    } else { tip.style.display = 'none'; canvas.style.cursor = ''; }
   });
   canvas.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+  canvas.addEventListener('click', (e) => {
+    const hit = findHit(e);
+    if (!hit) return;
+    tip.style.display = 'none';
+    const pop = document.getElementById('evtPop');
+    if (hit.items.length === 1) {
+      pop.innerHTML = `<div style="text-align:right"><span onclick="closeEvtPop()" style="cursor:pointer;color:var(--muted)">✕</span></div>${itemDetailHtml(hit.items[0])}`;
+    } else {
+      pop.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <b>${hit.kind === 'campaign' ? '✉️ Campaigns' : '📌 Events'} · ${esc(String(hit.items[0].event_date).slice(0,10))}</b>
+          <span onclick="closeEvtPop()" style="cursor:pointer;color:var(--muted)">✕</span></div>`
+        + hit.items.map(ev => `<div style="padding:7px 0;border-top:1px solid var(--line)">${itemDetailHtml(ev)}</div>`).join('');
+    }
+    pop.style.display = 'block';
+    pop.style.left = Math.min(e.clientX + 10, innerWidth - 320) + 'px';
+    pop.style.top = Math.max(e.clientY - 20, 12) + 'px';
+    e.stopPropagation();
+  });
 }
+document.addEventListener('click', (e) => {
+  const pop = document.getElementById('evtPop');
+  if (pop.style.display === 'block' && !pop.contains(e.target)) closeEvtPop();
+});
 
 function mergeSeries(series, bucket) {
   const all = new Set();
@@ -764,7 +807,7 @@ async function loadOverview() {
     const markers = [
       ...s.events.map(e => ({ ...e, kind: 'event' })),
       ...(s.campaigns || []).map(c => ({
-        id: 'kv' + c.klaviyo_id, kind: 'campaign', title: c.name, event_date: c.d,
+        id: 'kv' + c.klaviyo_id, klaviyo_id: c.klaviyo_id, kind: 'campaign', title: c.name, event_date: c.d,
         added_by: `Klaviyo (${c.channel})`,
         description: [
           c.recipients != null ? `${c.recipients.toLocaleString()} recipients` : null,
@@ -774,10 +817,10 @@ async function loadOverview() {
         ].filter(Boolean).join(' · ')
       }))
     ];
-    // headroom: tallest same-date pin stack determines top padding
-    const stackCounts = {};
-    markers.forEach(e => { const d = String(e.event_date).slice(0,10); stackCounts[d] = (stackCounts[d] || 0) + 1; });
-    const maxStack = Math.max(0, ...Object.values(stackCounts));
+    // grouped pins: at most 2 rows per date (one event row, one campaign row)
+    const hasEvent = markers.some(e => e.kind === 'event');
+    const hasCampaign = markers.some(e => e.kind === 'campaign');
+    const maxStack = (hasEvent ? 1 : 0) + (hasCampaign ? 1 : 0);
     homeChart = new Chart(homeCanvas, {
       type: 'line',
       data: { labels: m.labels, datasets },
