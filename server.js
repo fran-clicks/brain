@@ -1442,12 +1442,20 @@ async function overviewStats(days) {
     `SELECT date_trunc('${bucket}', ${col})::date d, t.tag, count(*)::int c
      FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
      WHERE ${col} >= now()-$1::interval ${extra} GROUP BY 1, 2 ORDER BY 1, 3 DESC`;
+  // "tickets to solve" = open backlog at the END of each bucket: created by then and not yet closed by then
+  const backlogQuery =
+    `SELECT to_char(g.b::date,'YYYY-MM-DD') d,
+       (SELECT count(*)::int FROM tickets_cache t
+        WHERE t.created_datetime < g.b + interval '1 ${bucket}'
+          AND (t.closed_datetime IS NULL OR t.closed_datetime >= g.b + interval '1 ${bucket}')) c
+     FROM generate_series(date_trunc('${bucket}', now()-$1::interval), date_trunc('${bucket}', now()), interval '1 ${bucket}') g(b)
+     ORDER BY 1`;
   const [created, opened, closed,
          createdCats, openCats, closedCats,
          createdTags, openTags, closedTags,
          totals, events, st] = await Promise.all([
     pool.query(mkCount('created_datetime'), params),
-    pool.query(mkCount('created_datetime', "AND status='open'"), params),
+    pool.query(backlogQuery, params),
     pool.query(mkCount('closed_datetime'), params),
     pool.query(mkCats('created_datetime'), params),
     pool.query(mkCats('created_datetime', "AND status='open'"), params),
@@ -1495,7 +1503,7 @@ async function overviewStats(days) {
       series: { created: created.rows, still_open: opened.rows, closed: closed.rows },
       breakdowns: {
         created: { cats: createdCats.rows, tags: createdTags.rows },
-        still_open: { cats: openCats.rows, tags: openTags.rows },
+        still_open: { cats: [], tags: [] }, // point-in-time backlog: no per-day category split
         closed: { cats: closedCats.rows, tags: closedTags.rows }
       },
       totals: totals.rows[0]

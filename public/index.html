@@ -790,7 +790,7 @@ async function loadOverview() {
                    pointHitRadius:14, pointHoverRadius:7, pointHoverBorderWidth:2, pointHoverBackgroundColor:'#fff' };
     const datasets = [
       {...base, label:'🎧 Tickets created', data:m.created, borderColor:'#dc2626', backgroundColor:vGradient('220,38,38',.10), fill:true, pointStyle:'circle', pointBorderColor:'#dc2626', pointHoverBorderColor:'#dc2626'},
-      {...base, label:'🎧 Tickets opened', data:m.open, borderColor:'#f0b400', pointStyle:'circle', pointBorderColor:'#f0b400', pointHoverBorderColor:'#f0b400'},
+      {...base, label:'🎧 Tickets to solve', data:m.open, borderColor:'#f0b400', pointStyle:'circle', pointBorderColor:'#f0b400', pointHoverBorderColor:'#f0b400'},
       {...base, label:'🎧 Tickets closed', data:m.closed, borderColor:'#101114', backgroundColor:vGradient('16,17,20',.10), fill:true, pointStyle:'circle', pointBorderColor:'#101114', pointHoverBorderColor:'#101114'}
     ];
     if (s.sales?.series?.length) {
