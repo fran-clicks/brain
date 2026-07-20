@@ -744,14 +744,17 @@ async function loadOverview() {
     const base = { tension:.35, borderWidth:2.5, pointRadius:3.5, pointBackgroundColor:'#fff', pointBorderWidth:1.5,
                    pointHitRadius:14, pointHoverRadius:7, pointHoverBorderWidth:2, pointHoverBackgroundColor:'#fff' };
     const datasets = [
-      {...base, label:'🎧 Tickets created', data:m.created, borderColor:'#101114', backgroundColor:vGradient('16,17,20',.14), fill:true, pointStyle:'circle', pointBorderColor:'#101114', pointHoverBorderColor:'#101114'},
-      {...base, label:'🎧 Tickets opened', data:m.open, borderColor:'#dc2626', pointStyle:'circle', pointBorderColor:'#dc2626', pointHoverBorderColor:'#dc2626'},
-      {...base, label:'🎧 Tickets closed', data:m.closed, borderColor:'#f0b400', backgroundColor:vGradient('255,200,0',.22), fill:true, pointStyle:'circle', pointBorderColor:'#f0b400', pointHoverBorderColor:'#f0b400'}
+      {...base, label:'🎧 Tickets created', data:m.created, borderColor:'#dc2626', backgroundColor:vGradient('220,38,38',.10), fill:true, pointStyle:'circle', pointBorderColor:'#dc2626', pointHoverBorderColor:'#dc2626'},
+      {...base, label:'🎧 Tickets opened', data:m.open, borderColor:'#f0b400', pointStyle:'circle', pointBorderColor:'#f0b400', pointHoverBorderColor:'#f0b400'},
+      {...base, label:'🎧 Tickets closed', data:m.closed, borderColor:'#101114', backgroundColor:vGradient('16,17,20',.10), fill:true, pointStyle:'circle', pointBorderColor:'#101114', pointHoverBorderColor:'#101114'}
     ];
     if (s.sales?.series?.length) {
       const ord = Object.fromEntries(s.sales.series.map(r => [String(r.d).slice(0,10), r.orders]));
       datasets.push({...base, label:'🛒 Orders', data:m.labels.map(l => ord[l] ?? 0), borderColor:'#2563eb',
         backgroundColor:vGradient('37,99,235',.16), fill:true, borderDash:[7,4], pointStyle:'rectRot', pointRadius:4.5, pointBorderColor:'#2563eb', pointHoverRadius:8, pointHoverBorderColor:'#2563eb'});
+      const ful = Object.fromEntries((s.sales.fulfilled_series || []).map(r => [String(r.d).slice(0,10), r.units]));
+      datasets.push({...base, label:'🛒 Units fulfilled', data:m.labels.map(l => ful[l] ?? 0), borderColor:'#059669',
+        borderDash:[7,4], pointStyle:'rectRot', pointRadius:4.5, pointBorderColor:'#059669', pointHoverRadius:8, pointHoverBorderColor:'#059669'});
       const canc = Object.fromEntries((s.sales.cancel_series || []).map(r => [String(r.d).slice(0,10), r.c]));
       datasets.push({...base, label:'🛒 Cancelled orders', data:m.labels.map(l => canc[l] ?? 0), borderColor:'#7c3aed',
         borderDash:[7,4], pointStyle:'rectRot', pointRadius:4.5, pointBorderColor:'#7c3aed', pointHoverRadius:8, pointHoverBorderColor:'#7c3aed'});
@@ -813,7 +816,7 @@ async function loadOverview() {
                   return o ? [`revenue: ${(o.revenue ?? 0).toLocaleString()} ${s.sales?.totals?.currency || ''}`,
                               ...(o.refunded ? [`${o.refunded} refunded`] : [])] : '';
                 }
-                if (it.dataset.label === '🛒 Cancelled orders') return '';
+                if (it.dataset.label === '🛒 Cancelled orders' || it.dataset.label === '🛒 Units fulfilled') return '';
                 const b = bdByDataset[it.datasetIndex]?.[it.label];
                 if (!b) return '';
                 const lines = [];

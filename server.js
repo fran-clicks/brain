@@ -1401,12 +1401,16 @@ async function overviewStats(days) {
                 ORDER BY event_date`, params),
     pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)
   ]);
-  const [salesSeries, cancelSeries, salesTotals, shopifySt] = await Promise.all([
+  const [salesSeries, cancelSeries, fulfilledSeries, salesTotals, shopifySt] = await Promise.all([
     pool.query(`SELECT date_trunc('${bucket}', created_at)::date d, count(*)::int orders, round(sum(total_price))::int revenue,
                 count(*) FILTER (WHERE financial_status IN ('refunded','partially_refunded'))::int refunded
                 FROM orders_cache WHERE created_at >= now()-$1::interval AND cancelled_at IS NULL GROUP BY 1 ORDER BY 1`, params),
     pool.query(`SELECT date_trunc('${bucket}', cancelled_at)::date d, count(*)::int c
                 FROM orders_cache WHERE cancelled_at >= now()-$1::interval GROUP BY 1 ORDER BY 1`, params),
+    pool.query(`SELECT date_trunc('${bucket}', created_at)::date d,
+                coalesce(sum((SELECT sum(coalesce((it->>'qty')::int,0)) FROM jsonb_array_elements(items) it)),0)::int units
+                FROM orders_cache WHERE created_at >= now()-$1::interval AND fulfillment_status='fulfilled' AND cancelled_at IS NULL
+                GROUP BY 1 ORDER BY 1`, params),
     pool.query(`SELECT count(*) FILTER (WHERE cancelled_at IS NULL)::int orders,
                 round(sum(total_price) FILTER (WHERE cancelled_at IS NULL))::int revenue,
                 count(*) FILTER (WHERE cancelled_at IS NOT NULL)::int cancelled,
@@ -1431,7 +1435,7 @@ async function overviewStats(days) {
       },
       totals: totals.rows[0]
     },
-    sales: hasSales ? { series: salesSeries.rows, cancel_series: cancelSeries.rows, totals: salesTotals.rows[0], sync: shopifySt.rows[0]?.v || null } : null,
+    sales: hasSales ? { series: salesSeries.rows, cancel_series: cancelSeries.rows, fulfilled_series: fulfilledSeries.rows, totals: salesTotals.rows[0], sync: shopifySt.rows[0]?.v || null } : null,
     events: events.rows,
     campaigns,
     last_sync: st.rows[0]?.v?.last_run || null,
