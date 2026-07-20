@@ -883,14 +883,13 @@ async function loadOverview() {
     });
     document.getElementById('syncInfo').textContent = s.last_sync
       ? `· synced ${new Date(s.last_sync).toLocaleString()} · ${s.sync?.cached ?? '?'} tickets cached` : '';
-    const backfilling = s.sync && !s.sync.backfill_done;
-    document.getElementById('homeNote').textContent =
-      s.sync?.last_error ? `⚠️ Last sync failed: ${s.sync.last_error} — hit Sync now to retry.`
-      : backfilling
-        ? `⏳ Backfilling ticket history from Gorgias — reached ${s.sync.backfill_oldest ? String(s.sync.backfill_oldest).slice(0,10) : 'starting…'} so far. Counts grow until the backfill completes (runs automatically every few minutes).`
-      : s.last_sync
-        ? '💡 Click any label in the legend below to hide or show that line · click a 📌 / ✉️ pin for details.'
-        : 'No ticket data yet — if Gorgias is connected, hit 🔄 Sync now.';
+    const hint = '💡 Click any label in the legend below to hide or show that line · click a 📌 / ✉️ pin for details.';
+    const status =
+      s.sync?.last_error ? ` ⚠️ Last sync failed: ${s.sync.last_error}`
+      : (s.sync && !s.sync.backfill_done) ? ` ⏳ Backfilling history (reached ${s.sync.backfill_oldest ? String(s.sync.backfill_oldest).slice(0,10) : 'starting…'}) — counts settle as it completes.`
+      : !s.last_sync ? ' No ticket data yet — hit 🔄 Sync now.'
+      : '';
+    document.getElementById('homeNote').textContent = hint + status;
   } catch (e) {
     document.getElementById('homeNote').textContent = 'Overview error: ' + e.message;
   }
