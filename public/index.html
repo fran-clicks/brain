@@ -889,7 +889,7 @@ async function loadOverview() {
       : backfilling
         ? `⏳ Backfilling ticket history from Gorgias — reached ${s.sync.backfill_oldest ? String(s.sync.backfill_oldest).slice(0,10) : 'starting…'} so far. Counts grow until the backfill completes (runs automatically every few minutes).`
       : s.last_sync
-        ? `Ticket data from the local Gorgias sync (${s.bucket} buckets). Sales appears once a sales source is connected — ask the assistant. 📌 = team events.`
+        ? '💡 Click any label in the legend below to hide or show that line · click a 📌 / ✉️ pin for details.'
         : 'No ticket data yet — if Gorgias is connected, hit 🔄 Sync now.';
   } catch (e) {
     document.getElementById('homeNote').textContent = 'Overview error: ' + e.message;
