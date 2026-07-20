@@ -954,22 +954,26 @@ async function syncKlaviyo() {
       const stats = ['recipients', 'opens', 'open_rate', 'clicks', 'click_rate', 'conversion_value'];
       const applyResults = async (results) => {
         // group_by default is campaign_id+campaign_message_id+send_channel, so a campaign can span
-        // several rows (A/B variations, multi-message) — accumulate them per campaign_id
+        // several rows (A/B variations, multi-message) — accumulate per campaign_id.
+        // Rates come from Klaviyo directly (recipient-weighted), never recomputed from total opens.
         const byCampaign = {};
         for (const row of results || []) {
           const id = row.groupings?.campaign_id; if (!id) continue;
           const s = row.statistics || {};
-          const a = byCampaign[id] || (byCampaign[id] = { recipients: 0, opens: 0, clicks: 0, revenue: 0 });
-          a.recipients += s.recipients || 0; a.opens += s.opens || 0; a.clicks += s.clicks || 0; a.revenue += s.conversion_value || 0;
+          const rec = s.recipients || 0;
+          const a = byCampaign[id] || (byCampaign[id] = { recipients: 0, opens: 0, clicks: 0, revenue: 0, orWeighted: 0, crWeighted: 0 });
+          a.recipients += rec; a.opens += s.opens || 0; a.clicks += s.clicks || 0; a.revenue += s.conversion_value || 0;
+          a.orWeighted += (s.open_rate || 0) * rec; a.crWeighted += (s.click_rate || 0) * rec;
         }
         for (const [id, a] of Object.entries(byCampaign)) {
-          const openRate = a.recipients ? a.opens / a.recipients : null;
-          const clickRate = a.recipients ? a.clicks / a.recipients : null;
+          const openRate = a.recipients ? a.orWeighted / a.recipients : null;
+          const clickRate = a.recipients ? a.crWeighted / a.recipients : null;
           await pool.query(
             `UPDATE campaigns_cache SET recipients=$2, opens=$3, open_rate=$4, clicks=$5, click_rate=$6, revenue=$7, synced_at=now() WHERE klaviyo_id=$1`,
             [id, a.recipients, a.opens, openRate, a.clicks, clickRate, a.revenue]);
           statsApplied++;
         }
+        return Object.keys(byCampaign);
       };
       const runReport = async (filter) => {
         const rep = await klaviyoRequest(cfg, '/api/campaign-values-reports/', {
@@ -1055,6 +1059,35 @@ app.get('/api/klaviyo/campaign/:id', async (req, res) => {
      recipients, open_rate, click_rate, revenue FROM campaigns_cache WHERE klaviyo_id=$1`, [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'not found' });
   res.json(rows[0]);
+});
+// diagnostic (admin): what does Klaviyo's report return for the campaigns still missing stats?
+app.get('/api/klaviyo/debug', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  try {
+    const conn = await getConnector('klaviyo');
+    if (!conn) return res.json({ error: 'not connected' });
+    const cfg = conn.config;
+    const st = (await pool.query(`SELECT v FROM sync_state WHERE k='klaviyo'`)).rows[0]?.v || {};
+    const blank = (await pool.query(
+      `SELECT klaviyo_id, name FROM campaigns_cache WHERE recipients IS NULL AND send_time IS NOT NULL ORDER BY send_time DESC LIMIT 3`)).rows;
+    const out = { conversion_metric_id: st.conversion_metric_id || null, blank_sample: blank, probes: [] };
+    for (const c of blank) {
+      const probe = { id: c.klaviyo_id, name: c.name };
+      try {
+        const rep = await klaviyoRequest(cfg, '/api/campaign-values-reports/', {
+          method: 'POST',
+          body: JSON.stringify({ data: { type: 'campaign-values-report', attributes: {
+            timeframe: { key: 'last_365_days' }, conversion_metric_id: st.conversion_metric_id,
+            statistics: ['recipients', 'open_rate'],
+            filter: `equals(campaign_id,"${c.klaviyo_id}")` } } })
+        });
+        probe.result_count = (rep.data?.attributes?.results || []).length;
+        probe.groupings = (rep.data?.attributes?.results || []).map(r => r.groupings);
+      } catch (e) { probe.error = String(e.message); }
+      out.probes.push(probe);
+    }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/klaviyo/sync', async (_req, res) => {
   try { res.json(await syncKlaviyo()); }
