@@ -949,33 +949,45 @@ async function syncKlaviyo() {
         url = res.links?.next ? res.links.next.replace('https://a.klaviyo.com', '') : null;
       }
     }
-    // performance stats (best effort — requires the conversion metric). Paginated: follow every page.
+    // performance stats (best effort — requires the conversion metric).
     if (st.conversion_metric_id) {
-      const body = JSON.stringify({
-        data: {
-          type: 'campaign-values-report',
-          attributes: {
-            timeframe: { key: 'last_12_months' },
-            conversion_metric_id: st.conversion_metric_id,
-            statistics: ['recipients', 'opens', 'open_rate', 'clicks', 'click_rate', 'conversion_value']
-          }
-        }
-      });
-      let path = '/api/campaign-values-reports/', guard = 0;
-      while (path && guard++ < 20) {
-        const rep = await klaviyoRequest(cfg, path, { method: 'POST', body });
-        for (const row of rep.data?.attributes?.results || []) {
-          const id = row.groupings?.campaign_id;
+      const stats = ['recipients', 'opens', 'open_rate', 'clicks', 'click_rate', 'conversion_value'];
+      const applyResults = async (results) => {
+        // group_by default is campaign_id+campaign_message_id+send_channel, so a campaign can span
+        // several rows (A/B variations, multi-message) — accumulate them per campaign_id
+        const byCampaign = {};
+        for (const row of results || []) {
+          const id = row.groupings?.campaign_id; if (!id) continue;
           const s = row.statistics || {};
-          if (!id) continue;
+          const a = byCampaign[id] || (byCampaign[id] = { recipients: 0, opens: 0, clicks: 0, revenue: 0 });
+          a.recipients += s.recipients || 0; a.opens += s.opens || 0; a.clicks += s.clicks || 0; a.revenue += s.conversion_value || 0;
+        }
+        for (const [id, a] of Object.entries(byCampaign)) {
+          const openRate = a.recipients ? a.opens / a.recipients : null;
+          const clickRate = a.recipients ? a.clicks / a.recipients : null;
           await pool.query(
-            `UPDATE campaigns_cache SET recipients=$2, opens=$3, open_rate=$4, clicks=$5, click_rate=$6, revenue=$7, synced_at=now()
-             WHERE klaviyo_id=$1`,
-            [id, s.recipients ?? null, s.opens ?? null, s.open_rate ?? null, s.clicks ?? null, s.click_rate ?? null, s.conversion_value ?? null]);
+            `UPDATE campaigns_cache SET recipients=$2, opens=$3, open_rate=$4, clicks=$5, click_rate=$6, revenue=$7, synced_at=now() WHERE klaviyo_id=$1`,
+            [id, a.recipients, a.opens, openRate, a.clicks, clickRate, a.revenue]);
           statsApplied++;
         }
-        const next = rep.links?.next;
-        path = next ? next.replace('https://a.klaviyo.com', '') : null;
+      };
+      const runReport = async (filter) => {
+        const rep = await klaviyoRequest(cfg, '/api/campaign-values-reports/', {
+          method: 'POST',
+          body: JSON.stringify({ data: { type: 'campaign-values-report', attributes: {
+            timeframe: { key: 'last_12_months' }, conversion_metric_id: st.conversion_metric_id,
+            statistics: stats, ...(filter ? { filter } : {}) } } })
+        });
+        await applyResults(rep.data?.attributes?.results);
+      };
+      await runReport(null); // whole-account pass
+      // targeted pass for any campaign still missing stats (the aggregate report can omit some)
+      const missing = (await pool.query(
+        `SELECT klaviyo_id FROM campaigns_cache WHERE recipients IS NULL AND send_time IS NOT NULL
+         AND send_time >= now()-interval '12 months' ORDER BY send_time DESC LIMIT 40`)).rows.map(r => r.klaviyo_id);
+      for (let i = 0; i < missing.length; i += 20) {
+        const batch = missing.slice(i, i + 20);
+        await runReport(`contains-any(campaign_id,[${batch.map(id => `"${id}"`).join(',')}])`);
       }
     }
     // email content (subject/preview + template body) for recent campaigns, a few per run
