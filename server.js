@@ -900,17 +900,23 @@ app.post('/api/redo/sync', async (_req, res) => {
 // ---------- Klaviyo (campaigns + attribution) ----------
 const KLAVIYO_REVISION = process.env.KLAVIYO_REVISION || '2025-04-15';
 async function klaviyoRequest(cfg, pathAndQuery, opts = {}) {
-  const r = await fetch(`https://a.klaviyo.com${pathAndQuery}`, {
-    ...opts,
-    headers: {
-      Authorization: `Klaviyo-API-Key ${cfg.api_key}`,
-      revision: KLAVIYO_REVISION,
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      ...(opts.headers || {})
-    }
-  });
-  const j = await r.json().catch(() => ({}));
+  let r, j;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    r = await fetch(`https://a.klaviyo.com${pathAndQuery}`, {
+      ...opts,
+      headers: {
+        Authorization: `Klaviyo-API-Key ${cfg.api_key}`,
+        revision: KLAVIYO_REVISION,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...(opts.headers || {})
+      }
+    });
+    if (r.status !== 429) break;
+    const wait = Math.min(parseInt(r.headers.get('retry-after')) || (attempt + 1) * 12, 60);
+    await new Promise(res => setTimeout(res, wait * 1000)); // respect Klaviyo's throttle
+  }
+  j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(`Klaviyo ${pathAndQuery.split('?')[0]} → ${r.status}: ${(j.errors || []).map(e => e.detail).join('; ').slice(0, 200)}`);
   return j;
 }
@@ -985,13 +991,12 @@ async function syncKlaviyo() {
         await applyResults(rep.data?.attributes?.results);
       };
       await runReport(null); // whole-account pass
-      // targeted pass for any campaign still missing stats (the aggregate report can omit some)
+      // one targeted batch for any still missing (contains-any takes up to 100 ids); 429s auto-retry
       const missing = (await pool.query(
         `SELECT klaviyo_id FROM campaigns_cache WHERE recipients IS NULL AND send_time IS NOT NULL
-         AND send_time >= now()-interval '12 months' ORDER BY send_time DESC LIMIT 40`)).rows.map(r => r.klaviyo_id);
-      for (let i = 0; i < missing.length; i += 20) {
-        const batch = missing.slice(i, i + 20);
-        await runReport(`contains-any(campaign_id,[${batch.map(id => `"${id}"`).join(',')}])`);
+         AND send_time >= now()-interval '12 months' ORDER BY send_time DESC LIMIT 90`)).rows.map(r => r.klaviyo_id);
+      if (missing.length) {
+        await runReport(`contains-any(campaign_id,[${missing.map(id => `"${id}"`).join(',')}])`);
       }
     }
     // email content (subject/preview + template body) for recent campaigns, a few per run
@@ -1070,22 +1075,20 @@ app.get('/api/klaviyo/debug', async (req, res) => {
     const st = (await pool.query(`SELECT v FROM sync_state WHERE k='klaviyo'`)).rows[0]?.v || {};
     const blank = (await pool.query(
       `SELECT klaviyo_id, name FROM campaigns_cache WHERE recipients IS NULL AND send_time IS NOT NULL ORDER BY send_time DESC LIMIT 3`)).rows;
-    const out = { conversion_metric_id: st.conversion_metric_id || null, blank_sample: blank, probes: [] };
-    for (const c of blank) {
-      const probe = { id: c.klaviyo_id, name: c.name };
-      try {
-        const rep = await klaviyoRequest(cfg, '/api/campaign-values-reports/', {
-          method: 'POST',
-          body: JSON.stringify({ data: { type: 'campaign-values-report', attributes: {
-            timeframe: { key: 'last_365_days' }, conversion_metric_id: st.conversion_metric_id,
-            statistics: ['recipients', 'open_rate'],
-            filter: `equals(campaign_id,"${c.klaviyo_id}")` } } })
-        });
-        probe.result_count = (rep.data?.attributes?.results || []).length;
-        probe.groupings = (rep.data?.attributes?.results || []).map(r => r.groupings);
-      } catch (e) { probe.error = String(e.message); }
-      out.probes.push(probe);
-    }
+    const out = { conversion_metric_id: st.conversion_metric_id || null, blank_sample: blank };
+    // single aggregate call: are the blank campaigns present in the whole-account report at all?
+    try {
+      const rep = await klaviyoRequest(cfg, '/api/campaign-values-reports/', {
+        method: 'POST',
+        body: JSON.stringify({ data: { type: 'campaign-values-report', attributes: {
+          timeframe: { key: 'last_365_days' }, conversion_metric_id: st.conversion_metric_id,
+          statistics: ['recipients', 'open_rate'] } } })
+      });
+      const ids = new Set((rep.data?.attributes?.results || []).map(r => r.groupings?.campaign_id));
+      out.total_rows = (rep.data?.attributes?.results || []).length;
+      out.distinct_campaigns = ids.size;
+      out.blank_present_in_report = blank.map(c => ({ name: c.name, present: ids.has(c.klaviyo_id) }));
+    } catch (e) { out.error = String(e.message); }
     res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
