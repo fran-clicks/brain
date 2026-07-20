@@ -988,7 +988,7 @@ async function syncKlaviyo() {
         const rep = await klaviyoRequest(cfg, '/api/campaign-values-reports/', {
           method: 'POST',
           body: JSON.stringify({ data: { type: 'campaign-values-report', attributes: {
-            timeframe: { key: 'last_12_months' }, conversion_metric_id: st.conversion_metric_id,
+            timeframe: { key: 'last_365_days' }, conversion_metric_id: st.conversion_metric_id,
             statistics: stats, ...(filter ? { filter } : {}) } } })
         });
         await applyResults(rep.data?.attributes?.results);
