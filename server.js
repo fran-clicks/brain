@@ -1073,18 +1073,35 @@ app.get('/api/klaviyo/debug', async (req, res) => {
     const blank = (await pool.query(
       `SELECT klaviyo_id, name FROM campaigns_cache WHERE recipients IS NULL AND send_time IS NOT NULL ORDER BY send_time DESC LIMIT 3`)).rows;
     const out = { conversion_metric_id: st.conversion_metric_id || null, blank_sample: blank };
-    // single aggregate call: are the blank campaigns present in the whole-account report at all?
+    // single isolated report call using the EXACT sync request, then write the results directly.
+    // If this populates the campaigns, the sync logic is correct and the failure was rate-limit competition.
     try {
       const rep = await klaviyoRequest(cfg, '/api/campaign-values-reports/', {
         method: 'POST',
         body: JSON.stringify({ data: { type: 'campaign-values-report', attributes: {
-          timeframe: { key: 'last_365_days' }, conversion_metric_id: st.conversion_metric_id,
-          statistics: ['recipients', 'open_rate'] } } })
+          timeframe: { key: 'last_12_months' }, conversion_metric_id: st.conversion_metric_id,
+          statistics: ['recipients', 'opens', 'open_rate', 'clicks', 'click_rate', 'conversion_value'] } } })
       });
-      const ids = new Set((rep.data?.attributes?.results || []).map(r => r.groupings?.campaign_id));
-      out.total_rows = (rep.data?.attributes?.results || []).length;
-      out.distinct_campaigns = ids.size;
-      out.blank_present_in_report = blank.map(c => ({ name: c.name, present: ids.has(c.klaviyo_id) }));
+      const results = rep.data?.attributes?.results || [];
+      const byCampaign = {};
+      for (const row of results) {
+        const id = row.groupings?.campaign_id; if (!id) continue;
+        const s = row.statistics || {}; const rec = s.recipients || 0;
+        const a = byCampaign[id] || (byCampaign[id] = { recipients: 0, opens: 0, clicks: 0, revenue: 0, orW: 0, crW: 0 });
+        a.recipients += rec; a.opens += s.opens || 0; a.clicks += s.clicks || 0; a.revenue += s.conversion_value || 0;
+        a.orW += (s.open_rate || 0) * rec; a.crW += (s.click_rate || 0) * rec;
+      }
+      let written = 0;
+      for (const [id, a] of Object.entries(byCampaign)) {
+        const r = await pool.query(
+          `UPDATE campaigns_cache SET recipients=$2, opens=$3, open_rate=$4, clicks=$5, click_rate=$6, revenue=$7, synced_at=now() WHERE klaviyo_id=$1`,
+          [id, a.recipients, a.opens, a.recipients ? a.orW / a.recipients : null, a.clicks, a.recipients ? a.crW / a.recipients : null, a.revenue]);
+        written += r.rowCount;
+      }
+      overviewCache.clear();
+      out.total_rows = results.length;
+      out.rows_written = written;
+      out.blank_now_filled = blank.map(c => ({ name: c.name, campaign_in_report: !!byCampaign[c.klaviyo_id] }));
     } catch (e) { out.error = String(e.message); }
     res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
