@@ -921,9 +921,12 @@ async function klaviyoRequest(cfg, pathAndQuery, opts = {}) {
   return j;
 }
 
+let klaviyoSyncRunning = false;
 async function syncKlaviyo() {
+  if (klaviyoSyncRunning) return { skipped: true };
   const conn = await getConnector('klaviyo');
   if (!conn) return { configured: false };
+  klaviyoSyncRunning = true;
   const cfg = conn.config;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='klaviyo'`)).rows[0]?.v || {};
   let campaigns = 0, statsApplied = 0;
@@ -990,14 +993,7 @@ async function syncKlaviyo() {
         });
         await applyResults(rep.data?.attributes?.results);
       };
-      await runReport(null); // whole-account pass
-      // one targeted batch for any still missing (contains-any takes up to 100 ids); 429s auto-retry
-      const missing = (await pool.query(
-        `SELECT klaviyo_id FROM campaigns_cache WHERE recipients IS NULL AND send_time IS NOT NULL
-         AND send_time >= now()-interval '12 months' ORDER BY send_time DESC LIMIT 90`)).rows.map(r => r.klaviyo_id);
-      if (missing.length) {
-        await runReport(`contains-any(campaign_id,[${missing.map(id => `"${id}"`).join(',')}])`);
-      }
+      await runReport(null); // single whole-account pass — the report returns every campaign in one page
     }
     // email content (subject/preview + template body) for recent campaigns, a few per run
     const need = await pool.query(
@@ -1030,6 +1026,7 @@ async function syncKlaviyo() {
   await pool.query(`INSERT INTO sync_state (k, v) VALUES ('klaviyo', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
     [JSON.stringify(st)]).catch(() => {});
   overviewCache.clear();
+  klaviyoSyncRunning = false;
   return { configured: true, campaigns, stats_applied: statsApplied, error: st.last_error };
 }
 
