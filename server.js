@@ -949,30 +949,33 @@ async function syncKlaviyo() {
         url = res.links?.next ? res.links.next.replace('https://a.klaviyo.com', '') : null;
       }
     }
-    // performance stats (best effort — requires the conversion metric)
+    // performance stats (best effort — requires the conversion metric). Paginated: follow every page.
     if (st.conversion_metric_id) {
-      const rep = await klaviyoRequest(cfg, '/api/campaign-values-reports/', {
-        method: 'POST',
-        body: JSON.stringify({
-          data: {
-            type: 'campaign-values-report',
-            attributes: {
-              timeframe: { key: 'last_12_months' },
-              conversion_metric_id: st.conversion_metric_id,
-              statistics: ['recipients', 'opens', 'open_rate', 'clicks', 'click_rate', 'conversion_value']
-            }
+      const body = JSON.stringify({
+        data: {
+          type: 'campaign-values-report',
+          attributes: {
+            timeframe: { key: 'last_12_months' },
+            conversion_metric_id: st.conversion_metric_id,
+            statistics: ['recipients', 'opens', 'open_rate', 'clicks', 'click_rate', 'conversion_value']
           }
-        })
+        }
       });
-      for (const row of rep.data?.attributes?.results || []) {
-        const id = row.groupings?.campaign_id;
-        const s = row.statistics || {};
-        if (!id) continue;
-        await pool.query(
-          `UPDATE campaigns_cache SET recipients=$2, opens=$3, open_rate=$4, clicks=$5, click_rate=$6, revenue=$7, synced_at=now()
-           WHERE klaviyo_id=$1`,
-          [id, s.recipients ?? null, s.opens ?? null, s.open_rate ?? null, s.clicks ?? null, s.click_rate ?? null, s.conversion_value ?? null]);
-        statsApplied++;
+      let path = '/api/campaign-values-reports/', guard = 0;
+      while (path && guard++ < 20) {
+        const rep = await klaviyoRequest(cfg, path, { method: 'POST', body });
+        for (const row of rep.data?.attributes?.results || []) {
+          const id = row.groupings?.campaign_id;
+          const s = row.statistics || {};
+          if (!id) continue;
+          await pool.query(
+            `UPDATE campaigns_cache SET recipients=$2, opens=$3, open_rate=$4, clicks=$5, click_rate=$6, revenue=$7, synced_at=now()
+             WHERE klaviyo_id=$1`,
+            [id, s.recipients ?? null, s.opens ?? null, s.open_rate ?? null, s.clicks ?? null, s.click_rate ?? null, s.conversion_value ?? null]);
+          statsApplied++;
+        }
+        const next = rep.links?.next;
+        path = next ? next.replace('https://a.klaviyo.com', '') : null;
       }
     }
     // email content (subject/preview + template body) for recent campaigns, a few per run
