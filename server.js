@@ -147,6 +147,7 @@ async function initDb() {
       gorgias_id BIGINT PRIMARY KEY, status TEXT, subject TEXT DEFAULT '', channel TEXT DEFAULT '',
       tags JSONB DEFAULT '[]', created_datetime TIMESTAMPTZ, closed_datetime TIMESTAMPTZ,
       updated_datetime TIMESTAMPTZ, synced_at TIMESTAMPTZ DEFAULT now());
+    ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS spam BOOLEAN DEFAULT false;
     CREATE INDEX IF NOT EXISTS idx_tc_created ON tickets_cache (created_datetime);
     CREATE INDEX IF NOT EXISTS idx_tc_closed ON tickets_cache (closed_datetime);
     CREATE TABLE IF NOT EXISTS events (
@@ -656,6 +657,9 @@ async function syncGorgias(maxPages = 8) {
   if (!cfg) return { configured: false };
   syncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)).rows[0]?.v || {};
+  if (st.spam_version !== 1) { // one-time re-backfill to populate the spam flag on existing rows
+    st.spam_version = 1; st.backfill_cursor = null; st.backfill_done = false;
+  }
   let pages = 0, upserts = 0, lastError = null;
   const horizon = Date.now() - BACKFILL_HORIZON_DAYS * 864e5;
 
@@ -664,13 +668,13 @@ async function syncGorgias(maxPages = 8) {
   const upsertRows = async (rows) => {
     for (const x of rows) {
       await pool.query(
-        `INSERT INTO tickets_cache (gorgias_id, status, subject, channel, tags, created_datetime, closed_datetime, updated_datetime, synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
+        `INSERT INTO tickets_cache (gorgias_id, status, subject, channel, tags, created_datetime, closed_datetime, updated_datetime, spam, synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
          ON CONFLICT (gorgias_id) DO UPDATE SET status=$2, subject=$3, channel=$4, tags=$5,
-           created_datetime=$6, closed_datetime=$7, updated_datetime=$8, synced_at=now()`,
+           created_datetime=$6, closed_datetime=$7, updated_datetime=$8, spam=$9, synced_at=now()`,
         [x.id, x.status || '', (x.subject || '').slice(0, 500), x.channel || '',
          JSON.stringify((x.tags || []).map(g => g?.name).filter(Boolean)),
-         x.created_datetime || null, x.closed_datetime || null, x.updated_datetime || null]);
+         x.created_datetime || null, x.closed_datetime || null, x.updated_datetime || null, !!x.spam]);
       upserts++;
     }
   };
@@ -1432,21 +1436,22 @@ async function overviewStats(days) {
   };
   const catSelects = Object.entries(CATS)
     .map(([k, cond]) => `count(*) FILTER (WHERE ${cond})::int ${k}`).join(', ');
+  // spam and trashed tickets are excluded everywhere to match Gorgias's "All" view / reporting
   const mkCount = (col, extra = '') =>
     `SELECT date_trunc('${bucket}', ${col})::date d, count(*)::int c FROM tickets_cache
-     WHERE ${col} >= now()-$1::interval ${extra} GROUP BY 1 ORDER BY 1`;
+     WHERE ${col} >= now()-$1::interval AND NOT spam ${extra} GROUP BY 1 ORDER BY 1`;
   const mkCats = (col, extra = '') =>
     `SELECT date_trunc('${bucket}', ${col})::date d, ${catSelects} FROM tickets_cache
-     WHERE ${col} >= now()-$1::interval ${extra} GROUP BY 1 ORDER BY 1`;
+     WHERE ${col} >= now()-$1::interval AND NOT spam ${extra} GROUP BY 1 ORDER BY 1`;
   const mkTags = (col, extra = '') =>
     `SELECT date_trunc('${bucket}', ${col})::date d, t.tag, count(*)::int c
      FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
-     WHERE ${col} >= now()-$1::interval ${extra} GROUP BY 1, 2 ORDER BY 1, 3 DESC`;
+     WHERE ${col} >= now()-$1::interval AND NOT spam ${extra} GROUP BY 1, 2 ORDER BY 1, 3 DESC`;
   // "tickets to solve" = open backlog at the END of each bucket: created by then and not yet closed by then
   const backlogQuery =
     `SELECT to_char(g.b::date,'YYYY-MM-DD') d,
        (SELECT count(*)::int FROM tickets_cache t
-        WHERE t.created_datetime < g.b + interval '1 ${bucket}'
+        WHERE NOT t.spam AND t.created_datetime < g.b + interval '1 ${bucket}'
           AND (t.closed_datetime IS NULL OR t.closed_datetime >= g.b + interval '1 ${bucket}')) c
      FROM generate_series(date_trunc('${bucket}', now()-$1::interval), date_trunc('${bucket}', now()), interval '1 ${bucket}') g(b)
      ORDER BY 1`;
@@ -1468,7 +1473,7 @@ async function overviewStats(days) {
                 count(*) FILTER (WHERE created_datetime >= now()-$1::interval)::int created,
                 count(*) FILTER (WHERE closed_datetime >= now()-$1::interval)::int closed,
                 count(*) FILTER (WHERE created_datetime >= now()-$1::interval AND (subject ~* '${CANCEL_RX}' OR tags::text ~* '${CANCEL_RX}'))::int cancel_refund
-                FROM tickets_cache`, params),
+                FROM tickets_cache WHERE NOT spam`, params),
     pool.query(`SELECT id, title, description, event_date, added_by, attachment_name FROM events
                 WHERE event_date >= (now()-$1::interval)::date AND event_date <= (now()+interval '30 days')::date
                 ORDER BY event_date`, params),
@@ -1541,7 +1546,7 @@ app.get('/api/gorgias/stats', async (req, res) => {
       count(*) FILTER (WHERE status='open')::int open_total,
       count(*) FILTER (WHERE created_datetime >= now()-$1::interval)::int created_period,
       count(*) FILTER (WHERE closed_datetime >= now()-$1::interval)::int closed_period
-      FROM tickets_cache`, [`${days} days`]);
+      FROM tickets_cache WHERE NOT spam`, [`${days} days`]);
     Object.assign(out, {
       cached_total: c.rows[0].cached_total,
       open_total: c.rows[0].open_total,
@@ -1550,17 +1555,17 @@ app.get('/api/gorgias/stats', async (req, res) => {
     });
     const perDay = await pool.query(
       `SELECT to_char(date_trunc('${bucket}', created_datetime)::date, 'YYYY-MM-DD') d, count(*)::int c FROM tickets_cache
-       WHERE created_datetime >= now()-$1::interval GROUP BY 1 ORDER BY 1`, [`${days} days`]);
+       WHERE created_datetime >= now()-$1::interval AND NOT spam GROUP BY 1 ORDER BY 1`, [`${days} days`]);
     const daysMap = {};
     perDay.rows.forEach(r => { daysMap[r.d] = r.c; });
     out.created_per_day = daysMap;
     const [tags, channels, recent] = await Promise.all([
       pool.query(`SELECT t.tag, count(*)::int c FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
-                  WHERE created_datetime >= now()-interval '30 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 8`),
+                  WHERE created_datetime >= now()-interval '30 days' AND NOT spam GROUP BY 1 ORDER BY 2 DESC LIMIT 8`),
       pool.query(`SELECT coalesce(nullif(channel,''),'unknown') channel, count(*)::int c FROM tickets_cache
-                  WHERE created_datetime >= now()-interval '30 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 8`),
+                  WHERE created_datetime >= now()-interval '30 days' AND NOT spam GROUP BY 1 ORDER BY 2 DESC LIMIT 8`),
       pool.query(`SELECT subject, status, channel, created_datetime::date d FROM tickets_cache
-                  ORDER BY created_datetime DESC LIMIT 10`)
+                  WHERE NOT spam ORDER BY created_datetime DESC LIMIT 10`)
     ]);
     out.top_tags = tags.rows;
     out.channels = channels.rows;
@@ -1737,7 +1742,8 @@ async function runTool(name, input, ctx) {
     if (input.created_before) add(input.created_before, p => `created_datetime < ${p}`);
     if (input.closed_after) add(input.closed_after, p => `closed_datetime >= ${p}`);
     if (input.closed_before) add(input.closed_before, p => `closed_datetime < ${p}`);
-    const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
+    conds.push('NOT spam'); // exclude spam to match Gorgias views
+    const where = 'WHERE ' + conds.join(' AND ');
     const count = await pool.query(
       `SELECT count(*)::int total, count(*) FILTER (WHERE status='open')::int open,
        count(*) FILTER (WHERE status='closed')::int closed FROM tickets_cache ${where}`, params);
