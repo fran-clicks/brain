@@ -651,6 +651,49 @@ async function getGorgiasConfig() {
 let syncRunning = false;
 const BACKFILL_HORIZON_DAYS = 400; // keep ~13 months of history
 
+async function upsertTicket(x) {
+  await pool.query(
+    `INSERT INTO tickets_cache (gorgias_id, status, subject, channel, tags, created_datetime, closed_datetime, updated_datetime, spam, synced_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
+     ON CONFLICT (gorgias_id) DO UPDATE SET status=$2, subject=$3, channel=$4, tags=$5,
+       created_datetime=$6, closed_datetime=$7, updated_datetime=$8, spam=$9, synced_at=now()`,
+    [x.id, x.status || '', (x.subject || '').slice(0, 500), x.channel || '',
+     JSON.stringify((x.tags || []).map(g => g?.name).filter(Boolean)),
+     x.created_datetime || null, x.closed_datetime || null, x.updated_datetime || null, !!x.spam]);
+}
+
+// re-verify every ticket the cache still thinks is open against Gorgias, in batches of 100.
+// Keeps "Open now" / backlog accurate immediately, without waiting for the full history re-sync.
+let openRefreshRunning = false;
+async function refreshOpenTickets() {
+  if (openRefreshRunning) return { skipped: true };
+  const cfg = await getGorgiasConfig();
+  if (!cfg) return { configured: false };
+  openRefreshRunning = true;
+  let checked = 0, changed = 0, errors = null;
+  try {
+    const ids = (await pool.query(
+      `SELECT gorgias_id FROM tickets_cache WHERE status='open' ORDER BY updated_datetime DESC NULLS LAST LIMIT 4000`
+    )).rows.map(r => r.gorgias_id);
+    for (let i = 0; i < ids.length; i += 100) {
+      const batch = ids.slice(i, i + 100);
+      const q = `/api/tickets?limit=100&trashed=false&${batch.map(id => `ticket_ids=${id}`).join('&')}`;
+      const t = await gorgiasRequest(cfg, q);
+      const returned = new Set();
+      for (const x of t.data || []) { await upsertTicket(x); returned.add(String(x.id)); }
+      // ids not returned = trashed/deleted in Gorgias → no longer open; mark closed so they leave the backlog
+      const gone = batch.filter(id => !returned.has(String(id)));
+      if (gone.length) {
+        await pool.query(`UPDATE tickets_cache SET status='closed', synced_at=now() WHERE gorgias_id = ANY($1)`, [gone]);
+        changed += gone.length;
+      }
+      checked += batch.length;
+    }
+  } catch (e) { errors = String(e.message); console.error('refreshOpenTickets:', errors); }
+  finally { openRefreshRunning = false; overviewCache.clear(); }
+  return { checked, changed, errors };
+}
+
 async function syncGorgias(maxPages = 8) {
   if (syncRunning) return { skipped: true };
   const cfg = await getGorgiasConfig();
@@ -745,6 +788,8 @@ setInterval(async () => {
     } else if (!st?.last_run || Date.now() - Date.parse(st.last_run) > 55 * 60 * 1000) {
       await syncGorgias(8);
     }
+    // keep the open backlog accurate regardless of backfill progress
+    if (await getGorgiasConfig()) await refreshOpenTickets();
   } catch (e) { console.error('interval sync:', e.message); }
   try {
     const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v;
@@ -788,8 +833,11 @@ async function bootSync() {
 }
 
 app.post('/api/gorgias/sync', async (_req, res) => {
-  try { res.json(await syncGorgias(50)); }
-  catch (e) { res.status(502).json({ error: e.message }); }
+  try {
+    const r = await syncGorgias(50);
+    const open = await refreshOpenTickets(); // re-verify open set right away
+    res.json({ ...r, open_refresh: open });
+  } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 // ---------- Redo (returns) ----------
