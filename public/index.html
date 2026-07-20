@@ -565,11 +565,13 @@ const eventMarkers = {
         ctx.textBaseline = 'alphabetic';
       }
     };
-    // events on row 0, campaigns on row 1 (max two pins per date column)
+    // dynamic rows: only kinds actually present get a row (row 0 nearest the plot)
+    const anyEvent = Object.values(groups).some(g => g.kind === 'event');
+    const rowFor = (kind) => kind === 'event' ? 0 : (anyEvent ? 1 : 0);
     Object.values(groups).forEach(g => {
       const px = x.getPixelForValue(g.idx);
       const camp = g.kind === 'campaign';
-      const py = top - 14 - (camp ? 1 : 0) * 26;
+      const py = top - 16 - rowFor(g.kind) * 26;
       chart.$pins.push({ x: px, py, kind: g.kind, items: g.items });
       ctx.save();
       ctx.strokeStyle = camp ? 'rgba(37,99,235,.45)' : 'rgba(220,38,38,.55)';
@@ -825,7 +827,7 @@ async function loadOverview() {
       type: 'line',
       data: { labels: m.labels, datasets },
       options: { responsive:true, maintainAspectRatio:false,
-        layout: { padding: { top: maxStack ? 16 + maxStack * 24 : 8 } },
+        layout: { padding: { top: maxStack ? 22 + maxStack * 26 : 8 } },
         interaction: { mode: 'nearest', intersect: true },
         animation: { duration: 700, easing: 'easeOutQuart',
           delay: (ctx) => ctx.type === 'data' ? ctx.dataIndex * 6 + ctx.datasetIndex * 90 : 0 },
