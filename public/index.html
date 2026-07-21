@@ -237,6 +237,15 @@ footer{color:rgba(16,17,20,.45)}
       <h2>Top order tags (30d)</h2>
       <table id="shopTags"><thead><tr><th>Tag</th><th>Orders</th></tr></thead><tbody></tbody></table>
     </div>
+    <div class="card">
+      <h2>Fulfillment (30d)</h2>
+      <table id="shopFulfil"><thead><tr><th>Status</th><th>Orders</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <div class="card">
+    <h2>📦 Awaiting fulfillment <span style="font-weight:400;color:var(--muted);font-size:12px">· oldest first</span></h2>
+    <table id="shopAwaiting"><thead><tr><th>Order</th><th>Placed</th><th>Waiting</th><th>Country</th><th>Total</th></tr></thead><tbody></tbody></table>
+    <div class="note" id="shopAwaitNote"></div>
   </div>
   <div class="card">
     <h2>Recent orders <button class="btn" style="float:right;margin:0;padding:5px 12px" id="shopSyncBtn" onclick="shopSync()">🔄 Sync now</button></h2>
@@ -1003,6 +1012,19 @@ async function loadShopify() {
       `<tr><td>${esc(p.product)}</td><td>${p.qty}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
     document.querySelector('#shopTags tbody').innerHTML = (s.top_order_tags || []).map(t =>
       `<tr><td><span class="tag src">${esc(t.tag)}</span></td><td>${t.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">— (tags fill in as the re-sync runs)</td></tr>';
+    const fulTag = st => st === 'fulfilled' ? 'approved' : st === 'restocked' ? 'src' : 'pending';
+    document.querySelector('#shopFulfil tbody').innerHTML = (s.fulfillment || []).map(f =>
+      `<tr><td><span class="tag ${fulTag(f.status)}">${esc(f.status)}</span></td><td>${f.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
+    const aw = s.awaiting || [];
+    document.querySelector('#shopAwaiting tbody').innerHTML = aw.length ? aw.map(o =>
+      `<tr${o.age_days >= 4 ? ' style="background:rgba(220,38,38,.06)"' : ''}><td><b>${esc(o.order_number)}</b></td>
+       <td>${esc(String(o.d).slice(0,10))}</td>
+       <td><b>${o.age_days}d</b>${o.age_days >= 4 ? ' ⚠️' : ''}</td>
+       <td>${esc(o.country)}</td><td>${(+o.total_price).toLocaleString()} ${esc(o.currency)}</td></tr>`).join('')
+      : '<tr><td colspan="5" class="empty">Nothing awaiting fulfillment 🎉</td></tr>';
+    document.getElementById('shopAwaitNote').textContent = aw.length
+      ? `${aw.length} unfulfilled order${aw.length > 1 ? 's' : ''} shown (oldest first) · 4+ days highlighted`
+      : '';
     document.querySelector('#shopRecent tbody').innerHTML = s.recent.map(o =>
       `<tr${o.cancelled ? ' style="opacity:.5"' : ''}><td><b>${esc(o.order_number)}</b>${o.cancelled ? ' <span class="tag src">cancelled</span>' : ''}</td>
        <td>${esc(String(o.d).slice(0,10))}</td><td>${esc(o.country)}</td><td>${(+o.total_price).toLocaleString()} ${esc(o.currency)}</td>

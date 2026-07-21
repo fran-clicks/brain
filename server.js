@@ -1460,7 +1460,18 @@ app.get('/api/shopify/summary', async (_req, res) => {
     const orderTags = (await pool.query(
       `SELECT t.tag, count(*)::int c FROM orders_cache, LATERAL jsonb_array_elements_text(order_tags) t(tag)
        WHERE created_at >= now()-interval '30 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 8`)).rows;
-    res.json({ configured: true, totals_30d: tot.rows[0], top_countries: countries.rows, top_products: products.rows, top_order_tags: orderTags, recent: recent.rows, sync: ss });
+    // fulfillment breakdown (30d) + orders still awaiting fulfillment, oldest first (actionable)
+    const fulfil = (await pool.query(
+      `SELECT lower(coalesce(nullif(fulfillment_status,''),'unfulfilled')) status, count(*)::int c
+       FROM orders_cache WHERE created_at >= now()-interval '30 days' AND cancelled_at IS NULL
+       GROUP BY 1 ORDER BY 2 DESC`)).rows;
+    const awaiting = (await pool.query(
+      `SELECT order_number, created_at::date d, country, total_price, currency,
+       floor(extract(epoch from now()-created_at)/86400)::int age_days
+       FROM orders_cache
+       WHERE cancelled_at IS NULL AND fulfillment_status NOT IN ('fulfilled','restocked')
+       ORDER BY created_at ASC LIMIT 20`)).rows;
+    res.json({ configured: true, totals_30d: tot.rows[0], top_countries: countries.rows, top_products: products.rows, top_order_tags: orderTags, fulfillment: fulfil, awaiting, recent: recent.rows, sync: ss });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
