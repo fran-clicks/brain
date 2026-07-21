@@ -1312,12 +1312,15 @@ async function loadGorgias() {
       `<tr><td><span class="tag src">${esc(t.tag)}</span></td><td>${t.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
     document.querySelector('#gChannels tbody').innerHTML = (g.channels || []).map(c =>
       `<tr><td>${esc(c.channel)}</td><td>${c.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
+    const tk = (id, label) => g.gorgias_domain
+      ? `<a href="https://${esc(g.gorgias_domain)}.gorgias.com/app/ticket/${id}" target="_blank">${label}</a>`
+      : label;
     document.querySelector('#gOldest tbody').innerHTML = (g.oldest_open || []).map(t =>
-      `<tr${t.age_days >= 4 ? ' style="background:rgba(220,38,38,.06)"' : ''}><td>${esc(t.subject || '(no subject)')}</td>
+      `<tr${t.age_days >= 4 ? ' style="background:rgba(220,38,38,.06)"' : ''}><td>${tk(t.gorgias_id, esc(t.subject || '(no subject)'))}</td>
        <td><b>${t.age_days}d</b>${t.age_days >= 4 ? ' ⚠️' : ''}</td><td>${esc(t.channel)}</td></tr>`).join('')
       || '<tr><td colspan="3" class="empty">No open tickets 🎉</td></tr>';
     document.querySelector('#gDifficult tbody').innerHTML = (g.difficult_tickets || []).map(t =>
-      `<tr><td>${esc(t.subject || '(no subject)')}</td><td><b>${t.messages_count}</b></td>
+      `<tr><td>${tk(t.gorgias_id, esc(t.subject || '(no subject)'))} <span class="tag src">#${t.gorgias_id}</span></td><td><b>${t.messages_count}</b></td>
        <td><span class="tag ${t.status === 'open' ? 'pending' : 'approved'}">${esc(t.status)}</span></td></tr>`).join('')
       || '<tr><td colspan="3" class="empty">None with 10+ messages (or still backfilling message counts)</td></tr>';
     if (g.repeat_customers) {

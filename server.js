@@ -1739,20 +1739,28 @@ app.get('/api/gorgias/stats', async (req, res) => {
     out.top_tags = tags.rows;
     out.channels = channels.rows;
     out.recent = recent.rows;
+    out.gorgias_domain = cfg?.domain || null;
     const [difficult, oldest] = await Promise.all([
-      pool.query(`SELECT subject, messages_count, status, created_datetime::date d FROM tickets_cache
+      pool.query(`SELECT gorgias_id, subject, messages_count, status, created_datetime::date d FROM tickets_cache
                   WHERE NOT spam AND messages_count >= 10 ORDER BY messages_count DESC, created_datetime DESC LIMIT 10`),
-      pool.query(`SELECT subject, channel, created_datetime::date d,
+      pool.query(`SELECT gorgias_id, subject, channel, created_datetime::date d,
                   floor(extract(epoch from now()-created_datetime)/86400)::int age_days FROM tickets_cache
                   WHERE status='open' AND NOT spam ORDER BY created_datetime ASC LIMIT 5`)
     ]);
     out.difficult_tickets = difficult.rows;
     out.oldest_open = oldest.rows;
     if (await isAdminReq(req)) { // customer emails are PII → admins only
+      // exclude automated / business / vendor senders (no-reply, notifications, review apps, etc.)
+      const EXCLUDE = ['%no-reply%', '%noreply%', '%no_reply%', '%do-not-reply%', '%donotreply%',
+        '%notification%', '%notifications%', '%mailer%', '%mailer-daemon%', '%@stamped.io', '%@klaviyo%',
+        '%@shopify%', '%@gorgias%', '%@redo%', '%@getredo%', '%support@%', '%billing@%', '%invoices@%',
+        '%receipts@%', '%team@%', '%hello@%', '%info@%', '%accounts@%', '%postmaster@%', '%bounce%'];
+      const notLike = EXCLUDE.map((_, i) => `customer_email NOT ILIKE $${i + 1}`).join(' AND ');
       const rc = await pool.query(
         `SELECT customer_email, customer_name, count(*)::int tickets FROM tickets_cache
          WHERE NOT spam AND customer_email <> '' AND created_datetime >= now()-interval '90 days'
-         GROUP BY 1,2 HAVING count(*) > 1 ORDER BY tickets DESC LIMIT 10`);
+           AND ${notLike}
+         GROUP BY 1,2 HAVING count(*) > 1 ORDER BY tickets DESC LIMIT 10`, EXCLUDE);
       out.repeat_customers = rc.rows;
     }
   } catch (e) { out.errors.push(String(e.message)); }
