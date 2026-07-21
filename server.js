@@ -1754,7 +1754,9 @@ app.get('/api/gorgias/stats', async (req, res) => {
       const EXCLUDE = ['%no-reply%', '%noreply%', '%no_reply%', '%do-not-reply%', '%donotreply%',
         '%notification%', '%notifications%', '%mailer%', '%mailer-daemon%', '%@stamped.io', '%@klaviyo%',
         '%@shopify%', '%@gorgias%', '%@redo%', '%@getredo%', '%support@%', '%billing@%', '%invoices@%',
-        '%receipts@%', '%team@%', '%hello@%', '%info@%', '%accounts@%', '%postmaster@%', '%bounce%'];
+        '%receipts@%', '%team@%', '%hello@%', '%info@%', '%accounts@%', '%postmaster@%', '%bounce%',
+        '%service@paypal%', '%@paypal.%', '%@gmass.co', '%get@aiadssolutions.com', '%@aiadssolutions.com',
+        '%notify@%', '%@mail.%', '%@e.%', '%@email.%'];
       const notLike = EXCLUDE.map((_, i) => `customer_email NOT ILIKE $${i + 1}`).join(' AND ');
       const rc = await pool.query(
         `SELECT customer_email, customer_name, count(*)::int tickets FROM tickets_cache
