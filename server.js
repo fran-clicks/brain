@@ -177,6 +177,9 @@ async function initDb() {
     ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS from_email TEXT;
     ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS html TEXT;
     ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS text_body TEXT;
+    CREATE TABLE IF NOT EXISTS flows_cache (
+      flow_id TEXT PRIMARY KEY, name TEXT DEFAULT '', status TEXT DEFAULT '', channel TEXT DEFAULT '',
+      recipients INT, open_rate DOUBLE PRECISION, click_rate DOUBLE PRECISION, revenue NUMERIC, synced_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS uk_stock (
       sku TEXT PRIMARY KEY, name TEXT DEFAULT '', qty INT, raw JSONB, updated_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE uk_stock ADD COLUMN IF NOT EXISTS upc TEXT DEFAULT '';
@@ -1124,6 +1127,41 @@ async function syncKlaviyo() {
           [row.klaviyo_id, content.subject || '', content.preview_text || '', content.from_email || '', html, textBody]);
       } catch (e) { console.error('campaign content', row.klaviyo_id, e.message); }
     }
+    // flows: automated series (welcome, abandoned cart, win-back...) — names + performance
+    try {
+      const names = {};
+      let url = '/api/flows/';
+      for (let p = 0; p < 5 && url; p++) {
+        const f = await klaviyoRequest(cfg, url);
+        for (const fl of f.data || []) names[fl.id] = { name: fl.attributes?.name || '', status: fl.attributes?.status || '' };
+        url = f.links?.next ? f.links.next.replace('https://a.klaviyo.com', '') : null;
+      }
+      if (st.conversion_metric_id) {
+        const rep = await klaviyoRequest(cfg, '/api/flow-values-reports/', {
+          method: 'POST',
+          body: JSON.stringify({ data: { type: 'flow-values-report', attributes: {
+            timeframe: { key: 'last_365_days' }, conversion_metric_id: st.conversion_metric_id,
+            statistics: ['recipients', 'open_rate', 'click_rate', 'conversion_value'] } } })
+        });
+        const byFlow = {};
+        for (const row of rep.data?.attributes?.results || []) {
+          const id = row.groupings?.flow_id; if (!id) continue;
+          const s = row.statistics || {}; const rec = s.recipients || 0;
+          const a = byFlow[id] || (byFlow[id] = { recipients: 0, revenue: 0, orW: 0, crW: 0, channel: row.groupings?.send_channel || '' });
+          a.recipients += rec; a.revenue += s.conversion_value || 0;
+          a.orW += (s.open_rate || 0) * rec; a.crW += (s.click_rate || 0) * rec;
+        }
+        for (const [id, a] of Object.entries(byFlow)) {
+          await pool.query(
+            `INSERT INTO flows_cache (flow_id, name, status, channel, recipients, open_rate, click_rate, revenue, synced_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
+             ON CONFLICT (flow_id) DO UPDATE SET name=$2, status=$3, channel=$4, recipients=$5, open_rate=$6, click_rate=$7, revenue=$8, synced_at=now()`,
+            [id, names[id]?.name || '', names[id]?.status || '', a.channel,
+             a.recipients, a.recipients ? a.orW / a.recipients : null, a.recipients ? a.crW / a.recipients : null, a.revenue]);
+        }
+      }
+    } catch (e) { console.error('klaviyo flows:', e.message); }
+
     st.last_error = null;
   } catch (e) {
     st.last_error = String(e.message);
@@ -1169,7 +1207,10 @@ app.get('/api/klaviyo/summary', async (_req, res) => {
       WHERE cancelled_at IS NULL AND created_at >= now()-interval '30 days'`)).rows[0]?.r || 0;
     if (shop > 0) revenue_share = { klaviyo: kv, shopify: shop, pct: Math.round(kv / shop * 1000) / 10 };
   } catch {}
-  res.json({ configured: !!conn, totals_30d: totals.rows[0], recent: recent.rows, revenue_share, sync: ss });
+  const flows = (await pool.query(
+    `SELECT name, status, channel, recipients, open_rate, click_rate, revenue FROM flows_cache
+     WHERE coalesce(recipients,0) > 0 ORDER BY revenue DESC NULLS LAST LIMIT 15`)).rows;
+  res.json({ configured: !!conn, totals_30d: totals.rows[0], recent: recent.rows, revenue_share, flows, sync: ss });
 });
 app.get('/api/klaviyo/campaign/:id', async (req, res) => {
   const { rows } = await pool.query(

@@ -324,6 +324,11 @@ footer{color:rgba(16,17,20,.45)}
     <table id="kvTable"><thead><tr><th>Campaign</th><th>Channel</th><th>Sent</th><th>Recipients</th><th>Opens</th><th>Clicks</th><th>Unsub</th><th>Attributed revenue</th><th>Tickets created</th><th>Tickets closed</th></tr></thead><tbody></tbody></table>
     <div class="note" id="kvNote">Loading Klaviyo data…</div>
   </div>
+  <div class="card">
+    <h2>⚙️ Flows <span style="font-weight:400;color:var(--muted);font-size:12px">· automated series · last 365 days, by revenue</span></h2>
+    <table id="kvFlows"><thead><tr><th>Flow</th><th>Channel</th><th>Status</th><th>Recipients</th><th>Opens</th><th>Clicks</th><th>Attributed revenue</th></tr></thead><tbody></tbody></table>
+    <div class="note">Automations like welcome, abandoned cart and win-back — these often out-earn one-off campaigns.</div>
+  </div>
 </div>
 
 <!-- REDO RETURNS -->
@@ -1207,6 +1212,14 @@ async function loadKlaviyo() {
        <td>${c.tickets_created ?? '—'}</td>
        <td>${c.tickets_closed ?? '—'}</td></tr>`).join('')
       : '<tr><td colspan="10" class="empty">No campaigns synced yet — hit Sync now</td></tr>';
+    document.querySelector('#kvFlows tbody').innerHTML = (s.flows || []).length ? s.flows.map(f =>
+      `<tr><td><b>${esc(f.name || '(unnamed)')}</b></td><td><span class="tag src">${esc(f.channel || '—')}</span></td>
+       <td><span class="tag ${f.status === 'live' ? 'approved' : 'src'}">${esc(f.status || '—')}</span></td>
+       <td>${f.recipients != null ? f.recipients.toLocaleString() : '—'}</td>
+       <td>${f.open_rate != null ? Math.round(f.open_rate*100) + '%' : '—'}</td>
+       <td>${f.click_rate != null ? Math.round(f.click_rate*100) + '%' : '—'}</td>
+       <td>${f.revenue != null ? Math.round(+f.revenue).toLocaleString() : '—'}</td></tr>`).join('')
+      : '<tr><td colspan="7" class="empty">No flow data yet — hit Sync now (flows need a sync to populate)</td></tr>';
     note.textContent = (s.sync
       ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · refreshes hourly${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''} · sends appear as ✉️ on the Overview chart`
       : '')
