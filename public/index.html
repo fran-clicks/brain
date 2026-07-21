@@ -347,7 +347,22 @@ footer{color:rgba(16,17,20,.45)}
     </div>
   </div>
   <div class="card">
-    <h2>🧭 Return reasons by product <span style="font-weight:400;color:var(--muted);font-size:12px">· last 90 days</span></h2>
+    <h2>🔎 Product return explorer <span style="font-weight:400;color:var(--muted);font-size:12px">· last 12 months</span></h2>
+    <select id="rdProductSelect" style="width:100%;max-width:480px"><option value="">Select a product…</option></select>
+    <div id="rdProductDetail" style="display:none;margin-top:14px">
+      <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
+        <img id="rdProductImg" style="width:120px;height:120px;object-fit:contain;border:1px solid var(--line);border-radius:12px;background:#fff" alt="">
+        <div style="flex:1;min-width:220px">
+          <div id="rdProductName" style="font-weight:700;font-size:15px"></div>
+          <div id="rdProductTotal" style="font-size:26px;font-weight:800;margin:4px 0"></div>
+          <table id="rdProductReasons"><thead><tr><th>Reason</th><th>Returns</th></tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+    </div>
+    <div class="note" id="rdProductNote">Pick a product to see its total returns and reason breakdown.</div>
+  </div>
+  <div class="card">
+    <h2>🧭 Return reasons by product <span style="font-weight:400;color:var(--muted);font-size:12px">· last 90 days · all products</span></h2>
     <table id="rdReasonProduct"><thead><tr><th>Product</th><th>SKU</th><th>Reason</th><th>Returns</th></tr></thead><tbody></tbody></table>
     <div class="note">Why each product actually comes back — the root cause differs by product line. Sorted by frequency.</div>
   </div>
@@ -1157,6 +1172,7 @@ async function loadRedo() {
         <td>${d.sold}</td><td>${d.returned}</td>
         <td><b>${rate == null ? '—' : rate + '%'}</b>${hot ? ' 🚩' : ''}</td></tr>`;
     }).join('') : '<tr><td colspan="5" class="empty">Needs both Shopify sales and Redo returns synced.</td></tr>';
+    loadReturnProducts();
     document.querySelector('#rdReasonProduct tbody').innerHTML = (s.reason_by_product || []).length ? s.reason_by_product.map(r =>
       `<tr><td>${esc(r.name || '—')}</td><td><span class="tag src">${esc(r.sku)}</span></td><td>${esc(r.reason)}</td><td><b>${r.c}</b></td></tr>`).join('')
       : '<tr><td colspan="4" class="empty">No reason/product data yet.</td></tr>';
@@ -1177,6 +1193,35 @@ async function loadRedo() {
         + (s.sync.backfill_done ? '' : ' · ⏳ history backfill in progress') + (s.sync.last_error ? ` · ⚠️ ${s.sync.last_error}` : '')
         + ' · 🌱 = green return (no shipment needed)'
       : '';
+  } catch (e) { note.textContent = '⚠️ ' + e.message; }
+}
+let rdProductsLoaded = false;
+async function loadReturnProducts() {
+  if (rdProductsLoaded) return;
+  try {
+    const list = await api('/api/redo/products');
+    const sel = document.getElementById('rdProductSelect');
+    sel.innerHTML = '<option value="">Select a product…</option>' + list.map(p =>
+      `<option value="${esc(p.sku)}">${esc(p.name || p.sku)} — ${p.returns} return${p.returns !== 1 ? 's' : ''}</option>`).join('');
+    sel.onchange = () => showReturnProduct(sel.value);
+    rdProductsLoaded = true;
+  } catch {}
+}
+async function showReturnProduct(sku) {
+  const detail = document.getElementById('rdProductDetail');
+  const note = document.getElementById('rdProductNote');
+  if (!sku) { detail.style.display = 'none'; note.textContent = 'Pick a product to see its total returns and reason breakdown.'; return; }
+  try {
+    const p = await api('/api/redo/product?sku=' + encodeURIComponent(sku));
+    document.getElementById('rdProductName').textContent = `${p.name}  ·  ${sku}`;
+    document.getElementById('rdProductTotal').textContent = `${p.total} returns`;
+    const img = document.getElementById('rdProductImg');
+    if (p.image) { img.src = p.image; img.style.display = 'block'; } else { img.style.display = 'none'; }
+    document.querySelector('#rdProductReasons tbody').innerHTML = p.reasons.length
+      ? p.reasons.map(r => `<tr><td>${esc(r.reason)}</td><td><b>${r.c}</b></td></tr>`).join('')
+      : '<tr><td colspan="2" class="empty">No reasons recorded</td></tr>';
+    detail.style.display = 'block';
+    note.textContent = p.image ? '' : 'No product image synced for this SKU yet (Shopify product image sync runs daily).';
   } catch (e) { note.textContent = '⚠️ ' + e.message; }
 }
 async function rdSync() {

@@ -197,6 +197,8 @@ async function initDb() {
       items JSONB DEFAULT '[]', updated_at TIMESTAMPTZ, synced_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS order_tags JSONB DEFAULT '[]';
     CREATE INDEX IF NOT EXISTS idx_oc_created ON orders_cache (created_at);
+    CREATE TABLE IF NOT EXISTS product_images (
+      sku TEXT PRIMARY KEY, title TEXT DEFAULT '', image_url TEXT, updated_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS connector_types (
       slug TEXT PRIMARY KEY, label TEXT NOT NULL, fields JSONB NOT NULL,
       notes TEXT DEFAULT '', created_by TEXT DEFAULT 'assistant', created_at TIMESTAMPTZ DEFAULT now());
@@ -435,7 +437,7 @@ app.post('/api/connectors', async (req, res) => {
      RETURNING id, type, name, meta, active, added_by, approval_status, created_at`,
     [type, name || def.label, encrypt(config), meta, added_by || 'anonymous', approval]);
   if (type === 'gorgias') syncGorgias(15).catch(e => console.error('initial sync:', e.message));
-  if (type === 'shopify') syncShopify(30).catch(e => console.error('initial shopify sync:', e.message));
+  if (type === 'shopify') { syncShopify(30).catch(e => console.error('initial shopify sync:', e.message)); syncShopifyProducts().catch(e => console.error('initial product sync:', e.message)); }
   if (type === 'uk_stock') syncUkStock().catch(e => console.error('initial stock sync:', e.message));
   if (type === 'klaviyo') syncKlaviyo().catch(e => console.error('initial klaviyo sync:', e.message));
   if (type === 'redo') syncRedo(20).catch(e => console.error('initial redo sync:', e.message));
@@ -804,6 +806,12 @@ setInterval(async () => {
     }
   } catch (e) { console.error('interval shopify sync:', e.message); }
   try {
+    const ps = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify_products'`)).rows[0]?.v;
+    if (await getConnector('shopify') && (!ps?.last_run || Date.now() - Date.parse(ps.last_run) > 24 * 3600 * 1000)) {
+      await syncShopifyProducts(); // product images change rarely — daily is plenty
+    }
+  } catch (e) { console.error('interval product sync:', e.message); }
+  try {
     const us = (await pool.query(`SELECT v FROM sync_state WHERE k='uk_stock'`)).rows[0]?.v;
     if (await getConnector('uk_stock') && (!us?.last_run || Date.now() - Date.parse(us.last_run) > 55 * 60 * 1000)) {
       await syncUkStock();
@@ -920,6 +928,74 @@ async function syncRedo(maxPages = 6) {
   }
   return { configured: true, pages, upserts, backfill_done: !!st.backfill_done, error: lastError };
 }
+
+// Shopify product images (sku → featured image + title), refreshed daily
+let productSyncRunning = false;
+async function syncShopifyProducts() {
+  if (productSyncRunning) return { skipped: true };
+  const conn = await getConnector('shopify');
+  if (!conn) return { configured: false };
+  const cfg = conn.config;
+  productSyncRunning = true;
+  let cursor = null, pages = 0, upserts = 0, lastError = null;
+  const Q = `query P($cursor:String){ products(first:50, after:$cursor){ pageInfo{hasNextPage endCursor}
+    nodes{ title featuredImage{url} variants(first:100){ nodes{ sku } } } } }`;
+  try {
+    while (pages < 40) {
+      const d = await shopifyGraphql(cfg, Q, { cursor });
+      const nodes = d.products?.nodes || [];
+      for (const p of nodes) {
+        const img = p.featuredImage?.url || null;
+        for (const v of p.variants?.nodes || []) {
+          if (!v.sku) continue;
+          await pool.query(
+            `INSERT INTO product_images (sku, title, image_url, updated_at) VALUES ($1,$2,$3,now())
+             ON CONFLICT (sku) DO UPDATE SET title=$2, image_url=$3, updated_at=now()`,
+            [v.sku, (p.title || '').slice(0, 300), img]);
+          upserts++;
+        }
+      }
+      pages++;
+      if (!d.products?.pageInfo?.hasNextPage) break;
+      cursor = d.products.pageInfo.endCursor;
+    }
+  } catch (e) { lastError = String(e.message); console.error('product image sync:', lastError); }
+  finally {
+    await pool.query(`INSERT INTO sync_state (k, v) VALUES ('shopify_products', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
+      [JSON.stringify({ last_run: new Date().toISOString(), upserts, last_error: lastError })]).catch(() => {});
+    productSyncRunning = false;
+  }
+  return { upserts, error: lastError };
+}
+
+// product picker: list of returned products + per-product return detail
+app.get('/api/redo/products', async (_req, res) => {
+  const { rows } = await pool.query(`
+    SELECT i->>'sku' sku, count(*)::int returns FROM returns_cache, LATERAL jsonb_array_elements(items) i
+    WHERE created_at >= now()-interval '365 days' AND coalesce(i->>'sku','') <> '' GROUP BY 1 ORDER BY 2 DESC`);
+  const skus = rows.map(r => r.sku);
+  const names = skus.length ? (await pool.query(
+    `SELECT sku, coalesce(pi.title, us.name) name FROM unnest($1::text[]) sku
+     LEFT JOIN product_images pi USING (sku) LEFT JOIN uk_stock us USING (sku)`, [skus])).rows : [];
+  const nameMap = Object.fromEntries(names.map(n => [n.sku, n.name]));
+  res.json(rows.map(r => ({ sku: r.sku, returns: r.returns, name: nameMap[r.sku] || null })));
+});
+app.get('/api/redo/product', async (req, res) => {
+  const sku = String(req.query.sku || '');
+  if (!sku) return res.status(400).json({ error: 'sku required' });
+  const [meta, reasons, total] = await Promise.all([
+    pool.query(`SELECT pi.title p_title, pi.image_url, us.name us_name FROM (SELECT $1::text sku) x
+                LEFT JOIN product_images pi ON pi.sku=x.sku LEFT JOIN uk_stock us ON us.sku=x.sku`, [sku]),
+    pool.query(`SELECT coalesce(nullif(i->>'reason',''),'(no reason)') reason, count(*)::int c
+                FROM returns_cache, LATERAL jsonb_array_elements(items) i
+                WHERE i->>'sku'=$1 AND created_at >= now()-interval '365 days' GROUP BY 1 ORDER BY 2 DESC`, [sku]),
+    pool.query(`SELECT count(*)::int c FROM returns_cache, LATERAL jsonb_array_elements(items) i
+                WHERE i->>'sku'=$1 AND created_at >= now()-interval '365 days'`, [sku])
+  ]);
+  const m = meta.rows[0] || {};
+  res.json({ sku, name: m.p_title || m.us_name || sku, image: m.image_url || null,
+    total: total.rows[0].c, reasons: reasons.rows });
+});
 
 app.get('/api/redo/summary', async (_req, res) => {
   try {
