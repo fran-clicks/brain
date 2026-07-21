@@ -942,45 +942,45 @@ app.get('/api/redo/summary', async (_req, res) => {
         FROM returns_cache ORDER BY created_at DESC NULLS LAST LIMIT 12`)
     ]);
 
-    // refund leakage: Redo refund $ vs Shopify revenue over the last 6 months, monthly
+    // cross-source cards — isolated so a failure here never breaks the rest of the tab
     const hasSales = (await pool.query('SELECT 1 FROM orders_cache LIMIT 1')).rows.length > 0;
-    let leakage = null;
+    let leakage = null, defects = null, extraError = null;
     if (hasSales) {
-      const rows = (await pool.query(`
-        WITH months AS (SELECT date_trunc('month', now()) - (n || ' months')::interval AS m FROM generate_series(0,5) n),
-        rev AS (SELECT date_trunc('month', created_at) m, sum(total_price) revenue FROM orders_cache WHERE cancelled_at IS NULL GROUP BY 1),
-        ref AS (SELECT date_trunc('month', created_at) m, sum(refund) refunded FROM returns_cache GROUP BY 1)
-        SELECT to_char(months.m,'YYYY-MM') month,
-          round(coalesce(rev.revenue,0))::int revenue,
-          round(coalesce(ref.refunded,0))::int refunded,
-          CASE WHEN coalesce(rev.revenue,0) > 0 THEN round(coalesce(ref.refunded,0)/rev.revenue*1000)/10 ELSE null END pct
-        FROM months LEFT JOIN rev ON rev.m=months.m LEFT JOIN ref ON ref.m=months.m ORDER BY 1`)).rows;
-      leakage = rows;
-    }
+      try {
+        const [rev, ref] = await Promise.all([
+          pool.query(`SELECT to_char(date_trunc('month',created_at),'YYYY-MM') mon, round(sum(total_price))::int revenue
+                      FROM orders_cache WHERE cancelled_at IS NULL AND created_at >= now()-interval '6 months' GROUP BY 1`),
+          pool.query(`SELECT to_char(date_trunc('month',created_at),'YYYY-MM') mon, round(sum(refund))::int refunded
+                      FROM returns_cache WHERE created_at >= now()-interval '6 months' GROUP BY 1`)
+        ]);
+        const revMap = Object.fromEntries(rev.rows.map(r => [r.mon, r.revenue]));
+        const refMap = Object.fromEntries(ref.rows.map(r => [r.mon, r.refunded]));
+        const months = [...new Set([...Object.keys(revMap), ...Object.keys(refMap)])].sort();
+        leakage = months.map(mon => {
+          const revenue = revMap[mon] || 0, refunded = refMap[mon] || 0;
+          return { month: mon, revenue, refunded, pct: revenue > 0 ? Math.round(refunded / revenue * 1000) / 10 : null };
+        });
 
-    // silent-defect radar: per-SKU return rate (Redo returns ÷ Shopify units sold, 90d) vs support tickets
-    let defects = null;
-    if (hasSales) {
-      defects = (await pool.query(`
-        WITH sold AS (
-          SELECT it->>'sku' sku, max(it->>'title') title, sum(coalesce((it->>'qty')::int,0))::int units
-          FROM orders_cache, LATERAL jsonb_array_elements(items) it
-          WHERE created_at >= now()-interval '90 days' AND cancelled_at IS NULL AND coalesce(it->>'sku','') <> ''
-          GROUP BY 1),
-        returned AS (
-          SELECT i->>'sku' sku, sum(coalesce((i->>'qty')::int,1))::int units
-          FROM returns_cache, LATERAL jsonb_array_elements(items) i
-          WHERE created_at >= now()-interval '90 days' AND coalesce(i->>'sku','') <> ''
-          GROUP BY 1)
-        SELECT s.sku, s.title, s.units sold, coalesce(r.units,0) returned,
-          round(coalesce(r.units,0)::numeric / nullif(s.units,0) * 1000)/10 return_pct
-        FROM sold s LEFT JOIN returned r ON r.sku = s.sku
-        WHERE s.units >= 20
-        ORDER BY return_pct DESC NULLS LAST LIMIT 15`)).rows;
+        defects = (await pool.query(`
+          WITH sold AS (
+            SELECT it->>'sku' sku, max(it->>'title') title, sum(coalesce((it->>'qty')::int,0))::int units
+            FROM orders_cache, LATERAL jsonb_array_elements(items) it
+            WHERE created_at >= now()-interval '90 days' AND cancelled_at IS NULL AND coalesce(it->>'sku','') <> ''
+            GROUP BY 1),
+          returned AS (
+            SELECT i->>'sku' sku, sum(coalesce((i->>'qty')::int,1))::int units
+            FROM returns_cache, LATERAL jsonb_array_elements(items) i
+            WHERE created_at >= now()-interval '90 days' AND coalesce(i->>'sku','') <> ''
+            GROUP BY 1)
+          SELECT s.sku, s.title, s.units sold, coalesce(r.units,0) returned,
+            round(coalesce(r.units,0)::numeric / nullif(s.units,0) * 1000)/10 return_pct
+          FROM sold s LEFT JOIN returned r ON r.sku = s.sku
+          WHERE s.units >= 20 ORDER BY return_pct DESC NULLS LAST LIMIT 15`)).rows;
+      } catch (e) { extraError = String(e.message); console.error('redo cross-source:', extraError); }
     }
 
     res.json({ configured: true, totals_30d: tot.rows[0], top_reasons: reasons.rows, open_by_status: statuses.rows,
-      recent: recent.rows, leakage, defects, sync: ss });
+      recent: recent.rows, leakage, defects, extra_error: extraError, sync: ss });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/redo/sync', async (_req, res) => {
