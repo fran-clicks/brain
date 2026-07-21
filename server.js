@@ -2203,6 +2203,17 @@ app.get('/api/health/connectors', async (req, res) => {
   res.json(out);
 });
 
+// admin: pending-item counts for nav badges
+app.get('/api/pending-counts', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.json({ requests: 0, kb: 0 });
+  const [reqs, conns, kb] = await Promise.all([
+    pool.query(`SELECT count(*)::int c FROM connection_requests WHERE status='pending'`),
+    pool.query(`SELECT count(*)::int c FROM connectors WHERE approval_status='pending' AND active=true`),
+    pool.query(`SELECT count(*)::int c FROM kb_suggestions WHERE status='pending'`)
+  ]);
+  res.json({ requests: reqs.rows[0].c + conns.rows[0].c, kb: kb.rows[0].c });
+});
+
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;

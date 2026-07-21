@@ -99,6 +99,8 @@ h1 span{color:var(--ink);background:var(--yellow);padding:1px 10px;border-radius
 nav button, .periods button{color:var(--ink);border-radius:999px;transition:transform .06s ease, box-shadow .06s ease}
 nav button:hover, .periods button:hover{transform:translateY(-1px)}
 nav button:active, .periods button:active{transform:translateY(1px)}
+nav .nbadge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;margin-left:6px;border-radius:999px;background:#dc2626;color:#fff;font-size:11px;font-weight:700;vertical-align:middle}
+nav button.active .nbadge{background:#fff;color:#dc2626}
 nav button.active, .periods button.active{
   background:var(--ink);border-color:var(--ink);color:var(--yellow);
   box-shadow:0 4px 14px rgba(16,17,20,.35), inset 0 1px 0 rgba(255,255,255,.12);
@@ -1446,7 +1448,7 @@ async function runKbAudit() {
   finally { b.disabled = false; b.textContent = 'Run audit'; }
 }
 async function decideKb(id, decision) {
-  try { await api(`/api/kb/${id}/decision`, {method:'POST', body: JSON.stringify({ decision })}); loadKbs(); }
+  try { await api(`/api/kb/${id}/decision`, {method:'POST', body: JSON.stringify({ decision })}); loadKbs(); loadBadges(); }
   catch (e) { alert(e.message); }
 }
 async function addKb() {
@@ -1537,6 +1539,26 @@ async function addConnector() {
   } catch (e) { el('cErr').textContent = e.message; }
 }
 
+// nav pending-count badges (admins only)
+function setNavBadge(dataS, count) {
+  const btn = document.querySelector(`nav button[data-s="${dataS}"]`);
+  if (!btn) return;
+  btn.querySelector('.nbadge')?.remove();
+  if (count > 0) {
+    const b = document.createElement('span');
+    b.className = 'nbadge'; b.textContent = count;
+    btn.appendChild(b);
+  }
+}
+async function loadBadges() {
+  if (!window.isAdmin) return;
+  try {
+    const c = await api('/api/pending-counts');
+    setNavBadge('conn', c.requests);
+    setNavBadge('kb', c.kb);
+  } catch {}
+}
+
 // system status (admins only)
 async function loadHealth() {
   if (!window.isAdmin) return;
@@ -1601,7 +1623,7 @@ async function decideReq(id, decision) {
   el('rqErr').textContent = '';
   try {
     await api(`/api/requests/${id}/decision`, {method:'POST', body: JSON.stringify({ decision, admin_password: el('rqPw').value })});
-    loadRequests();
+    loadRequests(); loadBadges();
   } catch (e) { el('rqErr').textContent = e.message; }
 }
 
@@ -1705,6 +1727,8 @@ api('/api/auth/me').then(m => {
     loadKbs(); // re-render with admin controls if applicable
     loadMembers();
     loadHealth();
+    loadBadges();
+    setInterval(loadBadges, 3 * 60 * 1000);
   }
 }).catch(() => {});
 
