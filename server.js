@@ -961,13 +961,17 @@ app.get('/api/redo/summary', async (_req, res) => {
           return { month: mon, revenue, refunded, pct: revenue > 0 ? Math.round(refunded / revenue * 1000) / 10 : null };
         });
 
-        // return reason × product (90d): why each product comes back
+        // return reason × product (90d): why each product comes back.
+        // name resolves from UK stock catalog first (richest per-SKU detail), then Shopify title.
         var reasonByProduct = (await pool.query(`
-          SELECT rr.sku, s.name, rr.reason, rr.c FROM (
+          SELECT rr.sku, coalesce(s.name, sh.title) name, rr.reason, rr.c FROM (
             SELECT coalesce(nullif(i->>'sku',''),'(no sku)') sku, coalesce(nullif(i->>'reason',''),'(no reason)') reason, count(*)::int c
             FROM returns_cache, LATERAL jsonb_array_elements(items) i
             WHERE created_at >= now()-interval '90 days' GROUP BY 1,2
-          ) rr LEFT JOIN uk_stock s ON s.sku = rr.sku
+          ) rr
+          LEFT JOIN uk_stock s ON s.sku = rr.sku
+          LEFT JOIN (SELECT it->>'sku' sku, max(it->>'title') title FROM orders_cache, LATERAL jsonb_array_elements(items) it
+                     WHERE coalesce(it->>'sku','') <> '' GROUP BY 1) sh ON sh.sku = rr.sku
           ORDER BY rr.c DESC LIMIT 25`)).rows;
 
         defects = (await pool.query(`
@@ -981,9 +985,11 @@ app.get('/api/redo/summary', async (_req, res) => {
             FROM returns_cache, LATERAL jsonb_array_elements(items) i
             WHERE created_at >= now()-interval '90 days' AND coalesce(i->>'sku','') <> ''
             GROUP BY 1)
-          SELECT s.sku, s.title, s.units sold, coalesce(r.units,0) returned,
+          SELECT s.sku, coalesce(us.name, s.title) title, s.units sold, coalesce(r.units,0) returned,
             round(coalesce(r.units,0)::numeric / nullif(s.units,0) * 1000)/10 return_pct
-          FROM sold s LEFT JOIN returned r ON r.sku = s.sku
+          FROM sold s
+          LEFT JOIN returned r ON r.sku = s.sku
+          LEFT JOIN uk_stock us ON us.sku = s.sku
           WHERE s.units >= 20 ORDER BY return_pct DESC NULLS LAST LIMIT 15`)).rows;
       } catch (e) { extraError = String(e.message); console.error('redo cross-source:', extraError); }
     }
