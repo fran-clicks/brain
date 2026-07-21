@@ -961,6 +961,15 @@ app.get('/api/redo/summary', async (_req, res) => {
           return { month: mon, revenue, refunded, pct: revenue > 0 ? Math.round(refunded / revenue * 1000) / 10 : null };
         });
 
+        // return reason × product (90d): why each product comes back
+        var reasonByProduct = (await pool.query(`
+          SELECT rr.sku, s.name, rr.reason, rr.c FROM (
+            SELECT coalesce(nullif(i->>'sku',''),'(no sku)') sku, coalesce(nullif(i->>'reason',''),'(no reason)') reason, count(*)::int c
+            FROM returns_cache, LATERAL jsonb_array_elements(items) i
+            WHERE created_at >= now()-interval '90 days' GROUP BY 1,2
+          ) rr LEFT JOIN uk_stock s ON s.sku = rr.sku
+          ORDER BY rr.c DESC LIMIT 25`)).rows;
+
         defects = (await pool.query(`
           WITH sold AS (
             SELECT it->>'sku' sku, max(it->>'title') title, sum(coalesce((it->>'qty')::int,0))::int units
@@ -980,7 +989,8 @@ app.get('/api/redo/summary', async (_req, res) => {
     }
 
     res.json({ configured: true, totals_30d: tot.rows[0], top_reasons: reasons.rows, open_by_status: statuses.rows,
-      recent: recent.rows, leakage, defects, extra_error: extraError, sync: ss });
+      recent: recent.rows, leakage, defects, reason_by_product: (typeof reasonByProduct !== 'undefined' ? reasonByProduct : null),
+      extra_error: extraError, sync: ss });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/redo/sync', async (_req, res) => {
@@ -2082,6 +2092,28 @@ app.post('/api/slack/events', async (req, res) => {
     console.error('slack assistant error:', e.message);
     await slackPost(conn.config.bot_token, ev.channel, `⚠️ Couldn't answer that: ${e.message}`, ev.thread_ts || ev.ts);
   }
+});
+
+// admin: per-source sync health / logs
+app.get('/api/health/connectors', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const labels = { gorgias: '🎧 Gorgias', shopify: '🛒 Shopify', klaviyo: '✉️ Klaviyo', redo: '↩️ Redo', uk_stock: '📦 UK stock' };
+  const rows = (await pool.query(`SELECT k, v FROM sync_state WHERE k = ANY($1)`, [Object.keys(labels)])).rows;
+  const byKey = Object.fromEntries(rows.map(r => [r.k, r.v]));
+  const active = (await pool.query(`SELECT type FROM connectors WHERE active=true`)).rows.map(r => r.type);
+  const out = Object.keys(labels).map(k => {
+    const v = byKey[k] || {};
+    const connected = active.includes(k) || (k === 'gorgias' && !!process.env.GORGIAS_DOMAIN);
+    return {
+      source: k, label: labels[k], connected,
+      last_run: v.last_run || null,
+      last_error: v.last_error || null,
+      backfill_done: v.backfill_done ?? null,
+      cached: v.cached ?? v.items ?? v.upserts ?? null,
+      stale: v.last_run ? (Date.now() - Date.parse(v.last_run) > 90 * 60 * 1000) : true
+    };
+  });
+  res.json(out);
 });
 
 app.get('/api/health', (_req, res) => res.json({ ok: true }));

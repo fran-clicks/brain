@@ -326,6 +326,11 @@ footer{color:rgba(16,17,20,.45)}
     </div>
   </div>
   <div class="card">
+    <h2>🧭 Return reasons by product <span style="font-weight:400;color:var(--muted);font-size:12px">· last 90 days</span></h2>
+    <table id="rdReasonProduct"><thead><tr><th>Product</th><th>SKU</th><th>Reason</th><th>Returns</th></tr></thead><tbody></tbody></table>
+    <div class="note">Why each product actually comes back — the root cause differs by product line. Sorted by frequency.</div>
+  </div>
+  <div class="card">
     <h2>🔬 Silent-defect radar <span style="font-weight:400;color:var(--muted);font-size:12px">· return rate per product (90d)</span></h2>
     <table id="rdDefects"><thead><tr><th>SKU</th><th>Product</th><th>Sold</th><th>Returned</th><th>Return rate</th></tr></thead><tbody></tbody></table>
     <div class="note">Return rate = units returned ÷ units sold (last 90 days), highest first. A SKU well above the others is a product-quality flag — customers returning rather than contacting support. Only products with 20+ sold are shown.</div>
@@ -434,6 +439,10 @@ footer{color:rgba(16,17,20,.45)}
     </div>
     <div class="err" id="rqErr"></div>
   </div>
+  <div class="card" id="healthCard" style="display:none">
+    <h2>🩺 System status <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only · sync health per source</span></h2>
+    <table id="healthTable"><thead><tr><th>Source</th><th>Status</th><th>Last sync</th><th>Cached</th><th>Note</th></tr></thead><tbody></tbody></table>
+  </div>
   <div class="card" id="membersCard" style="display:none">
     <h2>👥 Members <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
     <table id="membersTable"><thead><tr><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody></tbody></table>
@@ -510,7 +519,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (s === 'redo') loadRedo();
   if (s === 'home') loadOverview();
   if (s === 'kb') { loadKbs(); loadKbAudit(); }
-  if (s === 'conn') { loadConnectors(); loadRequests(); loadMembers(); }
+  if (s === 'conn') { loadConnectors(); loadRequests(); loadMembers(); loadHealth(); }
 });
 
 // ---------- overview ----------
@@ -1127,6 +1136,9 @@ async function loadRedo() {
         <td>${d.sold}</td><td>${d.returned}</td>
         <td><b>${rate == null ? '—' : rate + '%'}</b>${hot ? ' 🚩' : ''}</td></tr>`;
     }).join('') : '<tr><td colspan="5" class="empty">Needs both Shopify sales and Redo returns synced.</td></tr>';
+    document.querySelector('#rdReasonProduct tbody').innerHTML = (s.reason_by_product || []).length ? s.reason_by_product.map(r =>
+      `<tr><td>${esc(r.name || '—')}</td><td><span class="tag src">${esc(r.sku)}</span></td><td>${esc(r.reason)}</td><td><b>${r.c}</b></td></tr>`).join('')
+      : '<tr><td colspan="4" class="empty">No reason/product data yet.</td></tr>';
     document.querySelector('#rdLeakage tbody').innerHTML = (s.leakage || []).length ? s.leakage.map(m =>
       `<tr><td>${esc(m.month)}</td><td>${(m.revenue||0).toLocaleString()}</td><td>${(m.refunded||0).toLocaleString()}</td>
        <td><b>${m.pct == null ? '—' : m.pct + '%'}</b></td></tr>`).join('') : '<tr><td colspan="4" class="empty">Needs Shopify + Redo synced.</td></tr>';
@@ -1473,6 +1485,27 @@ async function addConnector() {
   } catch (e) { el('cErr').textContent = e.message; }
 }
 
+// system status (admins only)
+async function loadHealth() {
+  if (!window.isAdmin) return;
+  try {
+    const rows = await api('/api/health/connectors');
+    document.getElementById('healthCard').style.display = 'block';
+    document.querySelector('#healthTable tbody').innerHTML = rows.map(r => {
+      let tag, note = '';
+      if (!r.connected) { tag = '<span class="tag src">not connected</span>'; }
+      else if (r.last_error) { tag = '<span class="tag" style="background:#fee2e2;color:#b91c1c">error</span>'; note = r.last_error; }
+      else if (r.backfill_done === false) { tag = '<span class="tag pending">backfilling</span>'; }
+      else if (r.stale) { tag = '<span class="tag pending">stale</span>'; note = 'no sync in 90+ min'; }
+      else { tag = '<span class="tag approved">ok</span>'; }
+      return `<tr><td><b>${esc(r.label)}</b></td><td>${tag}</td>
+        <td>${r.last_run ? new Date(r.last_run).toLocaleString() : '—'}</td>
+        <td>${r.cached != null ? r.cached.toLocaleString() : '—'}</td>
+        <td style="color:var(--muted);font-size:12px">${esc(note)}</td></tr>`;
+    }).join('');
+  } catch {}
+}
+
 // members (admins only)
 async function loadMembers() {
   if (!window.isAdmin) return;
@@ -1619,6 +1652,7 @@ api('/api/auth/me').then(m => {
     }
     loadKbs(); // re-render with admin controls if applicable
     loadMembers();
+    loadHealth();
   }
 }).catch(() => {});
 
