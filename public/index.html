@@ -326,6 +326,16 @@ footer{color:rgba(16,17,20,.45)}
     </div>
   </div>
   <div class="card">
+    <h2>🔬 Silent-defect radar <span style="font-weight:400;color:var(--muted);font-size:12px">· return rate per product (90d)</span></h2>
+    <table id="rdDefects"><thead><tr><th>SKU</th><th>Product</th><th>Sold</th><th>Returned</th><th>Return rate</th></tr></thead><tbody></tbody></table>
+    <div class="note">Return rate = units returned ÷ units sold (last 90 days), highest first. A SKU well above the others is a product-quality flag — customers returning rather than contacting support. Only products with 20+ sold are shown.</div>
+  </div>
+  <div class="card">
+    <h2>💸 Refund leakage <span style="font-weight:400;color:var(--muted);font-size:12px">· refunds vs revenue, monthly</span></h2>
+    <table id="rdLeakage"><thead><tr><th>Month</th><th>Revenue</th><th>Refunded</th><th>% of revenue</th></tr></thead><tbody></tbody></table>
+    <div class="note">Redo refund value as a share of Shopify revenue. A climbing % means more margin is leaking back out — watch the trend, not any single month.</div>
+  </div>
+  <div class="card">
     <h2>Recent returns <button class="btn" style="float:right;margin:0;padding:5px 12px" id="rdSyncBtn" onclick="rdSync()">🔄 Sync now</button></h2>
     <table id="rdRecent"><thead><tr><th>Order</th><th>Type</th><th>Status</th><th>Date</th><th>Items · reason</th><th>Refund</th><th>Tags</th></tr></thead><tbody></tbody></table>
     <div class="note" id="rdNote">Loading Redo data…</div>
@@ -1105,6 +1115,21 @@ async function loadRedo() {
       `<tr><td>${esc(r.reason)}</td><td>${r.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
     document.querySelector('#rdStatuses tbody').innerHTML = (s.open_by_status || []).map(r =>
       `<tr><td><span class="tag pending">${esc(r.status)}</span></td><td>${r.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">Nothing in progress 🎉</td></tr>';
+    // silent-defect radar: highlight SKUs whose return rate is well above the median
+    const defs = s.defects || [];
+    const rates = defs.map(d => +d.return_pct).filter(x => x >= 0).sort((a,b)=>a-b);
+    const median = rates.length ? rates[Math.floor(rates.length/2)] : 0;
+    document.querySelector('#rdDefects tbody').innerHTML = defs.length ? defs.map(d => {
+      const rate = d.return_pct == null ? null : +d.return_pct;
+      const hot = rate != null && rate >= Math.max(median * 2, 10);
+      return `<tr${hot ? ' style="background:rgba(220,38,38,.07)"' : ''}>
+        <td><span class="tag src">${esc(d.sku)}</span></td><td>${esc(d.title || '')}</td>
+        <td>${d.sold}</td><td>${d.returned}</td>
+        <td><b>${rate == null ? '—' : rate + '%'}</b>${hot ? ' 🚩' : ''}</td></tr>`;
+    }).join('') : '<tr><td colspan="5" class="empty">Needs both Shopify sales and Redo returns synced.</td></tr>';
+    document.querySelector('#rdLeakage tbody').innerHTML = (s.leakage || []).length ? s.leakage.map(m =>
+      `<tr><td>${esc(m.month)}</td><td>${(m.revenue||0).toLocaleString()}</td><td>${(m.refunded||0).toLocaleString()}</td>
+       <td><b>${m.pct == null ? '—' : m.pct + '%'}</b></td></tr>`).join('') : '<tr><td colspan="4" class="empty">Needs Shopify + Redo synced.</td></tr>';
     document.querySelector('#rdRecent tbody').innerHTML = (s.recent || []).map(r => {
       const items = (r.items || []).map(i => `${i.qty}× ${i.sku || '?'}${i.reason ? ` (${i.reason})` : ''}${i.green ? ' 🌱' : ''}`).join(', ');
       return `<tr><td><b>${esc(r.order_name)}</b></td>
