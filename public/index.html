@@ -158,8 +158,8 @@ footer{color:rgba(16,17,20,.45)}
 <nav>
   <button data-s="home" class="active">🏠 Overview</button>
   <button data-s="gorgias">🎧 Gorgias</button>
-  <button data-s="sales">🛒 Shopify</button>
   <button data-s="klaviyo">✉️ Klaviyo</button>
+  <button data-s="sales">🛒 Shopify</button>
   <button data-s="redo">↩️ Returns</button>
   <button data-s="stock">📦 UK Stock</button>
   <button data-s="kb">💡 Knowledge Bases</button>
@@ -1263,11 +1263,15 @@ async function loadGorgias() {
       {l:`CSAT (${g.csat_responses ?? 0} responses)`, v: g.csat_avg_5 != null ? g.csat_avg_5 + '/5' : '—'}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
     const days = g.created_per_day || {};
+    const closedMap = g.closed_per_day || {};
+    const labels = Object.keys(days);
     if (gChart) gChart.destroy();
     gChart = new Chart(document.getElementById('gorgiasChart'), {
-      type:'bar',
-      data:{labels:Object.keys(days), datasets:[{label:'Tickets created', data:Object.values(days), backgroundColor:'#ffc800', borderColor:'rgba(16,17,20,.2)', borderWidth:1, borderRadius:6}]},
-      options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true, ticks:{precision:0}}}}
+      data:{labels, datasets:[
+        {type:'bar', label:'Tickets created', data:labels.map(l => days[l] ?? 0), backgroundColor:'#ffc800', borderColor:'rgba(16,17,20,.2)', borderWidth:1, borderRadius:6, order:2},
+        {type:'line', label:'Tickets closed', data:labels.map(l => closedMap[l] ?? 0), borderColor:'#101114', backgroundColor:'#101114', borderWidth:2.5, tension:.3, pointRadius:3, pointBackgroundColor:'#fff', pointBorderColor:'#101114', order:1}
+      ]},
+      options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom', labels:{usePointStyle:true}}}, scales:{y:{beginAtZero:true, ticks:{precision:0}}}}
     });
     note.textContent = (g.configured
       ? 'Synced data + live Gorgias metrics · ' + new Date(g.fetched_at).toLocaleString()

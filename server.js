@@ -1661,12 +1661,17 @@ app.get('/api/gorgias/stats', async (req, res) => {
       created_last_7d: c.rows[0].created_period,
       closed_last_7d: c.rows[0].closed_period
     });
-    const perDay = await pool.query(
-      `SELECT to_char(date_trunc('${bucket}', created_datetime)::date, 'YYYY-MM-DD') d, count(*)::int c FROM tickets_cache
-       WHERE created_datetime >= now()-$1::interval AND NOT spam GROUP BY 1 ORDER BY 1`, [`${days} days`]);
-    const daysMap = {};
+    const [perDay, perDayClosed] = await Promise.all([
+      pool.query(`SELECT to_char(date_trunc('${bucket}', created_datetime)::date, 'YYYY-MM-DD') d, count(*)::int c FROM tickets_cache
+                  WHERE created_datetime >= now()-$1::interval AND NOT spam GROUP BY 1 ORDER BY 1`, [`${days} days`]),
+      pool.query(`SELECT to_char(date_trunc('${bucket}', closed_datetime)::date, 'YYYY-MM-DD') d, count(*)::int c FROM tickets_cache
+                  WHERE closed_datetime >= now()-$1::interval AND NOT spam GROUP BY 1 ORDER BY 1`, [`${days} days`])
+    ]);
+    const daysMap = {}, closedMap = {};
     perDay.rows.forEach(r => { daysMap[r.d] = r.c; });
+    perDayClosed.rows.forEach(r => { closedMap[r.d] = r.c; });
     out.created_per_day = daysMap;
+    out.closed_per_day = closedMap;
     const [tags, channels, recent] = await Promise.all([
       pool.query(`SELECT t.tag, count(*)::int c FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
                   WHERE created_datetime >= now()-interval '30 days' AND NOT spam GROUP BY 1 ORDER BY 2 DESC LIMIT 8`),
