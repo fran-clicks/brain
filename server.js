@@ -1623,13 +1623,17 @@ app.get('/api/shopify/summary', async (_req, res) => {
     const win = resolveWindow(_req.query);
     const p = [win.start.toISOString(), win.end.toISOString()];
     const cond = ['created_at >= $1', 'created_at < $2'];
-    const extra = []; // product/country/tag only (no date) — reused by all-time awaiting list
+    // all-time awaiting list: honors product/country/tag but not the date window — its own param array
+    const xp = [], xcond = [];
     const { product, country, tag } = _req.query;
-    if (country) { p.push(country); const c = `country = $${p.length}`; cond.push(c); extra.push(c); }
-    if (tag) { p.push(tag); const c = `order_tags ? $${p.length}`; cond.push(c); extra.push(c); }
-    if (product) { p.push(product); const c = `EXISTS (SELECT 1 FROM jsonb_array_elements(items) it WHERE it->>'title' = $${p.length})`; cond.push(c); extra.push(c); }
+    if (country) { p.push(country); cond.push(`country = $${p.length}`); xp.push(country); xcond.push(`country = $${xp.length}`); }
+    if (tag) { p.push(tag); cond.push(`order_tags ? $${p.length}`); xp.push(tag); xcond.push(`order_tags ? $${xp.length}`); }
+    if (product) {
+      p.push(product); cond.push(`EXISTS (SELECT 1 FROM jsonb_array_elements(items) it WHERE it->>'title' = $${p.length})`);
+      xp.push(product); xcond.push(`EXISTS (SELECT 1 FROM jsonb_array_elements(items) it WHERE it->>'title' = $${xp.length})`);
+    }
     const W = cond.join(' AND ');
-    const WX = extra.length ? extra.join(' AND ') : 'true';
+    const WX = xcond.length ? xcond.join(' AND ') : 'true';
     const [tot, countries, products, recent] = await Promise.all([
       pool.query(`SELECT count(*) FILTER (WHERE cancelled_at IS NULL)::int orders,
         round(sum(total_price) FILTER (WHERE cancelled_at IS NULL))::int revenue,
@@ -1662,7 +1666,7 @@ app.get('/api/shopify/summary', async (_req, res) => {
        floor(extract(epoch from now()-created_at)/86400)::int age_days
        FROM orders_cache
        WHERE ${WX} AND cancelled_at IS NULL AND fulfillment_status NOT IN ('fulfilled','restocked')
-       ORDER BY created_at ASC LIMIT 20`, p)).rows;
+       ORDER BY created_at ASC LIMIT 20`, xp)).rows;
     // filter option lists (over last 365d, independent of active filters, so dropdowns stay stable)
     const [optCountries, optTags, optProducts] = await Promise.all([
       pool.query(`SELECT country, count(*)::int c FROM orders_cache

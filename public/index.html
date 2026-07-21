@@ -621,14 +621,14 @@ async function prefetchPeriods() { // warm the presets in the background so swit
   }
 }
 setInterval(prefetchPeriods, 4 * 60 * 1000); // re-warm before the cache expires
-document.querySelectorAll('#periods button').forEach(b => b.onclick = () => {
+document.querySelectorAll('#periods button[data-d]').forEach(b => b.onclick = () => {
   if (b.dataset.d === 'custom') {
     const cp = document.getElementById('periodsCustom');
     cp.style.display = cp.style.display === 'none' ? 'inline-flex' : 'none';
     return;
   }
   document.getElementById('periodsCustom').style.display = 'none';
-  document.querySelectorAll('#periods button').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('#periods button[data-d]').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
   curDays = +b.dataset.d; curCustom = null;
   loadOverview();
@@ -637,7 +637,7 @@ function applyOvCustom() {
   const from = document.getElementById('ovFrom').value, to = document.getElementById('ovTo').value;
   if (!from || !to || from >= to) { alert('Pick a valid start and end date.'); return; }
   curCustom = { from, to: to + 'T23:59:59' };
-  document.querySelectorAll('#periods button').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('#periods button[data-d]').forEach(x => x.classList.remove('active'));
   document.querySelector('#periods button[data-d="custom"]').classList.add('active');
   loadOverview();
 }
@@ -1432,14 +1432,14 @@ async function shopSync() {
 // ---------- gorgias live tab ----------
 let gChart;
 let gDays = 7, gCustom = null;
-document.querySelectorAll('#gPeriods button').forEach(b => b.onclick = () => {
+document.querySelectorAll('#gPeriods button[data-d]').forEach(b => b.onclick = () => {
   if (b.dataset.d === 'custom') {
     const cp = document.getElementById('gPeriodsCustom');
     cp.style.display = cp.style.display === 'none' ? 'inline-flex' : 'none';
     return;
   }
   document.getElementById('gPeriodsCustom').style.display = 'none';
-  document.querySelectorAll('#gPeriods button').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('#gPeriods button[data-d]').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
   gDays = +b.dataset.d; gCustom = null;
   loadGorgias();
@@ -1448,7 +1448,7 @@ function applyGCustom() {
   const from = document.getElementById('gFrom').value, to = document.getElementById('gTo').value;
   if (!from || !to || from >= to) { alert('Pick a valid start and end date.'); return; }
   gCustom = { from, to: to + 'T23:59:59' };
-  document.querySelectorAll('#gPeriods button').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('#gPeriods button[data-d]').forEach(x => x.classList.remove('active'));
   document.querySelector('#gPeriods button[data-d="custom"]').classList.add('active');
   loadGorgias();
 }
