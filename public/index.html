@@ -180,6 +180,11 @@ footer{color:rgba(16,17,20,.45)}
     <button data-d="90">3 months</button>
     <button data-d="180">6 months</button>
     <button data-d="365">1 year</button>
+    <button data-d="custom">📅 Custom</button>
+    <span id="periodsCustom" style="display:none;align-items:center;gap:6px">
+      <input type="date" id="ovFrom" style="width:auto"><span style="color:var(--muted)">→</span><input type="date" id="ovTo" style="width:auto">
+      <button class="btn" style="margin:0;padding:6px 12px" onclick="applyOvCustom()">Apply</button>
+    </span>
   </div>
   <div class="grid kpis" id="homeKpis"></div>
   <div class="card" style="margin-top:14px">
@@ -225,22 +230,49 @@ footer{color:rgba(16,17,20,.45)}
 
 <!-- SHOPIFY -->
 <div class="section" id="s-sales">
-  <div class="grid kpis" id="shopKpis"></div>
+  <div class="card" id="shopFilters" style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px">
+    <div>
+      <label style="display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:3px">Timeframe</label>
+      <div class="periods" id="shopPeriods" style="margin:0">
+        <button data-d="7">7 days</button>
+        <button data-d="30" class="active">30 days</button>
+        <button data-d="90">90 days</button>
+        <button data-d="custom">📅 Custom</button>
+      </div>
+    </div>
+    <span id="shopPeriodsCustom" style="display:none;align-items:flex-end;gap:6px">
+      <input type="date" id="shFrom" style="width:auto"><span style="color:var(--muted);padding-bottom:8px">→</span><input type="date" id="shTo" style="width:auto">
+    </span>
+    <div>
+      <label style="display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:3px">Product</label>
+      <select id="shProduct" style="width:auto;max-width:220px"><option value="">All products</option></select>
+    </div>
+    <div>
+      <label style="display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:3px">Country</label>
+      <select id="shCountry" style="width:auto"><option value="">All countries</option></select>
+    </div>
+    <div>
+      <label style="display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:3px">Tag</label>
+      <select id="shTag" style="width:auto"><option value="">All tags</option></select>
+    </div>
+    <button class="btn" style="margin:0;padding:8px 14px" onclick="clearShopFilters()">Clear</button>
+  </div>
+  <div class="grid kpis" id="shopKpis" style="margin-top:14px"></div>
   <div class="grid two" style="margin-top:14px">
     <div class="card">
-      <h2>Top countries (30d)</h2>
+      <h2>Top countries <span class="shopPer" style="font-weight:400;color:var(--muted);font-size:12px"></span></h2>
       <table id="shopCountries"><thead><tr><th>Country</th><th>Revenue</th><th>Orders</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="card">
-      <h2>Top products (30d)</h2>
+      <h2>Top products <span class="shopPer" style="font-weight:400;color:var(--muted);font-size:12px"></span></h2>
       <table id="shopProducts"><thead><tr><th>Product</th><th>Units</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="card">
-      <h2>Top order tags (30d)</h2>
+      <h2>Top order tags <span class="shopPer" style="font-weight:400;color:var(--muted);font-size:12px"></span></h2>
       <table id="shopTags"><thead><tr><th>Tag</th><th>Orders</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="card">
-      <h2>Fulfillment (30d)</h2>
+      <h2>Fulfillment <span class="shopPer" style="font-weight:400;color:var(--muted);font-size:12px"></span></h2>
       <table id="shopFulfil"><thead><tr><th>Status</th><th>Orders</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
@@ -264,6 +296,11 @@ footer{color:rgba(16,17,20,.45)}
     <button data-d="90">3 months</button>
     <button data-d="180">6 months</button>
     <button data-d="365">1 year</button>
+    <button data-d="custom">📅 Custom</button>
+    <span id="gPeriodsCustom" style="display:none;align-items:center;gap:6px">
+      <input type="date" id="gFrom" style="width:auto"><span style="color:var(--muted)">→</span><input type="date" id="gTo" style="width:auto">
+      <button class="btn" style="margin:0;padding:6px 12px" onclick="applyGCustom()">Apply</button>
+    </span>
   </div>
   <div class="grid kpis" id="gorgiasKpis"></div>
   <div class="card" style="margin-top:14px">
@@ -559,32 +596,51 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
 });
 
 // ---------- overview ----------
-let curDays = 7, homeChart;
-const ovCache = new Map(); // days → {t, v}
-const ovCached = (days) => { const h = ovCache.get(days); return h && Date.now() - h.t < 5 * 60 * 1000 ? h.v : null; };
-async function fetchOverview(days, silent = false) {
-  const hit = ovCached(days);
+let curDays = 7, curCustom = null, homeChart; // curCustom = {from, to} when a custom range is active
+const ovCache = new Map(); // key → {t, v}
+const ovKey = () => curCustom ? `c|${curCustom.from}|${curCustom.to}` : `d${curDays}`;
+const ovQuery = () => curCustom ? `from=${curCustom.from}&to=${curCustom.to}` : `days=${curDays}`;
+const ovCached = (key) => { const h = ovCache.get(key); return h && Date.now() - h.t < 5 * 60 * 1000 ? h.v : null; };
+async function fetchOverview(silent = false) {
+  const key = ovKey();
+  const hit = ovCached(key);
   if (hit) return hit;
   const loading = document.getElementById('chartLoading');
   if (!silent) loading.classList.add('on');
   try {
-    const v = await api('/api/stats/overview?days=' + days);
-    ovCache.set(days, { t: Date.now(), v });
+    const v = await api('/api/stats/overview?' + ovQuery());
+    ovCache.set(key, { t: Date.now(), v });
     return v;
   } finally { if (!silent) loading.classList.remove('on'); }
 }
-async function prefetchPeriods() { // warm the other ranges in the background so switching is instant
+async function prefetchPeriods() { // warm the presets in the background so switching is instant
   for (const d of [7, 30, 90, 180, 365]) {
-    if (d !== curDays && !ovCached(d)) { try { await fetchOverview(d, true); } catch {} }
+    if (!(d === curDays && !curCustom) && !ovCached(`d${d}`)) {
+      try { const v = await api('/api/stats/overview?days=' + d); ovCache.set(`d${d}`, { t: Date.now(), v }); } catch {}
+    }
   }
 }
 setInterval(prefetchPeriods, 4 * 60 * 1000); // re-warm before the cache expires
 document.querySelectorAll('#periods button').forEach(b => b.onclick = () => {
+  if (b.dataset.d === 'custom') {
+    const cp = document.getElementById('periodsCustom');
+    cp.style.display = cp.style.display === 'none' ? 'inline-flex' : 'none';
+    return;
+  }
+  document.getElementById('periodsCustom').style.display = 'none';
   document.querySelectorAll('#periods button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
-  curDays = +b.dataset.d;
+  curDays = +b.dataset.d; curCustom = null;
   loadOverview();
 });
+function applyOvCustom() {
+  const from = document.getElementById('ovFrom').value, to = document.getElementById('ovTo').value;
+  if (!from || !to || from >= to) { alert('Pick a valid start and end date.'); return; }
+  curCustom = { from, to: to + 'T23:59:59' };
+  document.querySelectorAll('#periods button').forEach(x => x.classList.remove('active'));
+  document.querySelector('#periods button[data-d="custom"]').classList.add('active');
+  loadOverview();
+}
 
 // inline Chart.js plugin: markers grouped by (date, type). One badge per group with a count;
 // click to unfold the list (handled outside the chart, so the plot is never occluded).
@@ -792,12 +848,12 @@ document.addEventListener('click', (e) => {
   if (pop.style.display === 'block' && !pop.contains(e.target)) closeEvtPop();
 });
 
-function mergeSeries(series, bucket) {
+function mergeSeries(series, bucket, peek = true) {
   const all = new Set();
   Object.values(series).forEach(rows => rows.forEach(r => all.add(String(r.d).slice(0,10))));
   const labels = [...all].sort();
   const today = new Date().toISOString().slice(0,10);
-  if (bucket === 'day') { // peek 3 days ahead so imminent events show on the chart
+  if (peek && bucket === 'day') { // peek 3 days ahead so imminent events show on the chart
     for (let i = 1; i <= 3; i++) {
       const d = new Date(Date.now() + i * 864e5).toISOString().slice(0,10);
       if (!labels.includes(d)) labels.push(d);
@@ -830,19 +886,22 @@ function buildBreakdownMap(bd) {
 
 async function loadOverview() {
   try {
-    const s = await fetchOverview(curDays);
+    const s = await fetchOverview();
     const t = s.tickets.totals;
     const sv = s.sales?.totals;
+    const pl = s.custom
+      ? `${new Date(s.from).toLocaleDateString(undefined,{month:'short',day:'numeric'})}–${new Date(s.to).toLocaleDateString(undefined,{month:'short',day:'numeric'})}`
+      : `${curDays}d`;
     document.getElementById('homeKpis').innerHTML = [
-      {l:`Tickets created (${curDays}d)`, v:t.created},
-      {l:`Tickets closed (${curDays}d)`, v:t.closed},
+      {l:`Tickets created (${pl})`, v:t.created},
+      {l:`Tickets closed (${pl})`, v:t.closed},
       {l:'Open now (synced)', v:t.open},
-      {l:`Sales (${curDays}d)`, v: sv ? `${(sv.revenue ?? 0).toLocaleString()} ${sv.currency || ''}` : '—'},
-      {l:`Orders (${curDays}d)`, v: sv ? sv.orders : '—'},
-      {l:`Cancelled / refunded (${curDays}d)`, v: sv ? `${sv.cancelled} / ${sv.refunded}` : t.cancel_refund + ' tickets'},
-      {l:`Events (${curDays}d)`, v:s.events.length}
+      {l:`Sales (${pl})`, v: sv ? `${(sv.revenue ?? 0).toLocaleString()} ${sv.currency || ''}` : '—'},
+      {l:`Orders (${pl})`, v: sv ? sv.orders : '—'},
+      {l:`Cancelled / refunded (${pl})`, v: sv ? `${sv.cancelled} / ${sv.refunded}` : t.cancel_refund + ' tickets'},
+      {l:`Events (${pl})`, v:s.events.length}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
-    const m = mergeSeries(s.tickets.series, s.bucket);
+    const m = mergeSeries(s.tickets.series, s.bucket, !s.custom);
     const bdByDataset = [
       buildBreakdownMap(s.tickets.breakdowns?.created),
       buildBreakdownMap(s.tickets.breakdowns?.still_open),
@@ -1041,25 +1100,79 @@ async function addEvent() {
 }
 
 // ---------- shopify tab ----------
+let shDays = 30, shCustom = null, shFiltersInit = false;
+const shPer = () => shCustom
+  ? `${new Date(shCustom.from).toLocaleDateString(undefined,{month:'short',day:'numeric'})}–${new Date(shCustom.to).toLocaleDateString(undefined,{month:'short',day:'numeric'})}`
+  : `${shDays}d`;
+document.querySelectorAll('#shopPeriods button').forEach(b => b.onclick = () => {
+  if (b.dataset.d === 'custom') {
+    const cp = document.getElementById('shopPeriodsCustom');
+    cp.style.display = cp.style.display === 'none' ? 'inline-flex' : 'none';
+    return;
+  }
+  document.getElementById('shopPeriodsCustom').style.display = 'none';
+  document.querySelectorAll('#shopPeriods button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  shDays = +b.dataset.d; shCustom = null;
+  loadShopify();
+});
+['shFrom','shTo'].forEach(id => document.getElementById(id).addEventListener('change', () => {
+  const from = document.getElementById('shFrom').value, to = document.getElementById('shTo').value;
+  if (!from || !to || from >= to) return;
+  shCustom = { from, to: to + 'T23:59:59' };
+  document.querySelectorAll('#shopPeriods button').forEach(x => x.classList.remove('active'));
+  document.querySelector('#shopPeriods button[data-d="custom"]').classList.add('active');
+  loadShopify();
+}));
+['shProduct','shCountry','shTag'].forEach(id => document.getElementById(id).addEventListener('change', loadShopify));
+function clearShopFilters() {
+  shDays = 30; shCustom = null;
+  document.getElementById('shopPeriodsCustom').style.display = 'none';
+  document.querySelectorAll('#shopPeriods button').forEach(x => x.classList.toggle('active', x.dataset.d === '30'));
+  ['shProduct','shCountry','shTag','shFrom','shTo'].forEach(id => document.getElementById(id).value = '');
+  loadShopify();
+}
+function fillSelect(id, values) { // preserve current selection, refresh options
+  const el = document.getElementById(id), cur = el.value, first = el.options[0].outerHTML;
+  el.innerHTML = first + values.map(v => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(v)}</option>`).join('');
+}
 async function loadShopify() {
   const note = document.getElementById('shopNote');
   try {
-    const s = await api('/api/shopify/summary');
+    const qs = new URLSearchParams();
+    if (shCustom) { qs.set('from', shCustom.from); qs.set('to', shCustom.to); } else qs.set('days', shDays);
+    ['shProduct','shCountry','shTag'].forEach((id, i) => {
+      const v = document.getElementById(id).value;
+      if (v) qs.set(['product','country','tag'][i], v);
+    });
+    const s = await api('/api/shopify/summary?' + qs.toString());
     if (s.empty || !s.configured) {
+      document.getElementById('shopFilters').style.display = 'none';
       note.textContent = !s.configured
         ? 'Shopify is not connected yet — an admin can add it on the ＋ page.'
         : 'Connected — waiting for the first orders to sync' + (s.sync?.last_error ? ` (⚠️ ${s.sync.last_error})` : '…')
           + (s.granted_scopes != null ? ` · token scopes: [${s.granted_scopes || 'none'}]` : '');
       return;
     }
+    document.getElementById('shopFilters').style.display = 'flex';
+    if (s.filters) { // populate dropdowns once (options are stable across filter changes)
+      if (!shFiltersInit) {
+        fillSelect('shProduct', s.filters.products);
+        fillSelect('shCountry', s.filters.countries);
+        fillSelect('shTag', s.filters.tags);
+        shFiltersInit = true;
+      }
+    }
+    const per = shPer();
+    document.querySelectorAll('.shopPer').forEach(el => el.textContent = '· ' + per);
     const t = s.totals_30d;
     document.getElementById('shopKpis').innerHTML = [
-      {l:'Revenue (30d)', v:`${(t.revenue ?? 0).toLocaleString()} ${t.currency || ''}`},
-      {l:'Orders (30d)', v:t.orders},
+      {l:`Revenue (${per})`, v:`${(t.revenue ?? 0).toLocaleString()} ${t.currency || ''}`},
+      {l:`Orders (${per})`, v:t.orders},
       {l:'Fulfilled', v:t.fulfilled},
       {l:'Awaiting fulfillment', v:t.unfulfilled},
-      {l:'Cancelled (30d)', v:t.cancelled},
-      {l:'Refunded (30d)', v:t.refunded}
+      {l:`Cancelled (${per})`, v:t.cancelled},
+      {l:`Refunded (${per})`, v:t.refunded}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
     document.querySelector('#shopCountries tbody').innerHTML = s.top_countries.map(c =>
       `<tr><td><b>${esc(c.country)}</b></td><td>${(c.revenue ?? 0).toLocaleString()}</td><td>${c.orders}</td></tr>`).join('') || '<tr><td colspan="3" class="empty">—</td></tr>';
@@ -1318,19 +1431,35 @@ async function shopSync() {
 
 // ---------- gorgias live tab ----------
 let gChart;
-let gDays = 7;
+let gDays = 7, gCustom = null;
 document.querySelectorAll('#gPeriods button').forEach(b => b.onclick = () => {
+  if (b.dataset.d === 'custom') {
+    const cp = document.getElementById('gPeriodsCustom');
+    cp.style.display = cp.style.display === 'none' ? 'inline-flex' : 'none';
+    return;
+  }
+  document.getElementById('gPeriodsCustom').style.display = 'none';
   document.querySelectorAll('#gPeriods button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
-  gDays = +b.dataset.d;
+  gDays = +b.dataset.d; gCustom = null;
   loadGorgias();
 });
-const gLabel = () => ({7:'7d',30:'30d',90:'3m',180:'6m',365:'1y'})[gDays] || gDays + 'd';
+function applyGCustom() {
+  const from = document.getElementById('gFrom').value, to = document.getElementById('gTo').value;
+  if (!from || !to || from >= to) { alert('Pick a valid start and end date.'); return; }
+  gCustom = { from, to: to + 'T23:59:59' };
+  document.querySelectorAll('#gPeriods button').forEach(x => x.classList.remove('active'));
+  document.querySelector('#gPeriods button[data-d="custom"]').classList.add('active');
+  loadGorgias();
+}
+const gLabel = () => gCustom
+  ? `${new Date(gCustom.from).toLocaleDateString(undefined,{month:'short',day:'numeric'})}–${new Date(gCustom.to).toLocaleDateString(undefined,{month:'short',day:'numeric'})}`
+  : ({7:'7d',30:'30d',90:'3m',180:'6m',365:'1y'})[gDays] || gDays + 'd';
 async function loadGorgias() {
   const note = document.getElementById('gorgiasNote');
   try {
-    const g = await api('/api/gorgias/stats?days=' + gDays);
-    document.getElementById('gChartTitle').textContent = `Tickets created — last ${gLabel()}${g.bucket === 'week' ? ' (weekly)' : ''}`;
+    const g = await api('/api/gorgias/stats?' + (gCustom ? `from=${gCustom.from}&to=${gCustom.to}` : `days=${gDays}`));
+    document.getElementById('gChartTitle').textContent = `Tickets created — ${gCustom ? gLabel() : 'last ' + gLabel()}${g.bucket === 'week' ? ' (weekly)' : ''}`;
     const frt = g.avg_first_response_seconds != null ? (g.avg_first_response_seconds/3600).toFixed(1) + 'h' : '—';
     document.getElementById('gorgiasKpis').innerHTML = [
       {l:'Total tickets (all time)', v: g.total_tickets ?? (g.cached_total != null ? `${g.cached_total} synced` : '—')},

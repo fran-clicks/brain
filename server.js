@@ -1619,6 +1619,17 @@ app.get('/api/shopify/summary', async (_req, res) => {
       catch (e) { granted_scopes = `token error: ${e.message}`; }
     }
     if (!has) return res.json({ configured: !!conn, empty: true, sync: ss, granted_scopes });
+    // ---- filters: window (?days / ?from&to) + product / country / tag ----
+    const win = resolveWindow(_req.query);
+    const p = [win.start.toISOString(), win.end.toISOString()];
+    const cond = ['created_at >= $1', 'created_at < $2'];
+    const extra = []; // product/country/tag only (no date) — reused by all-time awaiting list
+    const { product, country, tag } = _req.query;
+    if (country) { p.push(country); const c = `country = $${p.length}`; cond.push(c); extra.push(c); }
+    if (tag) { p.push(tag); const c = `order_tags ? $${p.length}`; cond.push(c); extra.push(c); }
+    if (product) { p.push(product); const c = `EXISTS (SELECT 1 FROM jsonb_array_elements(items) it WHERE it->>'title' = $${p.length})`; cond.push(c); extra.push(c); }
+    const W = cond.join(' AND ');
+    const WX = extra.length ? extra.join(' AND ') : 'true';
     const [tot, countries, products, recent] = await Promise.all([
       pool.query(`SELECT count(*) FILTER (WHERE cancelled_at IS NULL)::int orders,
         round(sum(total_price) FILTER (WHERE cancelled_at IS NULL))::int revenue,
@@ -1627,32 +1638,49 @@ app.get('/api/shopify/summary', async (_req, res) => {
         count(*) FILTER (WHERE fulfillment_status='fulfilled' AND cancelled_at IS NULL)::int fulfilled,
         count(*) FILTER (WHERE fulfillment_status<>'fulfilled' AND cancelled_at IS NULL)::int unfulfilled,
         max(currency) currency
-        FROM orders_cache WHERE created_at >= now()-interval '30 days'`),
+        FROM orders_cache WHERE ${W}`, p),
       pool.query(`SELECT country, round(sum(total_price))::int revenue, count(*)::int orders
-        FROM orders_cache WHERE created_at >= now()-interval '30 days' AND cancelled_at IS NULL AND country <> ''
-        GROUP BY 1 ORDER BY 2 DESC LIMIT 6`),
+        FROM orders_cache WHERE ${W} AND cancelled_at IS NULL AND country <> ''
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 6`, p),
       pool.query(`SELECT it->>'title' product, sum(coalesce((it->>'qty')::int,0))::int qty
         FROM orders_cache, LATERAL jsonb_array_elements(items) it
-        WHERE created_at >= now()-interval '30 days' AND cancelled_at IS NULL
-        GROUP BY 1 ORDER BY 2 DESC LIMIT 6`),
+        WHERE ${W} AND cancelled_at IS NULL
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 6`, p),
       pool.query(`SELECT order_number, created_at::date d, country, total_price, currency, financial_status, fulfillment_status,
-        order_tags, (cancelled_at IS NOT NULL) cancelled FROM orders_cache ORDER BY created_at DESC LIMIT 12`)
+        order_tags, (cancelled_at IS NOT NULL) cancelled FROM orders_cache WHERE ${W} ORDER BY created_at DESC LIMIT 12`, p)
     ]);
     const orderTags = (await pool.query(
       `SELECT t.tag, count(*)::int c FROM orders_cache, LATERAL jsonb_array_elements_text(order_tags) t(tag)
-       WHERE created_at >= now()-interval '30 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 8`)).rows;
-    // fulfillment breakdown (30d) + orders still awaiting fulfillment, oldest first (actionable)
+       WHERE ${W} GROUP BY 1 ORDER BY 2 DESC LIMIT 8`, p)).rows;
+    // fulfillment breakdown + orders still awaiting fulfillment, oldest first (actionable)
     const fulfil = (await pool.query(
       `SELECT lower(coalesce(nullif(fulfillment_status,''),'unfulfilled')) status, count(*)::int c
-       FROM orders_cache WHERE created_at >= now()-interval '30 days' AND cancelled_at IS NULL
-       GROUP BY 1 ORDER BY 2 DESC`)).rows;
+       FROM orders_cache WHERE ${W} AND cancelled_at IS NULL
+       GROUP BY 1 ORDER BY 2 DESC`, p)).rows;
     const awaiting = (await pool.query(
       `SELECT order_number, created_at::date d, country, total_price, currency,
        floor(extract(epoch from now()-created_at)/86400)::int age_days
        FROM orders_cache
-       WHERE cancelled_at IS NULL AND fulfillment_status NOT IN ('fulfilled','restocked')
-       ORDER BY created_at ASC LIMIT 20`)).rows;
-    res.json({ configured: true, totals_30d: tot.rows[0], top_countries: countries.rows, top_products: products.rows, top_order_tags: orderTags, fulfillment: fulfil, awaiting, recent: recent.rows, sync: ss });
+       WHERE ${WX} AND cancelled_at IS NULL AND fulfillment_status NOT IN ('fulfilled','restocked')
+       ORDER BY created_at ASC LIMIT 20`, p)).rows;
+    // filter option lists (over last 365d, independent of active filters, so dropdowns stay stable)
+    const [optCountries, optTags, optProducts] = await Promise.all([
+      pool.query(`SELECT country, count(*)::int c FROM orders_cache
+        WHERE created_at >= now()-interval '365 days' AND country <> '' GROUP BY 1 ORDER BY 2 DESC LIMIT 100`),
+      pool.query(`SELECT t.tag, count(*)::int c FROM orders_cache, LATERAL jsonb_array_elements_text(order_tags) t(tag)
+        WHERE created_at >= now()-interval '365 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 100`),
+      pool.query(`SELECT it->>'title' product, sum(coalesce((it->>'qty')::int,0))::int qty
+        FROM orders_cache, LATERAL jsonb_array_elements(items) it
+        WHERE created_at >= now()-interval '365 days' AND it->>'title' <> ''
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 200`)
+    ]);
+    res.json({ configured: true, totals_30d: tot.rows[0], top_countries: countries.rows, top_products: products.rows,
+      top_order_tags: orderTags, fulfillment: fulfil, awaiting, recent: recent.rows, sync: ss,
+      days: win.days, custom: win.custom, from: p[0], to: p[1],
+      filters: { active: { product: product || null, country: country || null, tag: tag || null },
+        countries: optCountries.rows.map(r => r.country),
+        tags: optTags.rows.map(r => r.tag),
+        products: optProducts.rows.map(r => r.product) } });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1663,10 +1691,23 @@ app.post('/api/shopify/sync', async (_req, res) => {
 
 // ---------- overview stats (from local cache → any period) ----------
 const CANCEL_RX = 'cancel|refund|return|chargeback';
-async function overviewStats(days) {
-  days = Math.min(Math.max(parseInt(days) || 7, 1), 366);
-  const bucket = days <= 31 ? 'day' : 'week';
-  const params = [`${days} days`];
+// resolve a time window from query params: ?days=N (preset) or ?from=ISO&to=ISO (custom)
+function resolveWindow(query) {
+  const from = query.from ? new Date(query.from) : null;
+  const to = query.to ? new Date(query.to) : null;
+  if (from && to && !isNaN(from) && !isNaN(to) && from < to) {
+    const days = Math.max(1, Math.round((to - from) / 864e5));
+    return { start: from, end: to, days, bucket: days <= 31 ? 'day' : 'week', custom: true };
+  }
+  const days = Math.min(Math.max(parseInt(query.days) || 7, 1), 366);
+  return { start: new Date(Date.now() - days * 864e5), end: new Date(), days, bucket: days <= 31 ? 'day' : 'week', custom: false };
+}
+
+async function overviewStats(win) {
+  if (typeof win !== 'object') win = resolveWindow({ days: win }); // back-compat for callers passing days
+  const { bucket } = win;
+  const params = [win.start.toISOString(), win.end.toISOString()];
+  const days = win.days;
   const CATS = {
     cancel_refund: "subject ~* 'cancel|refund|chargeback' OR tags::text ~* 'cancel|refund|chargeback'",
     troubleshoot: "subject ~* 'trouble|not work|broken|defect|faulty|error|bug|stopped|repair' OR tags::text ~* 'troubleshoot|defect|bug'",
@@ -1679,21 +1720,21 @@ async function overviewStats(days) {
   // spam and trashed tickets are excluded everywhere to match Gorgias's "All" view / reporting
   const mkCount = (col, extra = '') =>
     `SELECT date_trunc('${bucket}', ${col})::date d, count(*)::int c FROM tickets_cache
-     WHERE ${col} >= now()-$1::interval AND NOT spam ${extra} GROUP BY 1 ORDER BY 1`;
+     WHERE ${col} >= $1 AND ${col} < $2 AND NOT spam ${extra} GROUP BY 1 ORDER BY 1`;
   const mkCats = (col, extra = '') =>
     `SELECT date_trunc('${bucket}', ${col})::date d, ${catSelects} FROM tickets_cache
-     WHERE ${col} >= now()-$1::interval AND NOT spam ${extra} GROUP BY 1 ORDER BY 1`;
+     WHERE ${col} >= $1 AND ${col} < $2 AND NOT spam ${extra} GROUP BY 1 ORDER BY 1`;
   const mkTags = (col, extra = '') =>
     `SELECT date_trunc('${bucket}', ${col})::date d, t.tag, count(*)::int c
      FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
-     WHERE ${col} >= now()-$1::interval AND NOT spam ${extra} GROUP BY 1, 2 ORDER BY 1, 3 DESC`;
+     WHERE ${col} >= $1 AND ${col} < $2 AND NOT spam ${extra} GROUP BY 1, 2 ORDER BY 1, 3 DESC`;
   // "tickets to solve" = open backlog at the END of each bucket: created by then and not yet closed by then
   const backlogQuery =
     `SELECT to_char(g.b::date,'YYYY-MM-DD') d,
        (SELECT count(*)::int FROM tickets_cache t
         WHERE NOT t.spam AND t.created_datetime < g.b + interval '1 ${bucket}'
           AND (t.closed_datetime IS NULL OR t.closed_datetime >= g.b + interval '1 ${bucket}')) c
-     FROM generate_series(date_trunc('${bucket}', now()-$1::interval), date_trunc('${bucket}', now()), interval '1 ${bucket}') g(b)
+     FROM generate_series(date_trunc('${bucket}', $1::timestamptz), date_trunc('${bucket}', $2::timestamptz), interval '1 ${bucket}') g(b)
      ORDER BY 1`;
   const [created, opened, closed,
          createdCats, openCats, closedCats,
@@ -1710,24 +1751,24 @@ async function overviewStats(days) {
     pool.query(mkTags('closed_datetime'), params),
     pool.query(`SELECT count(*)::int total,
                 count(*) FILTER (WHERE status='open')::int open,
-                count(*) FILTER (WHERE created_datetime >= now()-$1::interval)::int created,
-                count(*) FILTER (WHERE closed_datetime >= now()-$1::interval)::int closed,
-                count(*) FILTER (WHERE created_datetime >= now()-$1::interval AND (subject ~* '${CANCEL_RX}' OR tags::text ~* '${CANCEL_RX}'))::int cancel_refund
+                count(*) FILTER (WHERE created_datetime >= $1 AND created_datetime < $2)::int created,
+                count(*) FILTER (WHERE closed_datetime >= $1 AND closed_datetime < $2)::int closed,
+                count(*) FILTER (WHERE created_datetime >= $1 AND created_datetime < $2 AND (subject ~* '${CANCEL_RX}' OR tags::text ~* '${CANCEL_RX}'))::int cancel_refund
                 FROM tickets_cache WHERE NOT spam`, params),
     pool.query(`SELECT id, title, description, event_date, added_by, attachment_name FROM events
-                WHERE event_date >= (now()-$1::interval)::date AND event_date <= (now()+interval '30 days')::date
+                WHERE event_date >= $1::date AND event_date <= ($2::date + interval '30 days')
                 ORDER BY event_date`, params),
     pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)
   ]);
   const [salesSeries, cancelSeries, fulfilledSeries, salesTotals, shopifySt] = await Promise.all([
     pool.query(`SELECT date_trunc('${bucket}', created_at)::date d, count(*)::int orders, round(sum(total_price))::int revenue,
                 count(*) FILTER (WHERE financial_status IN ('refunded','partially_refunded'))::int refunded
-                FROM orders_cache WHERE created_at >= now()-$1::interval AND cancelled_at IS NULL GROUP BY 1 ORDER BY 1`, params),
+                FROM orders_cache WHERE created_at >= $1 AND created_at < $2 AND cancelled_at IS NULL GROUP BY 1 ORDER BY 1`, params),
     pool.query(`SELECT date_trunc('${bucket}', cancelled_at)::date d, count(*)::int c
-                FROM orders_cache WHERE cancelled_at >= now()-$1::interval GROUP BY 1 ORDER BY 1`, params),
+                FROM orders_cache WHERE cancelled_at >= $1 AND cancelled_at < $2 GROUP BY 1 ORDER BY 1`, params),
     pool.query(`SELECT date_trunc('${bucket}', created_at)::date d,
                 coalesce(sum((SELECT sum(coalesce((it->>'qty')::int,0)) FROM jsonb_array_elements(items) it)),0)::int units
-                FROM orders_cache WHERE created_at >= now()-$1::interval AND fulfillment_status='fulfilled' AND cancelled_at IS NULL
+                FROM orders_cache WHERE created_at >= $1 AND created_at < $2 AND fulfillment_status='fulfilled' AND cancelled_at IS NULL
                 GROUP BY 1 ORDER BY 1`, params),
     pool.query(`SELECT count(*) FILTER (WHERE cancelled_at IS NULL)::int orders,
                 round(sum(total_price) FILTER (WHERE cancelled_at IS NULL))::int revenue,
@@ -1735,15 +1776,15 @@ async function overviewStats(days) {
                 count(*) FILTER (WHERE financial_status IN ('refunded','partially_refunded'))::int refunded,
                 count(*) FILTER (WHERE fulfillment_status='fulfilled' AND cancelled_at IS NULL)::int delivered,
                 max(currency) currency
-                FROM orders_cache WHERE created_at >= now()-$1::interval`, params),
+                FROM orders_cache WHERE created_at >= $1 AND created_at < $2`, params),
     pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)
   ]);
   const hasSales = (await pool.query('SELECT 1 FROM orders_cache LIMIT 1')).rows.length > 0;
   const campaigns = (await pool.query(
     `SELECT klaviyo_id, name, channel, to_char(send_time::date,'YYYY-MM-DD') d, recipients, open_rate, click_rate, revenue
-     FROM campaigns_cache WHERE send_time >= now()-$1::interval AND send_time <= now() ORDER BY send_time`, params)).rows;
+     FROM campaigns_cache WHERE send_time >= $1 AND send_time <= $2 ORDER BY send_time`, params)).rows;
   return {
-    days, bucket,
+    days, bucket, custom: win.custom, from: params[0], to: params[1],
     tickets: {
       series: { created: created.rows, still_open: opened.rows, closed: closed.rows },
       breakdowns: {
@@ -1761,15 +1802,16 @@ async function overviewStats(days) {
   };
 }
 
-const overviewCache = new Map(); // days → {t, v}; cleared after every sync
+const overviewCache = new Map(); // key → {t, v}; cleared after every sync
 app.get('/api/stats/overview', async (req, res) => {
   try {
     maybeSync().catch(() => {}); // fire-and-forget, never blocks the response
-    const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 366);
-    const hit = overviewCache.get(days);
+    const win = resolveWindow(req.query);
+    const key = win.custom ? `${req.query.from}|${req.query.to}` : `d${win.days}`;
+    const hit = overviewCache.get(key);
     if (hit && Date.now() - hit.t < 5 * 60 * 1000) return res.json(hit.v); // cleared early whenever a sync lands
-    const v = await overviewStats(days);
-    overviewCache.set(days, { t: Date.now(), v });
+    const v = await overviewStats(win);
+    overviewCache.set(key, { t: Date.now(), v });
     res.json(v);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -1777,16 +1819,17 @@ app.get('/api/stats/overview', async (req, res) => {
 // Gorgias tab: synced-cache stats always; live extras (CSAT, FRT, all-time total) when the connector is available
 app.get('/api/gorgias/stats', async (req, res) => {
   const cfg = await getGorgiasConfig();
-  const days = Math.min(Math.max(parseInt(req.query.days) || 7, 1), 366);
-  const bucket = days <= 31 ? 'day' : 'week';
-  const out = { configured: !!cfg, days, bucket, fetched_at: new Date().toISOString(), errors: [] };
+  const win = resolveWindow(req.query);
+  const { bucket, days } = win;
+  const w = [win.start.toISOString(), win.end.toISOString()];
+  const out = { configured: !!cfg, days, bucket, custom: win.custom, fetched_at: new Date().toISOString(), errors: [] };
   try {
     const c = await pool.query(`SELECT
       count(*)::int cached_total,
       count(*) FILTER (WHERE status='open')::int open_total,
-      count(*) FILTER (WHERE created_datetime >= now()-$1::interval)::int created_period,
-      count(*) FILTER (WHERE closed_datetime >= now()-$1::interval)::int closed_period
-      FROM tickets_cache WHERE NOT spam`, [`${days} days`]);
+      count(*) FILTER (WHERE created_datetime >= $1 AND created_datetime < $2)::int created_period,
+      count(*) FILTER (WHERE closed_datetime >= $1 AND closed_datetime < $2)::int closed_period
+      FROM tickets_cache WHERE NOT spam`, w);
     Object.assign(out, {
       cached_total: c.rows[0].cached_total,
       open_total: c.rows[0].open_total,
@@ -1795,9 +1838,9 @@ app.get('/api/gorgias/stats', async (req, res) => {
     });
     const [perDay, perDayClosed] = await Promise.all([
       pool.query(`SELECT to_char(date_trunc('${bucket}', created_datetime)::date, 'YYYY-MM-DD') d, count(*)::int c FROM tickets_cache
-                  WHERE created_datetime >= now()-$1::interval AND NOT spam GROUP BY 1 ORDER BY 1`, [`${days} days`]),
+                  WHERE created_datetime >= $1 AND created_datetime < $2 AND NOT spam GROUP BY 1 ORDER BY 1`, w),
       pool.query(`SELECT to_char(date_trunc('${bucket}', closed_datetime)::date, 'YYYY-MM-DD') d, count(*)::int c FROM tickets_cache
-                  WHERE closed_datetime >= now()-$1::interval AND NOT spam GROUP BY 1 ORDER BY 1`, [`${days} days`])
+                  WHERE closed_datetime >= $1 AND closed_datetime < $2 AND NOT spam GROUP BY 1 ORDER BY 1`, w)
     ]);
     const daysMap = {}, closedMap = {};
     perDay.rows.forEach(r => { daysMap[r.d] = r.c; });
