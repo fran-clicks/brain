@@ -279,6 +279,20 @@ footer{color:rgba(16,17,20,.45)}
       <table id="gChannels"><thead><tr><th>Channel</th><th>Tickets</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
+  <div class="grid two">
+    <div class="card">
+      <h2>⏳ Oldest open tickets</h2>
+      <table id="gOldest"><thead><tr><th>Subject</th><th>Waiting</th><th>Channel</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>🔥 Difficult tickets <span style="font-weight:400;color:var(--muted);font-size:12px">· 10+ messages</span></h2>
+      <table id="gDifficult"><thead><tr><th>Subject</th><th>Messages</th><th>Status</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <div class="card" id="gRepeatCard" style="display:none">
+    <h2>🔁 Repeat customers <span style="font-weight:400;color:var(--muted);font-size:12px">· 90d · admins only</span></h2>
+    <table id="gRepeat"><thead><tr><th>Customer</th><th>Email</th><th>Tickets</th></tr></thead><tbody></tbody></table>
+  </div>
   <div class="card">
     <h2>Latest tickets</h2>
     <table id="gRecent"><thead><tr><th>Subject</th><th>Channel</th><th>Status</th><th>Date</th></tr></thead><tbody></tbody></table>
@@ -1281,6 +1295,20 @@ async function loadGorgias() {
       `<tr><td><span class="tag src">${esc(t.tag)}</span></td><td>${t.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
     document.querySelector('#gChannels tbody').innerHTML = (g.channels || []).map(c =>
       `<tr><td>${esc(c.channel)}</td><td>${c.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
+    document.querySelector('#gOldest tbody').innerHTML = (g.oldest_open || []).map(t =>
+      `<tr${t.age_days >= 4 ? ' style="background:rgba(220,38,38,.06)"' : ''}><td>${esc(t.subject || '(no subject)')}</td>
+       <td><b>${t.age_days}d</b>${t.age_days >= 4 ? ' ⚠️' : ''}</td><td>${esc(t.channel)}</td></tr>`).join('')
+      || '<tr><td colspan="3" class="empty">No open tickets 🎉</td></tr>';
+    document.querySelector('#gDifficult tbody').innerHTML = (g.difficult_tickets || []).map(t =>
+      `<tr><td>${esc(t.subject || '(no subject)')}</td><td><b>${t.messages_count}</b></td>
+       <td><span class="tag ${t.status === 'open' ? 'pending' : 'approved'}">${esc(t.status)}</span></td></tr>`).join('')
+      || '<tr><td colspan="3" class="empty">None with 10+ messages (or still backfilling message counts)</td></tr>';
+    if (g.repeat_customers) {
+      document.getElementById('gRepeatCard').style.display = 'block';
+      document.querySelector('#gRepeat tbody').innerHTML = g.repeat_customers.length ? g.repeat_customers.map(c =>
+        `<tr><td>${esc(c.customer_name || '—')}</td><td>${esc(c.customer_email)}</td><td><b>${c.tickets}</b></td></tr>`).join('')
+        : '<tr><td colspan="3" class="empty">No repeat contacters (or still backfilling)</td></tr>';
+    }
     document.querySelector('#gRecent tbody').innerHTML = (g.recent || []).map(t =>
       `<tr><td>${esc(t.subject || '(no subject)')}</td><td>${esc(t.channel)}</td>
        <td><span class="tag ${t.status === 'open' ? 'pending' : 'approved'}">${esc(t.status)}</span></td>

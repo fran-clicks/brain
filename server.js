@@ -148,6 +148,9 @@ async function initDb() {
       tags JSONB DEFAULT '[]', created_datetime TIMESTAMPTZ, closed_datetime TIMESTAMPTZ,
       updated_datetime TIMESTAMPTZ, synced_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS spam BOOLEAN DEFAULT false;
+    ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS messages_count INT;
+    ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS customer_email TEXT DEFAULT '';
+    ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS customer_name TEXT DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_tc_created ON tickets_cache (created_datetime);
     CREATE INDEX IF NOT EXISTS idx_tc_closed ON tickets_cache (closed_datetime);
     CREATE TABLE IF NOT EXISTS events (
@@ -653,13 +656,16 @@ const BACKFILL_HORIZON_DAYS = 400; // keep ~13 months of history
 
 async function upsertTicket(x) {
   await pool.query(
-    `INSERT INTO tickets_cache (gorgias_id, status, subject, channel, tags, created_datetime, closed_datetime, updated_datetime, spam, synced_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
+    `INSERT INTO tickets_cache (gorgias_id, status, subject, channel, tags, created_datetime, closed_datetime, updated_datetime, spam, messages_count, customer_email, customer_name, synced_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
      ON CONFLICT (gorgias_id) DO UPDATE SET status=$2, subject=$3, channel=$4, tags=$5,
-       created_datetime=$6, closed_datetime=$7, updated_datetime=$8, spam=$9, synced_at=now()`,
+       created_datetime=$6, closed_datetime=$7, updated_datetime=$8, spam=$9,
+       messages_count=$10, customer_email=$11, customer_name=$12, synced_at=now()`,
     [x.id, x.status || '', (x.subject || '').slice(0, 500), x.channel || '',
      JSON.stringify((x.tags || []).map(g => g?.name).filter(Boolean)),
-     x.created_datetime || null, x.closed_datetime || null, x.updated_datetime || null, !!x.spam]);
+     x.created_datetime || null, x.closed_datetime || null, x.updated_datetime || null, !!x.spam,
+     Number.isFinite(x.messages_count) ? x.messages_count : null,
+     (x.customer?.email || '').slice(0, 200), (x.customer?.name || '').slice(0, 200)]);
 }
 
 // re-verify every ticket the cache still thinks is open against Gorgias, in batches of 100.
@@ -700,8 +706,8 @@ async function syncGorgias(maxPages = 8) {
   if (!cfg) return { configured: false };
   syncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)).rows[0]?.v || {};
-  if (st.spam_version !== 1) { // one-time re-backfill to populate the spam flag on existing rows
-    st.spam_version = 1; st.backfill_cursor = null; st.backfill_done = false;
+  if (st.data_version !== 2) { // re-backfill to populate spam + messages_count + customer on existing rows
+    st.data_version = 2; st.backfill_cursor = null; st.backfill_done = false;
   }
   let pages = 0, upserts = 0, lastError = null;
   const horizon = Date.now() - BACKFILL_HORIZON_DAYS * 864e5;
@@ -709,17 +715,7 @@ async function syncGorgias(maxPages = 8) {
   const fetchPage = async (cursor) =>
     gorgiasRequest(cfg, `/api/tickets?limit=100&order_by=updated_datetime:desc&trashed=false${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
   const upsertRows = async (rows) => {
-    for (const x of rows) {
-      await pool.query(
-        `INSERT INTO tickets_cache (gorgias_id, status, subject, channel, tags, created_datetime, closed_datetime, updated_datetime, spam, synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
-         ON CONFLICT (gorgias_id) DO UPDATE SET status=$2, subject=$3, channel=$4, tags=$5,
-           created_datetime=$6, closed_datetime=$7, updated_datetime=$8, spam=$9, synced_at=now()`,
-        [x.id, x.status || '', (x.subject || '').slice(0, 500), x.channel || '',
-         JSON.stringify((x.tags || []).map(g => g?.name).filter(Boolean)),
-         x.created_datetime || null, x.closed_datetime || null, x.updated_datetime || null, !!x.spam]);
-      upserts++;
-    }
+    for (const x of rows) { await upsertTicket(x); upserts++; }
   };
 
   try {
@@ -1689,6 +1685,22 @@ app.get('/api/gorgias/stats', async (req, res) => {
     out.top_tags = tags.rows;
     out.channels = channels.rows;
     out.recent = recent.rows;
+    const [difficult, oldest] = await Promise.all([
+      pool.query(`SELECT subject, messages_count, status, created_datetime::date d FROM tickets_cache
+                  WHERE NOT spam AND messages_count >= 10 ORDER BY messages_count DESC, created_datetime DESC LIMIT 10`),
+      pool.query(`SELECT subject, channel, created_datetime::date d,
+                  floor(extract(epoch from now()-created_datetime)/86400)::int age_days FROM tickets_cache
+                  WHERE status='open' AND NOT spam ORDER BY created_datetime ASC LIMIT 5`)
+    ]);
+    out.difficult_tickets = difficult.rows;
+    out.oldest_open = oldest.rows;
+    if (await isAdminReq(req)) { // customer emails are PII → admins only
+      const rc = await pool.query(
+        `SELECT customer_email, customer_name, count(*)::int tickets FROM tickets_cache
+         WHERE NOT spam AND customer_email <> '' AND created_datetime >= now()-interval '90 days'
+         GROUP BY 1,2 HAVING count(*) > 1 ORDER BY tickets DESC LIMIT 10`);
+      out.repeat_customers = rc.rows;
+    }
   } catch (e) { out.errors.push(String(e.message)); }
   if (cfg) {
     try {
