@@ -321,7 +321,7 @@ footer{color:rgba(16,17,20,.45)}
   <div class="grid kpis" id="kvKpis"></div>
   <div class="card" style="margin-top:14px">
     <h2>Recent campaigns <button class="btn" style="float:right;margin:0;padding:5px 12px" id="kvSyncBtn" onclick="kvSync()">🔄 Sync now</button></h2>
-    <table id="kvTable"><thead><tr><th>Campaign</th><th>Channel</th><th>Sent</th><th>Recipients</th><th>Opens</th><th>Clicks</th><th>Attributed revenue</th><th>Tickets created</th><th>Tickets closed</th></tr></thead><tbody></tbody></table>
+    <table id="kvTable"><thead><tr><th>Campaign</th><th>Channel</th><th>Sent</th><th>Recipients</th><th>Opens</th><th>Clicks</th><th>Unsub</th><th>Attributed revenue</th><th>Tickets created</th><th>Tickets closed</th></tr></thead><tbody></tbody></table>
     <div class="note" id="kvNote">Loading Klaviyo data…</div>
   </div>
 </div>
@@ -1187,22 +1187,26 @@ async function loadKlaviyo() {
     const s = await api('/api/klaviyo/summary');
     if (!s.configured) { note.textContent = 'Klaviyo is not connected — an admin can add it on the ＋ page.'; return; }
     const t = s.totals_30d || {};
+    const rs = s.revenue_share;
     document.getElementById('kvKpis').innerHTML = [
       {l:'Campaigns sent (30d)', v: t.campaigns ?? '—'},
       {l:'Avg open rate (30d)', v: t.avg_open_pct != null ? t.avg_open_pct + '%' : '—'},
       {l:'Avg click rate (30d)', v: t.avg_click_pct != null ? t.avg_click_pct + '%' : '—'},
-      {l:'Attributed revenue (30d)', v: (t.revenue ?? 0).toLocaleString()}
+      {l:'Attributed revenue (30d)', v: (t.revenue ?? 0).toLocaleString()},
+      {l:'Email share of revenue (30d)', v: rs ? rs.pct + '%' : '—'}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    const unsub = c => c.unsub_rate == null ? '—' : (Math.round(c.unsub_rate*1000)/10) + '%';
     document.querySelector('#kvTable tbody').innerHTML = (s.recent || []).length ? s.recent.map(c =>
       `<tr><td><a href="#" onclick="openMail('${esc(c.klaviyo_id)}');return false"><b>${esc(c.name)}</b></a></td><td><span class="tag src">${esc(c.channel)}</span></td>
        <td>${esc(String(c.send_time).slice(0,10))}</td>
        <td>${c.recipients != null ? c.recipients.toLocaleString() : '—'}</td>
        <td>${c.open_rate != null ? Math.round(c.open_rate*100) + '%' : '—'}</td>
        <td>${c.click_rate != null ? Math.round(c.click_rate*100) + '%' : '—'}</td>
+       <td${c.unsub_rate != null && c.unsub_rate >= 0.005 ? ' style="color:var(--red);font-weight:700"' : ''}>${unsub(c)}${c.unsub_rate != null && c.unsub_rate >= 0.005 ? ' ⚠️' : ''}</td>
        <td>${c.revenue != null ? Math.round(+c.revenue).toLocaleString() : '—'}</td>
        <td>${c.tickets_created ?? '—'}</td>
        <td>${c.tickets_closed ?? '—'}</td></tr>`).join('')
-      : '<tr><td colspan="9" class="empty">No campaigns synced yet — hit Sync now</td></tr>';
+      : '<tr><td colspan="10" class="empty">No campaigns synced yet — hit Sync now</td></tr>';
     note.textContent = (s.sync
       ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · refreshes hourly${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''} · sends appear as ✉️ on the Overview chart`
       : '')

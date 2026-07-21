@@ -169,6 +169,9 @@ async function initDb() {
       klaviyo_id TEXT PRIMARY KEY, name TEXT DEFAULT '', channel TEXT DEFAULT '', status TEXT DEFAULT '',
       send_time TIMESTAMPTZ, recipients INT, opens INT, open_rate DOUBLE PRECISION,
       clicks INT, click_rate DOUBLE PRECISION, revenue NUMERIC, synced_at TIMESTAMPTZ DEFAULT now());
+    ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS unsub_rate DOUBLE PRECISION;
+    ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS spam_rate DOUBLE PRECISION;
+    ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS bounce_rate DOUBLE PRECISION;
     ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS subject TEXT;
     ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS preview TEXT;
     ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS from_email TEXT;
@@ -1063,7 +1066,8 @@ async function syncKlaviyo() {
     }
     // performance stats (best effort — requires the conversion metric).
     if (st.conversion_metric_id) {
-      const stats = ['recipients', 'opens', 'open_rate', 'clicks', 'click_rate', 'conversion_value'];
+      const stats = ['recipients', 'opens', 'open_rate', 'clicks', 'click_rate', 'conversion_value',
+                     'unsubscribe_rate', 'spam_complaint_rate', 'bounce_rate'];
       const applyResults = async (results) => {
         // group_by default is campaign_id+campaign_message_id+send_channel, so a campaign can span
         // several rows (A/B variations, multi-message) — accumulate per campaign_id.
@@ -1073,16 +1077,17 @@ async function syncKlaviyo() {
           const id = row.groupings?.campaign_id; if (!id) continue;
           const s = row.statistics || {};
           const rec = s.recipients || 0;
-          const a = byCampaign[id] || (byCampaign[id] = { recipients: 0, opens: 0, clicks: 0, revenue: 0, orWeighted: 0, crWeighted: 0 });
+          const a = byCampaign[id] || (byCampaign[id] = { recipients: 0, opens: 0, clicks: 0, revenue: 0, orW: 0, crW: 0, unsW: 0, spamW: 0, bncW: 0 });
           a.recipients += rec; a.opens += s.opens || 0; a.clicks += s.clicks || 0; a.revenue += s.conversion_value || 0;
-          a.orWeighted += (s.open_rate || 0) * rec; a.crWeighted += (s.click_rate || 0) * rec;
+          a.orW += (s.open_rate || 0) * rec; a.crW += (s.click_rate || 0) * rec;
+          a.unsW += (s.unsubscribe_rate || 0) * rec; a.spamW += (s.spam_complaint_rate || 0) * rec; a.bncW += (s.bounce_rate || 0) * rec;
         }
         for (const [id, a] of Object.entries(byCampaign)) {
-          const openRate = a.recipients ? a.orWeighted / a.recipients : null;
-          const clickRate = a.recipients ? a.crWeighted / a.recipients : null;
+          const w = (x) => a.recipients ? x / a.recipients : null;
           await pool.query(
-            `UPDATE campaigns_cache SET recipients=$2, opens=$3, open_rate=$4, clicks=$5, click_rate=$6, revenue=$7, synced_at=now() WHERE klaviyo_id=$1`,
-            [id, a.recipients, a.opens, openRate, a.clicks, clickRate, a.revenue]);
+            `UPDATE campaigns_cache SET recipients=$2, opens=$3, open_rate=$4, clicks=$5, click_rate=$6, revenue=$7,
+               unsub_rate=$8, spam_rate=$9, bounce_rate=$10, synced_at=now() WHERE klaviyo_id=$1`,
+            [id, a.recipients, a.opens, w(a.orW), a.clicks, w(a.crW), a.revenue, w(a.unsW), w(a.spamW), w(a.bncW)]);
           statsApplied++;
         }
         return Object.keys(byCampaign);
@@ -1142,7 +1147,7 @@ app.get('/api/klaviyo/summary', async (_req, res) => {
       round(avg(click_rate) FILTER (WHERE click_rate IS NOT NULL) * 100)::int avg_click_pct,
       round(coalesce(sum(revenue),0))::int revenue
       FROM campaigns_cache WHERE send_time >= now()-interval '30 days'`),
-    pool.query(`SELECT c.klaviyo_id, c.name, c.channel, c.status, c.send_time, c.recipients, c.open_rate, c.click_rate, c.revenue,
+    pool.query(`SELECT c.klaviyo_id, c.name, c.channel, c.status, c.send_time, c.recipients, c.open_rate, c.click_rate, c.revenue, c.unsub_rate,
       CASE WHEN length(coalesce(c.subject,'')) >= 6 THEN
         (SELECT count(*)::int FROM tickets_cache t
          WHERE strpos(lower(t.subject), lower(c.subject)) > 0
@@ -1156,7 +1161,15 @@ app.get('/api/klaviyo/summary', async (_req, res) => {
       END tickets_closed
       FROM campaigns_cache c WHERE c.send_time IS NOT NULL ORDER BY c.send_time DESC LIMIT 20`)
   ]);
-  res.json({ configured: !!conn, totals_30d: totals.rows[0], recent: recent.rows, sync: ss });
+  // email's share of total revenue (Klaviyo attributed ÷ Shopify revenue, 30d)
+  let revenue_share = null;
+  try {
+    const kv = totals.rows[0]?.revenue || 0;
+    const shop = (await pool.query(`SELECT round(coalesce(sum(total_price),0))::int r FROM orders_cache
+      WHERE cancelled_at IS NULL AND created_at >= now()-interval '30 days'`)).rows[0]?.r || 0;
+    if (shop > 0) revenue_share = { klaviyo: kv, shopify: shop, pct: Math.round(kv / shop * 1000) / 10 };
+  } catch {}
+  res.json({ configured: !!conn, totals_30d: totals.rows[0], recent: recent.rows, revenue_share, sync: ss });
 });
 app.get('/api/klaviyo/campaign/:id', async (req, res) => {
   const { rows } = await pool.query(
