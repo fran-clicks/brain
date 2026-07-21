@@ -135,19 +135,22 @@ a{color:#8a6800;font-weight:600}
 .msg.user{background:var(--ink);color:#fff}
 .msg.assistant{background:rgba(255,255,255,.7);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 footer{color:rgba(16,17,20,.45)}
-#chartLoading{
+#chartLoading, .chart-loading{
   display:none;position:absolute;inset:0;z-index:5;
   align-items:center;justify-content:center;gap:10px;flex-direction:column;
   background:rgba(255,255,255,.45);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
   border-radius:12px;font-size:13px;font-weight:600;color:var(--muted);
 }
-#chartLoading.on{display:flex}
-#chartLoading .spin{
+#chartLoading.on, .chart-loading.on{display:flex}
+#chartLoading .spin, .chart-loading .spin, .updating-pill .spin{
   width:34px;height:34px;border-radius:50%;
   border:4px solid rgba(255,200,0,.3);border-top-color:var(--yellow-deep);
   animation:cbspin .8s linear infinite;
 }
 @keyframes cbspin{to{transform:rotate(360deg)}}
+.updating-pill{display:none;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--muted)}
+.updating-pill.on{display:inline-flex}
+.updating-pill .spin{width:16px;height:16px;border-width:3px}
 </style>
 </head>
 <body>
@@ -256,6 +259,7 @@ footer{color:rgba(16,17,20,.45)}
       <select id="shTag" style="width:auto"><option value="">All tags</option></select>
     </div>
     <button class="btn" style="margin:0;padding:8px 14px" onclick="clearShopFilters()">Clear</button>
+    <span class="updating-pill" id="shopUpdating"><div class="spin"></div>Updating…</span>
   </div>
   <div class="grid kpis" id="shopKpis" style="margin-top:14px"></div>
   <div class="grid two" style="margin-top:14px">
@@ -305,7 +309,7 @@ footer{color:rgba(16,17,20,.45)}
   <div class="grid kpis" id="gorgiasKpis"></div>
   <div class="card" style="margin-top:14px">
     <h2 id="gChartTitle">Tickets created</h2>
-    <div class="chart-wrap"><canvas id="gorgiasChart"></canvas></div>
+    <div class="chart-wrap"><canvas id="gorgiasChart"></canvas><div class="chart-loading" id="gLoading"><div class="spin"></div><span>Loading…</span></div></div>
     <div class="note" id="gorgiasNote">Loading Gorgias data…</div>
   </div>
   <div class="grid two">
@@ -1138,6 +1142,7 @@ function fillSelect(id, values) { // preserve current selection, refresh options
 }
 async function loadShopify() {
   const note = document.getElementById('shopNote');
+  document.getElementById('shopUpdating').classList.add('on');
   try {
     const qs = new URLSearchParams();
     if (shCustom) { qs.set('from', shCustom.from); qs.set('to', shCustom.to); } else qs.set('days', shDays);
@@ -1204,6 +1209,7 @@ async function loadShopify() {
         + (s.sync.backfill_done ? '' : ' · ⏳ history backfill in progress') + (s.sync.last_error ? ` · ⚠️ ${s.sync.last_error}` : '')
       : '';
   } catch (e) { note.textContent = 'Shopify error: ' + e.message; }
+  finally { document.getElementById('shopUpdating').classList.remove('on'); }
 }
 let stockItems = [];
 function renderStockTable() {
@@ -1457,6 +1463,7 @@ const gLabel = () => gCustom
   : ({7:'7d',30:'30d',90:'3m',180:'6m',365:'1y'})[gDays] || gDays + 'd';
 async function loadGorgias() {
   const note = document.getElementById('gorgiasNote');
+  document.getElementById('gLoading').classList.add('on');
   try {
     const g = await api('/api/gorgias/stats?' + (gCustom ? `from=${gCustom.from}&to=${gCustom.to}` : `days=${gDays}`));
     document.getElementById('gChartTitle').textContent = `Tickets created — ${gCustom ? gLabel() : 'last ' + gLabel()}${g.bucket === 'week' ? ' (weekly)' : ''}`;
@@ -1510,6 +1517,7 @@ async function loadGorgias() {
        <td><span class="tag ${t.status === 'open' ? 'pending' : 'approved'}">${esc(t.status)}</span></td>
        <td>${esc(String(t.d).slice(0,10))}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">—</td></tr>';
   } catch (e) { note.textContent = 'Gorgias error: ' + e.message; }
+  finally { document.getElementById('gLoading').classList.remove('on'); }
 }
 
 // ---------- knowledge bases ----------
