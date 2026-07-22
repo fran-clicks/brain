@@ -70,6 +70,23 @@ app.post('/api/auth/setup', async (req, res) => {
   res.json({ ok: true, email: em });
 });
 
+// Reset an EXISTING member's password. Gated by the same admin-held code as setup;
+// only works for an email already on the member list (never creates users).
+app.post('/api/auth/reset', async (req, res) => {
+  const { email, password, invite_code } = req.body || {};
+  const invite = process.env.ADMIN_PASSWORD || process.env.DASHBOARD_PASSWORD;
+  if (!invite) return res.status(400).json({ error: 'No ADMIN_PASSWORD set on the server — set it in Render → Environment first.' });
+  if (invite_code !== invite) return res.status(403).json({ error: 'Wrong reset code (ask an admin).' });
+  const em = String(email || '').toLowerCase().trim();
+  const u = (await pool.query('SELECT * FROM users WHERE email=$1', [em])).rows[0];
+  if (!u) return res.status(403).json({ error: 'This email is not on the member list.' });
+  if (String(password || '').length < 8) return res.status(400).json({ error: 'New password must be at least 8 characters.' });
+  const salt = crypto.randomBytes(16).toString('hex');
+  await pool.query('UPDATE users SET pass_hash=$1 WHERE email=$2', [`${salt}:${hashPw(password, salt)}`, em]);
+  setSessionCookie(res, em);
+  res.json({ ok: true, email: em });
+});
+
 app.post('/api/auth/login', async (req, res) => {
   const em = String(req.body?.email || '').toLowerCase().trim();
   const u = (await pool.query('SELECT * FROM users WHERE email=$1', [em])).rows[0];

@@ -45,36 +45,47 @@ footer{margin-top:16px;font-size:11px;color:var(--muted);text-align:center}
   <h1>🧠 clicks <span>brain</span></h1>
   <p id="mode-label">Sign in with your member account.</p>
   <label>Email</label><input id="email" type="email" autocomplete="username" placeholder="you@clicks.tech">
-  <label>Password</label><input id="password" type="password" autocomplete="current-password">
+  <label id="pwLabel">Password</label><input id="password" type="password" autocomplete="current-password">
   <div id="setupFields">
-    <label>Invite code (ask an admin)</label><input id="invite" type="password" autocomplete="off">
+    <label id="inviteLabel">Invite code (ask an admin)</label><input id="invite" type="password" autocomplete="off">
   </div>
   <button onclick="go()" id="goBtn">Sign in</button>
   <div class="err" id="err"></div>
-  <div class="toggle"><a onclick="toggleMode()" id="toggleLink">First time? Set your password</a></div>
+  <div class="toggle"><a onclick="setMode('setup')" id="toggleLink">First time? Set your password</a></div>
+  <div class="toggle"><a onclick="setMode('reset')" id="resetLink">Forgot password? Reset it</a></div>
   <footer>internal use only · credentials are never shared with or by the brain</footer>
 </div>
 <script>
-let setup = false;
-function toggleMode() {
-  setup = !setup;
-  document.getElementById('setupFields').style.display = setup ? 'block' : 'none';
-  document.getElementById('goBtn').textContent = setup ? 'Set password & sign in' : 'Sign in';
-  document.getElementById('mode-label').textContent = setup
+let mode = 'login'; // 'login' | 'setup' | 'reset'
+function setMode(m) {
+  mode = mode === m ? 'login' : m; // clicking the active link toggles back to sign in
+  const el = id => document.getElementById(id);
+  const needsCode = mode === 'setup' || mode === 'reset';
+  el('setupFields').style.display = needsCode ? 'block' : 'none';
+  el('inviteLabel').textContent = mode === 'reset' ? 'Reset code (ask an admin)' : 'Invite code (ask an admin)';
+  el('pwLabel').textContent = mode === 'login' ? 'Password' : 'New password';
+  el('password').setAttribute('autocomplete', mode === 'login' ? 'current-password' : 'new-password');
+  el('goBtn').textContent = mode === 'setup' ? 'Set password & sign in'
+    : mode === 'reset' ? 'Reset password & sign in' : 'Sign in';
+  el('mode-label').textContent = mode === 'setup'
     ? 'First login: choose a password (min 8 chars). You need the invite code from an admin.'
-    : 'Sign in with your member account.';
-  document.getElementById('toggleLink').textContent = setup ? '← Back to sign in' : 'First time? Set your password';
-  document.getElementById('err').textContent = '';
+    : mode === 'reset'
+      ? 'Reset the password for an existing member. You need the reset code from an admin.'
+      : 'Sign in with your member account.';
+  el('toggleLink').textContent = mode === 'setup' ? '← Back to sign in' : 'First time? Set your password';
+  el('resetLink').textContent = mode === 'reset' ? '← Back to sign in' : 'Forgot password? Reset it';
+  el('err').textContent = '';
 }
 async function go() {
   const el = id => document.getElementById(id);
   el('err').textContent = '';
+  const path = mode === 'setup' ? '/api/auth/setup' : mode === 'reset' ? '/api/auth/reset' : '/api/auth/login';
   try {
-    const r = await fetch(setup ? '/api/auth/setup' : '/api/auth/login', {
+    const r = await fetch(path, {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
         email: el('email').value.trim(), password: el('password').value,
-        ...(setup ? { invite_code: el('invite').value } : {})
+        ...(mode === 'login' ? {} : { invite_code: el('invite').value })
       })
     });
     const j = await r.json();
