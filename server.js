@@ -1703,14 +1703,14 @@ app.get('/api/shopify/summary', async (_req, res) => {
     // "awaiting" = genuinely actionable open orders. Exclude cancelled, archived (closed),
     // refunded/voided, and anything older than our sync horizon (data we can't keep fresh → likely a stale artifact).
     const awaiting = (await pool.query(
-      `SELECT order_number, created_at::date d, country, total_price, currency,
+      `SELECT shopify_id, order_number, created_at::date d, country, total_price, currency, financial_status, fulfillment_status,
        floor(extract(epoch from now()-created_at)/86400)::int age_days
        FROM orders_cache
        WHERE ${WX} AND cancelled_at IS NULL AND archived_at IS NULL
          AND financial_status NOT IN ('refunded','voided')
          AND fulfillment_status NOT IN ('fulfilled','restocked')
          AND created_at >= now() - interval '${BACKFILL_HORIZON_DAYS} days'
-       ORDER BY created_at ASC LIMIT 20`, xp)).rows;
+       ORDER BY created_at ASC LIMIT 30`, xp)).rows;
     // filter option lists (over last 365d, independent of active filters, so dropdowns stay stable)
     const [optCountries, optTags, optProducts] = await Promise.all([
       pool.query(`SELECT country, count(*)::int c FROM orders_cache
@@ -1722,8 +1722,9 @@ app.get('/api/shopify/summary', async (_req, res) => {
         WHERE created_at >= now()-interval '365 days' AND it->>'title' <> ''
         GROUP BY 1 ORDER BY 2 DESC LIMIT 200`)
     ]);
+    const adminBase = conn?.config?.store_domain ? `https://${conn.config.store_domain}/admin/orders/` : null;
     res.json({ configured: true, totals_30d: tot.rows[0], top_countries: countries.rows, top_products: products.rows,
-      top_order_tags: orderTags, fulfillment: fulfil, awaiting, recent: recent.rows, sync: ss,
+      top_order_tags: orderTags, fulfillment: fulfil, awaiting, recent: recent.rows, sync: ss, admin_base: adminBase,
       days: win.days, custom: win.custom, from: p[0], to: p[1],
       filters: { active: { product: product || null, country: country || null, tag: tag || null },
         countries: optCountries.rows.map(r => r.country),

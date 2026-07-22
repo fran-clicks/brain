@@ -317,8 +317,8 @@ footer{color:rgba(16,17,20,.45)}
     </div>
   </div>
   <div class="card">
-    <h2>📦 Awaiting fulfillment <span style="font-weight:400;color:var(--muted);font-size:12px">· oldest first · excludes archived</span></h2>
-    <table id="shopAwaiting"><thead><tr><th>Order</th><th>Placed</th><th>Waiting</th><th>Country</th><th>Total</th></tr></thead><tbody></tbody></table>
+    <h2>📦 Awaiting fulfillment <span style="font-weight:400;color:var(--muted);font-size:12px">· oldest first · excludes cancelled, archived, refunded</span></h2>
+    <table id="shopAwaiting"><thead><tr><th>Order</th><th>Placed</th><th>Waiting</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th></tr></thead><tbody></tbody></table>
     <div class="note" id="shopAwaitNote"></div>
   </div>
   <div class="card">
@@ -1246,14 +1246,19 @@ async function loadShopify() {
     document.querySelector('#shopFulfil tbody').innerHTML = (s.fulfillment || []).map(f =>
       `<tr><td><span class="tag ${fulTag(f.status)}">${esc(f.status)}</span></td><td>${f.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
     const aw = s.awaiting || [];
-    document.querySelector('#shopAwaiting tbody').innerHTML = aw.length ? aw.map(o =>
-      `<tr${o.age_days >= 4 ? ' style="background:rgba(220,38,38,.06)"' : ''}><td><b>${esc(o.order_number)}</b></td>
+    const awBase = s.admin_base;
+    document.querySelector('#shopAwaiting tbody').innerHTML = aw.length ? aw.map(o => {
+      const num = awBase ? `<a href="${awBase}${o.shopify_id}" target="_blank"><b>${esc(o.order_number)}</b></a>` : `<b>${esc(o.order_number)}</b>`;
+      return `<tr${o.age_days >= 4 ? ' style="background:rgba(220,38,38,.06)"' : ''}><td>${num}</td>
        <td>${esc(String(o.d).slice(0,10))}</td>
        <td><b>${o.age_days}d</b>${o.age_days >= 4 ? ' ⚠️' : ''}</td>
-       <td>${esc(o.country)}</td><td>${(+o.total_price).toLocaleString()} ${esc(o.currency)}</td></tr>`).join('')
-      : '<tr><td colspan="5" class="empty">Nothing awaiting fulfillment 🎉</td></tr>';
+       <td>${esc(o.country)}</td><td>${(+o.total_price).toLocaleString()} ${esc(o.currency)}</td>
+       <td><span class="tag ${o.financial_status === 'paid' ? 'approved' : 'pending'}">${esc(o.financial_status || '—')}</span></td>
+       <td><span class="tag pending">${esc(o.fulfillment_status || 'unfulfilled')}</span></td></tr>`;
+    }).join('')
+      : '<tr><td colspan="7" class="empty">Nothing awaiting fulfillment 🎉</td></tr>';
     document.getElementById('shopAwaitNote').textContent = aw.length
-      ? `${aw.length} unfulfilled order${aw.length > 1 ? 's' : ''} shown (oldest first) · 4+ days highlighted`
+      ? `${aw.length} order${aw.length > 1 ? 's' : ''} shown (oldest first) · 4+ days highlighted · click an order to open it in Shopify · excludes cancelled/archived/refunded and orders older than ${Math.round(400/30)} months`
       : '';
     document.querySelector('#shopRecent tbody').innerHTML = s.recent.map(o =>
       `<tr${o.cancelled ? ' style="opacity:.5"' : ''}><td><b>${esc(o.order_number)}</b>${o.cancelled ? ' <span class="tag src">cancelled</span>' : ''}</td>
