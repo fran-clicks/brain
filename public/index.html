@@ -291,11 +291,6 @@ footer{color:rgba(16,17,20,.45)}
     </div>
   </div>
   <div class="card">
-    <h2>📦 Awaiting fulfillment <span style="font-weight:400;color:var(--muted);font-size:12px">· oldest first</span></h2>
-    <table id="shopAwaiting"><thead><tr><th>Order</th><th>Placed</th><th>Waiting</th><th>Country</th><th>Total</th></tr></thead><tbody></tbody></table>
-    <div class="note" id="shopAwaitNote"></div>
-  </div>
-  <div class="card">
     <h2>🚚 Fulfilled by day <span style="font-weight:400;color:var(--muted);font-size:12px">· by actual fulfillment date, not order date</span></h2>
     <div class="note" style="margin-top:0">Counts each order on the day its fulfillment actually happened (Shopify's fulfillment date), so pre-orders shipped later don't inflate the order date. Pick a day to list the exact orders and open them in Shopify.</div>
     <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:10px 0">
@@ -320,6 +315,11 @@ footer{color:rgba(16,17,20,.45)}
       <div class="note" id="fulDayNote" style="margin-top:0"></div>
       <table id="shopFulOrders"><thead><tr><th>Order</th><th>Placed</th><th>Fulfilled</th><th>Lag</th><th>Country</th><th>Total</th><th>Items</th></tr></thead><tbody></tbody></table>
     </div>
+  </div>
+  <div class="card">
+    <h2>📦 Awaiting fulfillment <span style="font-weight:400;color:var(--muted);font-size:12px">· oldest first · excludes archived</span></h2>
+    <table id="shopAwaiting"><thead><tr><th>Order</th><th>Placed</th><th>Waiting</th><th>Country</th><th>Total</th></tr></thead><tbody></tbody></table>
+    <div class="note" id="shopAwaitNote"></div>
   </div>
   <div class="card">
     <h2>Recent orders</h2>

@@ -214,6 +214,7 @@ async function initDb() {
       items JSONB DEFAULT '[]', updated_at TIMESTAMPTZ, synced_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS order_tags JSONB DEFAULT '[]';
     ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS fulfilled_at TIMESTAMPTZ;
+    ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
     CREATE INDEX IF NOT EXISTS idx_oc_created ON orders_cache (created_at);
     CREATE INDEX IF NOT EXISTS idx_oc_fulfilled ON orders_cache (fulfilled_at);
     CREATE TABLE IF NOT EXISTS product_images (
@@ -1524,7 +1525,7 @@ query Orders($cursor: String, $q: String, $sortKey: OrderSortKeys!) {
   orders(first: 50, after: $cursor, query: $q, sortKey: $sortKey, reverse: true) {
     pageInfo { hasNextPage endCursor }
     nodes {
-      legacyResourceId name createdAt updatedAt cancelledAt tags
+      legacyResourceId name createdAt updatedAt cancelledAt closedAt tags
       currencyCode
       totalPriceSet { shopMoney { amount } }
       displayFinancialStatus displayFulfillmentStatus
@@ -1541,6 +1542,7 @@ function normalizeOrder(n) {
     name: n.name || '',
     created_at: n.createdAt || null,
     cancelled_at: n.cancelledAt || null,
+    archived_at: n.closedAt || null, // Shopify "archived" = order closed
     updated_at: n.updatedAt || null,
     currency: n.currencyCode || '',
     total_price: n.totalPriceSet?.shopMoney?.amount || 0,
@@ -1574,8 +1576,8 @@ async function syncShopify(maxPages = 8) {
   const cfg = conn.config;
   shopifySyncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || {};
-  if (st.engine !== 'graphql-v3') { // v3: re-backfill to pick up fulfillment dates (and order tags)
-    st.engine = 'graphql-v3'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
+  if (st.engine !== 'graphql-v4') { // v4: re-backfill to pick up archived (closedAt); v3 added fulfillment dates
+    st.engine = 'graphql-v4'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
   }
   let pages = 0, upserts = 0, lastError = null;
   const horizonIso = new Date(Date.now() - BACKFILL_HORIZON_DAYS * 864e5).toISOString();
@@ -1583,17 +1585,17 @@ async function syncShopify(maxPages = 8) {
   const upsertOrders = async (orders) => {
     for (const o of orders) {
       await pool.query(
-        `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, order_tags, updated_at, fulfilled_at, synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
+        `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, order_tags, updated_at, fulfilled_at, archived_at, synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
          ON CONFLICT (shopify_id) DO UPDATE SET order_number=$2, created_at=$3, cancelled_at=$4, currency=$5,
-           total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, order_tags=$11, updated_at=$12, fulfilled_at=$13, synced_at=now()`,
+           total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, order_tags=$11, updated_at=$12, fulfilled_at=$13, archived_at=$14, synced_at=now()`,
         [o.id, o.name || '', o.created_at || null, o.cancelled_at || null, o.currency || '',
          Number(o.total_price) || 0,
          o.country || '',
          o.financial_status || '', o.fulfillment_status || 'unfulfilled',
          JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity }))),
          JSON.stringify(o.tags || []),
-         o.updated_at || null, o.fulfilled_at || null]);
+         o.updated_at || null, o.fulfilled_at || null, o.archived_at || null]);
       upserts++;
     }
   };
@@ -1702,7 +1704,7 @@ app.get('/api/shopify/summary', async (_req, res) => {
       `SELECT order_number, created_at::date d, country, total_price, currency,
        floor(extract(epoch from now()-created_at)/86400)::int age_days
        FROM orders_cache
-       WHERE ${WX} AND cancelled_at IS NULL AND fulfillment_status NOT IN ('fulfilled','restocked')
+       WHERE ${WX} AND cancelled_at IS NULL AND archived_at IS NULL AND fulfillment_status NOT IN ('fulfilled','restocked')
        ORDER BY created_at ASC LIMIT 20`, xp)).rows;
     // filter option lists (over last 365d, independent of active filters, so dropdowns stay stable)
     const [optCountries, optTags, optProducts] = await Promise.all([
