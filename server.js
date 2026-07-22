@@ -1647,6 +1647,13 @@ async function syncShopify(maxPages = 8) {
   return { configured: true, pages, upserts, backfill_done: !!st.backfill_done, error: lastError };
 }
 
+// build the new-style Shopify admin order link base: https://admin.shopify.com/store/<handle>/orders/
+// store_domain may be "clickstech.myshopify.com" or "clickstech" → handle = "clickstech"
+function shopifyAdminOrderBase(storeDomain) {
+  const handle = String(storeDomain || '').trim().replace(/^https?:\/\//, '').split('.')[0];
+  return handle ? `https://admin.shopify.com/store/${handle}/orders/` : null;
+}
+
 app.get('/api/shopify/summary', async (_req, res) => {
   try {
     const conn = await getConnector('shopify');
@@ -1722,7 +1729,7 @@ app.get('/api/shopify/summary', async (_req, res) => {
         WHERE created_at >= now()-interval '365 days' AND it->>'title' <> ''
         GROUP BY 1 ORDER BY 2 DESC LIMIT 200`)
     ]);
-    const adminBase = conn?.config?.store_domain ? `https://${conn.config.store_domain}/admin/orders/` : null;
+    const adminBase = shopifyAdminOrderBase(conn?.config?.store_domain);
     res.json({ configured: true, totals_30d: tot.rows[0], top_countries: countries.rows, top_products: products.rows,
       top_order_tags: orderTags, fulfillment: fulfil, awaiting, recent: recent.rows, sync: ss, admin_base: adminBase,
       days: win.days, custom: win.custom, from: p[0], to: p[1],
@@ -1738,8 +1745,7 @@ app.get('/api/shopify/summary', async (_req, res) => {
 app.get('/api/shopify/fulfillments', async (req, res) => {
   try {
     const conn = await getConnector('shopify');
-    const storeDomain = conn?.config?.store_domain || '';
-    const adminBase = storeDomain ? `https://${storeDomain}/admin/orders/` : null;
+    const adminBase = shopifyAdminOrderBase(conn?.config?.store_domain);
     const backfillDone = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v?.backfill_done ?? null;
 
     if (req.query.date) {
