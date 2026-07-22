@@ -1700,11 +1700,16 @@ app.get('/api/shopify/summary', async (_req, res) => {
       `SELECT lower(coalesce(nullif(fulfillment_status,''),'unfulfilled')) status, count(*)::int c
        FROM orders_cache WHERE ${W} AND cancelled_at IS NULL
        GROUP BY 1 ORDER BY 2 DESC`, p)).rows;
+    // "awaiting" = genuinely actionable open orders. Exclude cancelled, archived (closed),
+    // refunded/voided, and anything older than our sync horizon (data we can't keep fresh → likely a stale artifact).
     const awaiting = (await pool.query(
       `SELECT order_number, created_at::date d, country, total_price, currency,
        floor(extract(epoch from now()-created_at)/86400)::int age_days
        FROM orders_cache
-       WHERE ${WX} AND cancelled_at IS NULL AND archived_at IS NULL AND fulfillment_status NOT IN ('fulfilled','restocked')
+       WHERE ${WX} AND cancelled_at IS NULL AND archived_at IS NULL
+         AND financial_status NOT IN ('refunded','voided')
+         AND fulfillment_status NOT IN ('fulfilled','restocked')
+         AND created_at >= now() - interval '${BACKFILL_HORIZON_DAYS} days'
        ORDER BY created_at ASC LIMIT 20`, xp)).rows;
     // filter option lists (over last 365d, independent of active filters, so dropdowns stay stable)
     const [optCountries, optTags, optProducts] = await Promise.all([
