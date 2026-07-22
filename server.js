@@ -74,9 +74,9 @@ app.post('/api/auth/setup', async (req, res) => {
 // only works for an email already on the member list (never creates users).
 app.post('/api/auth/reset', async (req, res) => {
   const { email, password, invite_code } = req.body || {};
-  const invite = process.env.ADMIN_PASSWORD || process.env.DASHBOARD_PASSWORD;
-  if (!invite) return res.status(400).json({ error: 'No ADMIN_PASSWORD set on the server — set it in Render → Environment first.' });
-  if (invite_code !== invite) return res.status(403).json({ error: 'Wrong reset code (ask an admin).' });
+  const resetCode = process.env.RESET_CODE; // dedicated reset code, separate from the admin/invite code
+  if (!resetCode) return res.status(400).json({ error: 'Password reset is disabled — an admin must set RESET_CODE in Render → Environment first.' });
+  if (invite_code !== resetCode) return res.status(403).json({ error: 'Wrong reset code (ask an admin).' });
   const em = String(email || '').toLowerCase().trim();
   const u = (await pool.query('SELECT * FROM users WHERE email=$1', [em])).rows[0];
   if (!u) return res.status(403).json({ error: 'This email is not on the member list.' });
