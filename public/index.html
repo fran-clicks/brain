@@ -1261,6 +1261,12 @@ async function stockSync() {
   finally { b.disabled = false; b.textContent = '🔄 Sync'; }
 }
 // redo returns tab
+// shared product-name label: catalog name + variant (color/model). Used across the returns tab
+// (dropdown, silent-defect radar, reason-by-product) so a product reads identically everywhere.
+function prodLabel(name, variant) {
+  const base = name || '—';
+  return variant ? `${base} — ${variant}` : base;
+}
 async function loadRedo() {
   const note = document.getElementById('rdNote');
   try {
@@ -1287,13 +1293,13 @@ async function loadRedo() {
       const rate = d.return_pct == null ? null : +d.return_pct;
       const hot = rate != null && rate >= Math.max(median * 2, 10);
       return `<tr${hot ? ' style="background:rgba(220,38,38,.07)"' : ''}>
-        <td><span class="tag src">${esc(d.sku)}</span></td><td>${esc(d.title || '')}</td>
+        <td><span class="tag src">${esc(d.sku)}</span></td><td>${esc(prodLabel(d.title, d.variant))}</td>
         <td>${d.sold}</td><td>${d.returned}</td>
         <td><b>${rate == null ? '—' : rate + '%'}</b>${hot ? ' 🚩' : ''}</td></tr>`;
     }).join('') : '<tr><td colspan="5" class="empty">Needs both Shopify sales and Redo returns synced.</td></tr>';
     loadReturnProducts();
     document.querySelector('#rdReasonProduct tbody').innerHTML = (s.reason_by_product || []).length ? s.reason_by_product.map(r =>
-      `<tr><td>${esc(r.name || '—')}</td><td><span class="tag src">${esc(r.sku)}</span></td><td>${esc(r.reason)}</td><td><b>${r.c}</b></td></tr>`).join('')
+      `<tr><td>${esc(prodLabel(r.name, r.variant))}</td><td><span class="tag src">${esc(r.sku)}</span></td><td>${esc(r.reason)}</td><td><b>${r.c}</b></td></tr>`).join('')
       : '<tr><td colspan="4" class="empty">No reason/product data yet.</td></tr>';
     document.querySelector('#rdLeakage tbody').innerHTML = (s.leakage || []).length ? s.leakage.map(m =>
       `<tr><td>${esc(m.month)}</td><td>${(m.revenue||0).toLocaleString()}</td><td>${(m.refunded||0).toLocaleString()}</td>
@@ -1321,10 +1327,8 @@ async function loadReturnProducts() {
     const list = await api('/api/redo/products');
     const sel = document.getElementById('rdProductSelect');
     // label = product name + variant (color/model) + SKU so identical products stay distinguishable
-    const label = p => {
-      const base = p.name ? `${p.name}${p.variant ? ' — ' + p.variant : ''}` : p.sku;
-      return `${base} · ${p.sku} — ${p.returns} return${p.returns !== 1 ? 's' : ''}`;
-    };
+    const label = p =>
+      `${prodLabel(p.name || p.sku, p.variant)} · ${p.sku} — ${p.returns} return${p.returns !== 1 ? 's' : ''}`;
     sel.innerHTML = '<option value="">Select a product…</option>' + list.map(p =>
       `<option value="${esc(p.sku)}">${esc(label(p))}</option>`).join('');
     sel.onchange = () => showReturnProduct(sel.value);
@@ -1337,8 +1341,7 @@ async function showReturnProduct(sku) {
   if (!sku) { detail.style.display = 'none'; note.textContent = 'Pick a product to see its total returns and reason breakdown.'; return; }
   try {
     const p = await api('/api/redo/product?sku=' + encodeURIComponent(sku));
-    document.getElementById('rdProductName').textContent =
-      `${p.name}${p.variant ? '  —  ' + p.variant : ''}  ·  ${sku}`;
+    document.getElementById('rdProductName').textContent = `${prodLabel(p.name, p.variant)}  ·  ${sku}`;
     document.getElementById('rdProductTotal').textContent = `${p.total} returns`;
     const img = document.getElementById('rdProductImg');
     if (p.image) { img.src = p.image; img.style.display = 'block'; } else { img.style.display = 'none'; }

@@ -983,7 +983,7 @@ app.get('/api/redo/products', async (_req, res) => {
     WHERE created_at >= now()-interval '365 days' AND coalesce(i->>'sku','') <> '' GROUP BY 1 ORDER BY 2 DESC`);
   const skus = rows.map(r => r.sku);
   const names = skus.length ? (await pool.query(
-    `SELECT sku, coalesce(pi.title, us.name) name, nullif(pi.variant_title,'') variant FROM unnest($1::text[]) sku
+    `SELECT sku, coalesce(us.name, pi.title) name, nullif(pi.variant_title,'') variant FROM unnest($1::text[]) sku
      LEFT JOIN product_images pi USING (sku) LEFT JOIN uk_stock us USING (sku)`, [skus])).rows : [];
   const nameMap = Object.fromEntries(names.map(n => [n.sku, n]));
   res.json(rows.map(r => ({ sku: r.sku, returns: r.returns,
@@ -1002,7 +1002,7 @@ app.get('/api/redo/product', async (req, res) => {
                 WHERE i->>'sku'=$1 AND created_at >= now()-interval '365 days'`, [sku])
   ]);
   const m = meta.rows[0] || {};
-  res.json({ sku, name: m.p_title || m.us_name || sku, variant: m.variant || null, image: m.image_url || null,
+  res.json({ sku, name: m.us_name || m.p_title || sku, variant: m.variant || null, image: m.image_url || null,
     total: total.rows[0].c, reasons: reasons.rows });
 });
 
@@ -1051,12 +1051,13 @@ app.get('/api/redo/summary', async (_req, res) => {
         // return reason × product (90d): why each product comes back.
         // name resolves from UK stock catalog first (richest per-SKU detail), then Shopify title.
         var reasonByProduct = (await pool.query(`
-          SELECT rr.sku, coalesce(s.name, sh.title) name, rr.reason, rr.c FROM (
+          SELECT rr.sku, coalesce(s.name, sh.title) name, nullif(pi.variant_title,'') variant, rr.reason, rr.c FROM (
             SELECT coalesce(nullif(i->>'sku',''),'(no sku)') sku, coalesce(nullif(i->>'reason',''),'(no reason)') reason, count(*)::int c
             FROM returns_cache, LATERAL jsonb_array_elements(items) i
             WHERE created_at >= now()-interval '90 days' GROUP BY 1,2
           ) rr
           LEFT JOIN uk_stock s ON s.sku = rr.sku
+          LEFT JOIN product_images pi ON pi.sku = rr.sku
           LEFT JOIN (SELECT it->>'sku' sku, max(it->>'title') title FROM orders_cache, LATERAL jsonb_array_elements(items) it
                      WHERE coalesce(it->>'sku','') <> '' GROUP BY 1) sh ON sh.sku = rr.sku
           ORDER BY rr.c DESC LIMIT 25`)).rows;
@@ -1072,11 +1073,12 @@ app.get('/api/redo/summary', async (_req, res) => {
             FROM returns_cache, LATERAL jsonb_array_elements(items) i
             WHERE created_at >= now()-interval '90 days' AND coalesce(i->>'sku','') <> ''
             GROUP BY 1)
-          SELECT s.sku, coalesce(us.name, s.title) title, s.units sold, coalesce(r.units,0) returned,
+          SELECT s.sku, coalesce(us.name, s.title) title, nullif(pi.variant_title,'') variant, s.units sold, coalesce(r.units,0) returned,
             round(coalesce(r.units,0)::numeric / nullif(s.units,0) * 1000)/10 return_pct
           FROM sold s
           LEFT JOIN returned r ON r.sku = s.sku
           LEFT JOIN uk_stock us ON us.sku = s.sku
+          LEFT JOIN product_images pi ON pi.sku = s.sku
           WHERE s.units >= 20 ORDER BY return_pct DESC NULLS LAST LIMIT 15`)).rows;
       } catch (e) { extraError = String(e.message); console.error('redo cross-source:', extraError); }
     }
