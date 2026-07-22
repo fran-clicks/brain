@@ -1320,8 +1320,13 @@ async function loadReturnProducts() {
   try {
     const list = await api('/api/redo/products');
     const sel = document.getElementById('rdProductSelect');
+    // label = product name + variant (color/model) + SKU so identical products stay distinguishable
+    const label = p => {
+      const base = p.name ? `${p.name}${p.variant ? ' — ' + p.variant : ''}` : p.sku;
+      return `${base} · ${p.sku} — ${p.returns} return${p.returns !== 1 ? 's' : ''}`;
+    };
     sel.innerHTML = '<option value="">Select a product…</option>' + list.map(p =>
-      `<option value="${esc(p.sku)}">${esc(p.name || p.sku)} — ${p.returns} return${p.returns !== 1 ? 's' : ''}</option>`).join('');
+      `<option value="${esc(p.sku)}">${esc(label(p))}</option>`).join('');
     sel.onchange = () => showReturnProduct(sel.value);
     rdProductsLoaded = true;
   } catch {}
@@ -1332,7 +1337,8 @@ async function showReturnProduct(sku) {
   if (!sku) { detail.style.display = 'none'; note.textContent = 'Pick a product to see its total returns and reason breakdown.'; return; }
   try {
     const p = await api('/api/redo/product?sku=' + encodeURIComponent(sku));
-    document.getElementById('rdProductName').textContent = `${p.name}  ·  ${sku}`;
+    document.getElementById('rdProductName').textContent =
+      `${p.name}${p.variant ? '  —  ' + p.variant : ''}  ·  ${sku}`;
     document.getElementById('rdProductTotal').textContent = `${p.total} returns`;
     const img = document.getElementById('rdProductImg');
     if (p.image) { img.src = p.image; img.style.display = 'block'; } else { img.style.display = 'none'; }
