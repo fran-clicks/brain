@@ -313,6 +313,7 @@ footer{color:rgba(16,17,20,.45)}
       </div>
       <span class="updating-pill" id="fulUpdating"><div class="spin"></div>Loading…</span>
     </div>
+    <div class="note" id="fulRange" style="margin-top:0"></div>
     <table id="shopFulByDay"><thead><tr><th>Fulfillment date</th><th>Orders</th><th>Units</th><th></th></tr></thead><tbody></tbody></table>
     <div id="fulDayDetail" style="display:none;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
       <h2 style="font-size:15px" id="fulDayTitle"></h2>
@@ -1271,14 +1272,24 @@ async function loadShopify() {
 // ---- fulfilled-by-day (real fulfillment date) ----
 let fulDays = 14, fulLoaded = false;
 document.querySelectorAll('#fulPeriods button').forEach(b => b.onclick = () => {
+  if (+b.dataset.d === fulDays) return; // already showing this window
   document.querySelectorAll('#fulPeriods button').forEach(x => x.classList.remove('active'));
-  b.classList.add('active'); fulDays = +b.dataset.d; loadFulfilledByDay();
+  b.classList.add('active'); fulDays = +b.dataset.d;
+  document.getElementById('fulDayDetail').style.display = 'none'; // stale drilldown
+  loadFulfilledByDay();
 });
 async function loadFulfilledByDay() {
   const pill = document.getElementById('fulUpdating'); pill.classList.add('on');
   const tb = document.querySelector('#shopFulByDay tbody');
+  const range = document.getElementById('fulRange');
+  tb.innerHTML = '<tr><td colspan="4" class="empty">Loading…</td></tr>';
+  const from = new Date(Date.now() - fulDays * 864e5).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const to = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  range.textContent = `Showing last ${fulDays} days · ${from} → ${to}`;
   try {
     const r = await api('/api/shopify/fulfillments?days=' + fulDays);
+    const total = (r.by_day || []).reduce((s, d) => s + d.orders, 0);
+    range.textContent = `Showing last ${fulDays} days · ${from} → ${to} · ${total.toLocaleString()} orders across ${(r.by_day || []).length} day(s)`;
     tb.innerHTML = (r.by_day || []).length ? r.by_day.map(d =>
       `<tr><td><b>${esc(d.d)}</b></td><td>${d.orders.toLocaleString()}</td><td>${d.units.toLocaleString()}</td>
        <td><a href="#" onclick="showFulfilledDay('${d.d}');return false">view orders →</a></td></tr>`).join('')
