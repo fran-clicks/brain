@@ -196,7 +196,9 @@ async function initDb() {
       country TEXT DEFAULT '', financial_status TEXT DEFAULT '', fulfillment_status TEXT DEFAULT '',
       items JSONB DEFAULT '[]', updated_at TIMESTAMPTZ, synced_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS order_tags JSONB DEFAULT '[]';
+    ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS fulfilled_at TIMESTAMPTZ;
     CREATE INDEX IF NOT EXISTS idx_oc_created ON orders_cache (created_at);
+    CREATE INDEX IF NOT EXISTS idx_oc_fulfilled ON orders_cache (fulfilled_at);
     CREATE TABLE IF NOT EXISTS product_images (
       sku TEXT PRIMARY KEY, title TEXT DEFAULT '', image_url TEXT, updated_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE product_images ADD COLUMN IF NOT EXISTS variant_title TEXT DEFAULT '';
@@ -1509,6 +1511,7 @@ query Orders($cursor: String, $q: String, $sortKey: OrderSortKeys!) {
       currencyCode
       totalPriceSet { shopMoney { amount } }
       displayFinancialStatus displayFulfillmentStatus
+      fulfillments(first: 20) { createdAt }
       shippingAddress { countryCodeV2 }
       lineItems(first: 20) { nodes { title sku quantity } }
     }
@@ -1527,6 +1530,12 @@ function normalizeOrder(n) {
     country: n.shippingAddress?.countryCodeV2 || '',
     financial_status: (n.displayFinancialStatus || '').toLowerCase(),
     fulfillment_status: (n.displayFulfillmentStatus || 'unfulfilled').toLowerCase(),
+    // actual fulfillment date = latest fulfillment's createdAt (null if never fulfilled).
+    // this is the real date goods shipped — distinct from the order's createdAt.
+    fulfilled_at: (() => {
+      const ds = (n.fulfillments || []).map(f => f.createdAt).filter(Boolean).sort();
+      return ds.length ? ds[ds.length - 1] : null;
+    })(),
     tags: Array.isArray(n.tags) ? n.tags : [],
     line_items: (n.lineItems?.nodes || []).map(li => ({ title: li.title, sku: li.sku, quantity: li.quantity }))
   };
@@ -1548,8 +1557,8 @@ async function syncShopify(maxPages = 8) {
   const cfg = conn.config;
   shopifySyncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || {};
-  if (st.engine !== 'graphql-v2') { // v2: re-backfill to pick up order tags
-    st.engine = 'graphql-v2'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
+  if (st.engine !== 'graphql-v3') { // v3: re-backfill to pick up fulfillment dates (and order tags)
+    st.engine = 'graphql-v3'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
   }
   let pages = 0, upserts = 0, lastError = null;
   const horizonIso = new Date(Date.now() - BACKFILL_HORIZON_DAYS * 864e5).toISOString();
@@ -1557,17 +1566,17 @@ async function syncShopify(maxPages = 8) {
   const upsertOrders = async (orders) => {
     for (const o of orders) {
       await pool.query(
-        `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, order_tags, updated_at, synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
+        `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, order_tags, updated_at, fulfilled_at, synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
          ON CONFLICT (shopify_id) DO UPDATE SET order_number=$2, created_at=$3, cancelled_at=$4, currency=$5,
-           total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, order_tags=$11, updated_at=$12, synced_at=now()`,
+           total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, order_tags=$11, updated_at=$12, fulfilled_at=$13, synced_at=now()`,
         [o.id, o.name || '', o.created_at || null, o.cancelled_at || null, o.currency || '',
          Number(o.total_price) || 0,
          o.country || '',
          o.financial_status || '', o.fulfillment_status || 'unfulfilled',
          JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity }))),
          JSON.stringify(o.tags || []),
-         o.updated_at || null]);
+         o.updated_at || null, o.fulfilled_at || null]);
       upserts++;
     }
   };
@@ -1696,6 +1705,38 @@ app.get('/api/shopify/summary', async (_req, res) => {
         countries: optCountries.rows.map(r => r.country),
         tags: optTags.rows.map(r => r.tag),
         products: optProducts.rows.map(r => r.product) } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Fulfillments keyed to the ACTUAL fulfillment date (fulfilled_at), not order creation.
+// ?days=N → per-day counts; ?date=YYYY-MM-DD → the specific orders fulfilled that day (for spot-checking in Shopify).
+app.get('/api/shopify/fulfillments', async (req, res) => {
+  try {
+    const conn = await getConnector('shopify');
+    const storeDomain = conn?.config?.store_domain || '';
+    const adminBase = storeDomain ? `https://${storeDomain}/admin/orders/` : null;
+    const backfillDone = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v?.backfill_done ?? null;
+
+    if (req.query.date) {
+      const day = String(req.query.date).slice(0, 10);
+      const orders = (await pool.query(
+        `SELECT shopify_id, order_number, created_at, fulfilled_at, country, total_price, currency, fulfillment_status, items,
+           floor(extract(epoch from (fulfilled_at - created_at))/86400)::int days_to_fulfill
+         FROM orders_cache
+         WHERE fulfilled_at >= $1::date AND fulfilled_at < ($1::date + interval '1 day')
+         ORDER BY fulfilled_at ASC LIMIT 500`, [day])).rows;
+      return res.json({ date: day, admin_base: adminBase, backfill_done: backfillDone, count: orders.length, orders });
+    }
+
+    const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 366);
+    const start = new Date(Date.now() - days * 864e5).toISOString();
+    const byDay = (await pool.query(
+      `SELECT to_char(fulfilled_at::date,'YYYY-MM-DD') d, count(*)::int orders,
+         coalesce(sum((SELECT sum(coalesce((it->>'qty')::int,0)) FROM jsonb_array_elements(items) it)),0)::int units
+       FROM orders_cache
+       WHERE fulfilled_at >= $1 AND cancelled_at IS NULL
+       GROUP BY 1 ORDER BY 1 DESC`, [start])).rows;
+    res.json({ days, admin_base: adminBase, backfill_done: backfillDone, by_day: byDay });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

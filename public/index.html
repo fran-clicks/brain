@@ -296,6 +296,31 @@ footer{color:rgba(16,17,20,.45)}
     <div class="note" id="shopAwaitNote"></div>
   </div>
   <div class="card">
+    <h2>🚚 Fulfilled by day <span style="font-weight:400;color:var(--muted);font-size:12px">· by actual fulfillment date, not order date</span></h2>
+    <div class="note" style="margin-top:0">Counts each order on the day its fulfillment actually happened (Shopify's fulfillment date), so pre-orders shipped later don't inflate the order date. Pick a day to list the exact orders and open them in Shopify.</div>
+    <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:10px 0">
+      <div>
+        <label style="display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:3px">Window</label>
+        <div class="periods" id="fulPeriods" style="margin:0">
+          <button data-d="14" class="active">14 days</button>
+          <button data-d="30">30 days</button>
+          <button data-d="90">90 days</button>
+        </div>
+      </div>
+      <div>
+        <label style="display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:3px">Jump to a day</label>
+        <input type="date" id="fulDate" style="width:auto" onchange="showFulfilledDay(this.value)">
+      </div>
+      <span class="updating-pill" id="fulUpdating"><div class="spin"></div>Loading…</span>
+    </div>
+    <table id="shopFulByDay"><thead><tr><th>Fulfillment date</th><th>Orders</th><th>Units</th><th></th></tr></thead><tbody></tbody></table>
+    <div id="fulDayDetail" style="display:none;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+      <h2 style="font-size:15px" id="fulDayTitle"></h2>
+      <div class="note" id="fulDayNote" style="margin-top:0"></div>
+      <table id="shopFulOrders"><thead><tr><th>Order</th><th>Placed</th><th>Fulfilled</th><th>Lag</th><th>Country</th><th>Total</th><th>Items</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <div class="card">
     <h2>Recent orders</h2>
     <table id="shopRecent"><thead><tr><th>Order</th><th>Date</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th><th>Tags</th></tr></thead><tbody></tbody></table>
   </div>
@@ -1239,8 +1264,52 @@ async function loadShopify() {
       ? `Synced from Shopify · last run ${new Date(s.sync.last_run).toLocaleString()} · ${s.sync.cached ?? '?'} orders cached`
         + (s.sync.backfill_done ? '' : ' · ⏳ history backfill in progress') + (s.sync.last_error ? ` · ⚠️ ${s.sync.last_error}` : '')
       : '';
+    if (!fulLoaded) { fulLoaded = true; loadFulfilledByDay(); }
   } catch (e) { note.textContent = 'Shopify error: ' + e.message; }
   finally { document.getElementById('shopUpdating').classList.remove('on'); }
+}
+// ---- fulfilled-by-day (real fulfillment date) ----
+let fulDays = 14, fulLoaded = false;
+document.querySelectorAll('#fulPeriods button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#fulPeriods button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active'); fulDays = +b.dataset.d; loadFulfilledByDay();
+});
+async function loadFulfilledByDay() {
+  const pill = document.getElementById('fulUpdating'); pill.classList.add('on');
+  const tb = document.querySelector('#shopFulByDay tbody');
+  try {
+    const r = await api('/api/shopify/fulfillments?days=' + fulDays);
+    tb.innerHTML = (r.by_day || []).length ? r.by_day.map(d =>
+      `<tr><td><b>${esc(d.d)}</b></td><td>${d.orders.toLocaleString()}</td><td>${d.units.toLocaleString()}</td>
+       <td><a href="#" onclick="showFulfilledDay('${d.d}');return false">view orders →</a></td></tr>`).join('')
+      : `<tr><td colspan="4" class="empty">${r.backfill_done === false ? '⏳ Fulfillment dates are still backfilling — check back shortly.' : 'No fulfillments in this window.'}</td></tr>`;
+  } catch (e) { tb.innerHTML = `<tr><td colspan="4" class="empty">⚠️ ${esc(e.message)}</td></tr>`; }
+  finally { pill.classList.remove('on'); }
+}
+async function showFulfilledDay(day) {
+  if (!day) return;
+  document.getElementById('fulDate').value = day;
+  const pill = document.getElementById('fulUpdating'); pill.classList.add('on');
+  const note = document.getElementById('fulDayNote');
+  try {
+    const r = await api('/api/shopify/fulfillments?date=' + encodeURIComponent(day));
+    const base = r.admin_base;
+    document.getElementById('fulDayDetail').style.display = 'block';
+    document.getElementById('fulDayTitle').textContent = `Orders fulfilled on ${day}`;
+    note.textContent = `${r.count} order${r.count !== 1 ? 's' : ''} fulfilled this day — click an order number to open it in Shopify and verify. Lag = days between order placed and fulfilled (≥7 flagged).`;
+    document.querySelector('#shopFulOrders tbody').innerHTML = r.orders.length ? r.orders.map(o => {
+      const num = base ? `<a href="${base}${o.shopify_id}" target="_blank"><b>${esc(o.order_number)}</b></a>` : `<b>${esc(o.order_number)}</b>`;
+      const items = (o.items || []).map(i => `${esc(i.title || i.sku || '?')}×${i.qty}`).join(', ');
+      const lag = o.days_to_fulfill;
+      return `<tr${lag != null && lag >= 7 ? ' style="background:rgba(220,38,38,.06)"' : ''}><td>${num}</td>
+        <td>${esc(String(o.created_at).slice(0,10))}</td><td>${esc(String(o.fulfilled_at).slice(0,10))}</td>
+        <td><b>${lag == null ? '—' : lag + 'd'}</b>${lag != null && lag >= 7 ? ' ⚠️' : ''}</td>
+        <td>${esc(o.country)}</td><td>${(+o.total_price).toLocaleString()} ${esc(o.currency)}</td>
+        <td style="font-size:12px;color:var(--muted)">${esc(items)}</td></tr>`;
+    }).join('') : '<tr><td colspan="7" class="empty">No orders fulfilled on this day.</td></tr>';
+    document.getElementById('fulDayDetail').scrollIntoView({ behavior: 'smooth' });
+  } catch (e) { note.textContent = '⚠️ ' + e.message; }
+  finally { pill.classList.remove('on'); }
 }
 let stockItems = [];
 function renderStockTable() {
