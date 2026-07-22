@@ -205,15 +205,6 @@ footer{color:rgba(16,17,20,.45)}
     </div>
     <div class="note" id="homeNote"></div>
   </div>
-  <div class="card" style="margin-top:14px;border:1px dashed var(--line)">
-    <h2>🧪 clicks graph — dual-scale trial
-      <span style="font-weight:400;color:var(--muted);font-size:12px">· same data · left axis = orders/units (thousands) · right axis = tickets/cancellations (hundreds)</span>
-    </h2>
-    <div class="note" style="margin-top:0">Experiment: high-volume series (orders, units fulfilled) read off the left axis; lower-volume series (tickets, cancellations) read off the right axis — so small numbers like cancellations aren't flattened by the order spikes. Compare with the graph above and tell me which to keep.</div>
-    <div class="chart-wrap" style="height:clamp(340px,52vh,500px);margin-top:10px">
-      <canvas id="homeChart2"></canvas>
-    </div>
-  </div>
   <div class="grid two">
     <div class="card">
       <h2>📌 Recent events <span style="font-weight:400;color:var(--muted);font-size:12px">· today & last 7 days</span></h2>
@@ -1074,7 +1065,6 @@ async function loadOverview() {
                  x:{ticks:{color:'#5f6368', font:{size:11}, maxRotation:0, autoSkipPadding:16},
                     grid:{display:false}, border:{display:false}} } }
     });
-    buildDualChart(s, m); // experimental dual-axis version below
     document.getElementById('syncInfo').textContent = s.last_sync
       ? `· synced ${new Date(s.last_sync).toLocaleString()} · ${s.sync?.cached ?? '?'} tickets cached` : '';
     const hint = '💡 Click any label in the legend below to hide or show that line · click a 📌 / ✉️ pin for details.';
@@ -1087,48 +1077,6 @@ async function loadOverview() {
   } catch (e) {
     document.getElementById('homeNote').textContent = 'Overview error: ' + e.message;
   }
-}
-// experimental dual-axis chart (same data as the clicks graph, split by magnitude)
-let homeChart2;
-function buildDualChart(s, m) {
-  const canvas = document.getElementById('homeChart2');
-  if (!canvas) return;
-  if (homeChart2) homeChart2.destroy();
-  const base = { tension:.35, borderWidth:2.5, pointRadius:3, pointBackgroundColor:'#fff', pointBorderWidth:1.5,
-                 pointHitRadius:12, pointHoverRadius:6, fill:false };
-  const map = (arr, key) => {
-    const o = Object.fromEntries((arr || []).map(r => [String(r.d).slice(0,10), r[key]]));
-    return m.labels.map(l => o[l] ?? 0);
-  };
-  const ds = [
-    {...base, yAxisID:'right', label:'🎧 Tickets created', data:m.created, borderColor:'#dc2626', pointBorderColor:'#dc2626'},
-    {...base, yAxisID:'right', label:'🎧 Tickets to solve', data:m.open, borderColor:'#f0b400', pointBorderColor:'#f0b400'},
-    {...base, yAxisID:'right', label:'🎧 Tickets closed', data:m.closed, borderColor:'#101114', pointBorderColor:'#101114'}
-  ];
-  if (s.sales?.series?.length) {
-    ds.push({...base, yAxisID:'left', label:'🛒 Orders', data:map(s.sales.series,'orders'), borderColor:'#2563eb', borderDash:[7,4], pointStyle:'rectRot', pointBorderColor:'#2563eb'});
-    ds.push({...base, yAxisID:'left', label:'🛒 Units fulfilled', data:map(s.sales.fulfilled_series,'units'), borderColor:'#059669', borderDash:[7,4], pointStyle:'rectRot', pointBorderColor:'#059669'});
-    ds.push({...base, yAxisID:'right', label:'🛒 Cancelled orders', data:map(s.sales.cancel_series,'c'), borderColor:'#7c3aed', borderDash:[7,4], pointStyle:'rectRot', pointBorderColor:'#7c3aed'});
-  }
-  homeChart2 = new Chart(canvas, {
-    type:'line',
-    data:{ labels:m.labels, datasets:ds },
-    options:{ responsive:true, maintainAspectRatio:false,
-      interaction:{ mode:'index', intersect:false },
-      plugins:{
-        legend:{ position:'bottom', labels:{ usePointStyle:true, padding:16, font:{size:12, weight:600} } },
-        tooltip:{ displayColors:true }
-      },
-      scales:{
-        left:{ type:'linear', position:'left', beginAtZero:true,
-          ticks:{ precision:0, color:'#2563eb', font:{size:11} }, grid:{ color:'rgba(16,17,20,.06)' }, border:{display:false},
-          title:{ display:true, text:'🛒 Orders / units fulfilled', color:'#2563eb', font:{size:11} } },
-        right:{ type:'linear', position:'right', beginAtZero:true,
-          ticks:{ precision:0, color:'#5f6368', font:{size:11} }, grid:{ drawOnChartArea:false }, border:{display:false},
-          title:{ display:true, text:'🎧 Tickets / cancellations', color:'#5f6368', font:{size:11} } },
-        x:{ ticks:{ color:'#5f6368', font:{size:11}, maxRotation:0, autoSkipPadding:16 }, grid:{display:false}, border:{display:false} }
-      } }
-  });
 }
 async function syncNow() {
   const b = document.getElementById('syncBtn');
