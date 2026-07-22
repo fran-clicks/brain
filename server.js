@@ -1920,7 +1920,7 @@ app.get('/api/gorgias/stats', async (req, res) => {
     out.gorgias_domain = cfg?.domain || null;
     const [difficult, oldest] = await Promise.all([
       pool.query(`SELECT gorgias_id, subject, messages_count, status, created_datetime::date d FROM tickets_cache
-                  WHERE NOT spam AND messages_count >= 10 ORDER BY messages_count DESC, created_datetime DESC LIMIT 10`),
+                  WHERE NOT spam AND status='open' AND messages_count >= 10 ORDER BY messages_count DESC, created_datetime DESC LIMIT 10`),
       pool.query(`SELECT gorgias_id, subject, channel, created_datetime::date d,
                   floor(extract(epoch from now()-created_datetime)/86400)::int age_days FROM tickets_cache
                   WHERE status='open' AND NOT spam ORDER BY created_datetime ASC LIMIT 5`)
