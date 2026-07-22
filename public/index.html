@@ -291,8 +291,7 @@ footer{color:rgba(16,17,20,.45)}
     </div>
   </div>
   <div class="card">
-    <h2>🚚 Fulfilled by day <span style="font-weight:400;color:var(--muted);font-size:12px">· by actual fulfillment date, not order date</span></h2>
-    <div class="note" style="margin-top:0">Counts each order on the day its fulfillment actually happened (Shopify's fulfillment date), so pre-orders shipped later don't inflate the order date. Pick a day to list the exact orders and open them in Shopify.</div>
+    <h2>🚚 Fulfilled by day</h2>
     <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:10px 0">
       <div>
         <label style="display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:3px">Window</label>
@@ -317,9 +316,9 @@ footer{color:rgba(16,17,20,.45)}
     </div>
   </div>
   <div class="card">
-    <h2>📦 Awaiting fulfillment <span style="font-weight:400;color:var(--muted);font-size:12px">· oldest first · excludes cancelled, archived, refunded</span></h2>
+    <h2>📦 Awaiting fulfillment</h2>
+    <div class="note" id="shopAwaitNote" style="margin-top:0"></div>
     <table id="shopAwaiting"><thead><tr><th>Order</th><th>Placed</th><th>Waiting</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th></tr></thead><tbody></tbody></table>
-    <div class="note" id="shopAwaitNote"></div>
   </div>
   <div class="card">
     <h2>Recent orders</h2>
@@ -369,7 +368,7 @@ footer{color:rgba(16,17,20,.45)}
       <table id="gOldest"><thead><tr><th>Subject</th><th>Waiting</th><th>Channel</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="card">
-      <h2>🔥 Difficult tickets <span style="font-weight:400;color:var(--muted);font-size:12px">· 10+ messages · open only</span></h2>
+      <h2>🔥 Difficult tickets</h2>
       <table id="gDifficult"><thead><tr><th>Subject</th><th>Messages</th><th>Status</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
@@ -419,7 +418,7 @@ footer{color:rgba(16,17,20,.45)}
     <table id="kvTable"><thead><tr><th>Campaign</th><th>Channel</th><th>Sent</th><th>Recipients</th><th>Opens</th><th>Clicks</th><th>Unsub</th><th>Attributed revenue</th><th>Tickets created</th><th>Tickets closed</th></tr></thead><tbody></tbody></table>
   </div>
   <div class="card">
-    <h2>⚙️ Flows <span style="font-weight:400;color:var(--muted);font-size:12px">· automated series · last 365 days, by revenue</span></h2>
+    <h2>⚙️ Flows</h2>
     <table id="kvFlows"><thead><tr><th>Flow</th><th>Channel</th><th>Status</th><th>Recipients</th><th>Opens</th><th>Clicks</th><th>Attributed revenue</th></tr></thead><tbody></tbody></table>
     <div class="note">Automations like welcome, abandoned cart and win-back — these often out-earn one-off campaigns.</div>
   </div>
@@ -463,17 +462,14 @@ footer{color:rgba(16,17,20,.45)}
   <div class="card">
     <h2>🧭 Return reasons by product <span style="font-weight:400;color:var(--muted);font-size:12px">· last 90 days · all products</span></h2>
     <table id="rdReasonProduct"><thead><tr><th>Product</th><th>SKU</th><th>Reason</th><th>Returns</th></tr></thead><tbody></tbody></table>
-    <div class="note">Why each product actually comes back — the root cause differs by product line. Sorted by frequency.</div>
   </div>
   <div class="card">
     <h2>🔬 Silent-defect radar <span style="font-weight:400;color:var(--muted);font-size:12px">· return rate per product (90d)</span></h2>
     <table id="rdDefects"><thead><tr><th>SKU</th><th>Product</th><th>Sold</th><th>Returned</th><th>Return rate</th></tr></thead><tbody></tbody></table>
-    <div class="note">Return rate = units returned ÷ units sold (last 90 days), highest first. A SKU well above the others is a product-quality flag — customers returning rather than contacting support. Only products with 20+ sold are shown.</div>
   </div>
   <div class="card">
     <h2>💸 Refund leakage <span style="font-weight:400;color:var(--muted);font-size:12px">· refunds vs revenue, monthly</span></h2>
     <table id="rdLeakage"><thead><tr><th>Month</th><th>Revenue</th><th>Refunded</th><th>% of revenue</th></tr></thead><tbody></tbody></table>
-    <div class="note">Redo refund value as a share of Shopify revenue. A climbing % means more margin is leaking back out — watch the trend, not any single month.</div>
   </div>
   <div class="card">
     <h2>Recent returns</h2>
@@ -1258,7 +1254,7 @@ async function loadShopify() {
     }).join('')
       : '<tr><td colspan="7" class="empty">Nothing awaiting fulfillment 🎉</td></tr>';
     document.getElementById('shopAwaitNote').textContent = aw.length
-      ? `${aw.length} order${aw.length > 1 ? 's' : ''} shown (oldest first) · 4+ days highlighted · click an order to open it in Shopify · excludes cancelled/archived/refunded and orders older than ${Math.round(400/30)} months`
+      ? `${aw.length} order${aw.length > 1 ? 's' : ''}`
       : '';
     document.querySelector('#shopRecent tbody').innerHTML = s.recent.map(o =>
       `<tr${o.cancelled ? ' style="opacity:.5"' : ''}><td><b>${esc(o.order_number)}</b>${o.cancelled ? ' <span class="tag src">cancelled</span>' : ''}</td>
@@ -1312,7 +1308,7 @@ async function showFulfilledDay(day) {
     const base = r.admin_base;
     document.getElementById('fulDayDetail').style.display = 'block';
     document.getElementById('fulDayTitle').textContent = `Orders fulfilled on ${day}`;
-    note.textContent = `${r.count} order${r.count !== 1 ? 's' : ''} fulfilled this day — click an order number to open it in Shopify and verify. Lag = days between order placed and fulfilled (≥7 flagged).`;
+    note.textContent = `${r.count} order${r.count !== 1 ? 's' : ''}`;
     document.querySelector('#shopFulOrders tbody').innerHTML = r.orders.length ? r.orders.map(o => {
       const num = base ? `<a href="${base}${o.shopify_id}" target="_blank"><b>${esc(o.order_number)}</b></a>` : `<b>${esc(o.order_number)}</b>`;
       const items = (o.items || []).map(i => `${esc(i.title || i.sku || '?')}×${i.qty}`).join(', ');
@@ -1616,7 +1612,7 @@ async function loadGorgias() {
   document.getElementById('gUpdating').classList.add('on');
   try {
     const g = await api('/api/gorgias/stats?' + (gCustom ? `from=${gCustom.from}&to=${gCustom.to}` : `days=${gDays}`));
-    document.getElementById('gChartTitle').textContent = `Tickets created — ${gCustom ? gLabel() : 'last ' + gLabel()}${g.bucket === 'week' ? ' (weekly)' : ''}`;
+    document.getElementById('gChartTitle').textContent = `Tickets created and closed — ${gCustom ? gLabel() : 'last ' + gLabel()}${g.bucket === 'week' ? ' (weekly)' : ''}`;
     const frt = g.avg_first_response_seconds != null ? (g.avg_first_response_seconds/3600).toFixed(1) + 'h' : '—';
     document.getElementById('gorgiasKpis').innerHTML = [
       {l:'Total tickets (all time)', v: g.total_tickets ?? (g.cached_total != null ? `${g.cached_total} synced` : '—')},
