@@ -1379,11 +1379,22 @@ async function stockSync() {
   finally { b.disabled = false; b.textContent = '🔄 Sync now'; }
 }
 // redo returns tab
-// shared product-name label: catalog name + variant (color/model). Used across the returns tab
-// (dropdown, silent-defect radar, reason-by-product) so a product reads identically everywhere.
+// shared product-name label: catalog name + only the variant bits it doesn't already say.
+// UK-stock names often already encode model+colour (e.g. "16 Pro - Onyx"), so we only append
+// Shopify variant tokens (split on ·) whose words aren't mostly already in the name — avoids
+// "16 Pro - Onyx — iPhone 16 Pro · Onyx" while still adding colour to a bare name like "Clicks Power Keyboard".
 function prodLabel(name, variant) {
-  const base = name || '—';
-  return variant ? `${base} — ${variant}` : base;
+  const base = (name || '—').trim();
+  if (!variant) return base;
+  const nameWords = new Set((base.toLowerCase().match(/[a-z0-9]+/g) || []));
+  const keep = String(variant).split('·').map(s => s.trim()).filter(tok => {
+    if (!tok) return false;
+    const words = (tok.toLowerCase().match(/[a-z0-9]+/g) || []).filter(w => w !== 'iphone');
+    if (!words.length) return false;
+    const overlap = words.filter(w => nameWords.has(w)).length;
+    return overlap / words.length < 0.5; // keep only if it adds something new
+  });
+  return keep.length ? `${base} — ${keep.join(' · ')}` : base;
 }
 async function loadRedo() {
   const note = document.getElementById('rdNote');
