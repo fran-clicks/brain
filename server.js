@@ -1825,9 +1825,9 @@ async function overviewStats(win) {
                 FROM orders_cache WHERE created_at >= $1 AND created_at < $2 AND cancelled_at IS NULL GROUP BY 1 ORDER BY 1`, params),
     pool.query(`SELECT date_trunc('${bucket}', cancelled_at)::date d, count(*)::int c
                 FROM orders_cache WHERE cancelled_at >= $1 AND cancelled_at < $2 GROUP BY 1 ORDER BY 1`, params),
-    pool.query(`SELECT date_trunc('${bucket}', created_at)::date d,
+    pool.query(`SELECT date_trunc('${bucket}', fulfilled_at)::date d,
                 coalesce(sum((SELECT sum(coalesce((it->>'qty')::int,0)) FROM jsonb_array_elements(items) it)),0)::int units
-                FROM orders_cache WHERE created_at >= $1 AND created_at < $2 AND fulfillment_status='fulfilled' AND cancelled_at IS NULL
+                FROM orders_cache WHERE fulfilled_at >= $1 AND fulfilled_at < $2 AND cancelled_at IS NULL
                 GROUP BY 1 ORDER BY 1`, params),
     pool.query(`SELECT count(*) FILTER (WHERE cancelled_at IS NULL)::int orders,
                 round(sum(total_price) FILTER (WHERE cancelled_at IS NULL))::int revenue,
