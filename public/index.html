@@ -151,6 +151,10 @@ footer{color:rgba(16,17,20,.45)}
 .updating-pill{display:none;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--muted)}
 .updating-pill.on{display:inline-flex}
 .updating-pill .spin{width:16px;height:16px;border-width:3px}
+.synchead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.synchead .note{margin:0}
+.synchead .right{display:flex;align-items:center;gap:12px}
+.synchead .btn{margin:0;padding:6px 14px}
 </style>
 </head>
 <body>
@@ -233,6 +237,13 @@ footer{color:rgba(16,17,20,.45)}
 
 <!-- SHOPIFY -->
 <div class="section" id="s-sales">
+  <div class="card synchead">
+    <div class="note" id="shopNote">Loading Shopify data…</div>
+    <div class="right">
+      <span class="updating-pill" id="shopUpdating"><div class="spin"></div>Updating…</span>
+      <button class="btn" id="shopSyncBtn" onclick="shopSync()">🔄 Sync now</button>
+    </div>
+  </div>
   <div class="card" id="shopFilters" style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px">
     <div>
       <label style="display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:3px">Timeframe</label>
@@ -259,7 +270,6 @@ footer{color:rgba(16,17,20,.45)}
       <select id="shTag" style="width:auto"><option value="">All tags</option></select>
     </div>
     <button class="btn" style="margin:0;padding:8px 14px" onclick="clearShopFilters()">Clear</button>
-    <span class="updating-pill" id="shopUpdating"><div class="spin"></div>Updating…</span>
   </div>
   <div class="grid kpis" id="shopKpis" style="margin-top:14px"></div>
   <div class="grid two" style="margin-top:14px">
@@ -286,14 +296,20 @@ footer{color:rgba(16,17,20,.45)}
     <div class="note" id="shopAwaitNote"></div>
   </div>
   <div class="card">
-    <h2>Recent orders <button class="btn" style="float:right;margin:0;padding:5px 12px" id="shopSyncBtn" onclick="shopSync()">🔄 Sync now</button></h2>
+    <h2>Recent orders</h2>
     <table id="shopRecent"><thead><tr><th>Order</th><th>Date</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th><th>Tags</th></tr></thead><tbody></tbody></table>
-    <div class="note" id="shopNote">Loading Shopify data…</div>
   </div>
 </div>
 
 <!-- GORGIAS -->
 <div class="section" id="s-gorgias">
+  <div class="card synchead">
+    <div class="note" id="gorgiasNote">Loading Gorgias data…</div>
+    <div class="right">
+      <span class="updating-pill" id="gUpdating"><div class="spin"></div>Updating…</span>
+      <button class="btn" id="gorgiasSyncBtn" onclick="gSync()">🔄 Sync now</button>
+    </div>
+  </div>
   <div class="periods" id="gPeriods">
     <button data-d="7" class="active">7 days</button>
     <button data-d="30">1 month</button>
@@ -310,7 +326,6 @@ footer{color:rgba(16,17,20,.45)}
   <div class="card" style="margin-top:14px">
     <h2 id="gChartTitle">Tickets created</h2>
     <div class="chart-wrap"><canvas id="gorgiasChart"></canvas><div class="chart-loading" id="gLoading"><div class="spin"></div><span>Loading…</span></div></div>
-    <div class="note" id="gorgiasNote">Loading Gorgias data…</div>
   </div>
   <div class="grid two">
     <div class="card">
@@ -344,14 +359,18 @@ footer{color:rgba(16,17,20,.45)}
 
 <!-- UK STOCK -->
 <div class="section" id="s-stock">
+  <div class="card synchead">
+    <div class="note" id="stockNote">Loading stock…</div>
+    <div class="right">
+      <span class="updating-pill" id="stockUpdating"><div class="spin"></div>Updating…</span>
+      <button class="btn" id="stockSyncBtn" onclick="stockSync()">🔄 Sync now</button>
+    </div>
+  </div>
   <div class="grid kpis" id="stockKpis"></div>
   <div class="card" style="margin-top:14px">
-    <h2>📦 Stock levels
-      <button class="btn" style="float:right;margin:0;padding:5px 12px" id="stockSyncBtn" onclick="stockSync()">🔄 Sync now</button>
-    </h2>
+    <h2>📦 Stock levels</h2>
     <input class="search" id="stockSearch" placeholder="Search SKU or product…">
     <table id="stockTable"><thead><tr><th>SKU</th><th>Description</th><th>Brand new</th><th>Non-pristine</th><th>Damaged</th><th>Founders</th><th>Total</th></tr></thead><tbody></tbody></table>
-    <div class="note" id="stockNote">Loading stock…</div>
   </div>
   <div class="card">
     <h2>Recent changes</h2>
@@ -361,11 +380,17 @@ footer{color:rgba(16,17,20,.45)}
 
 <!-- KLAVIYO -->
 <div class="section" id="s-klaviyo">
+  <div class="card synchead">
+    <div class="note" id="kvNote">Loading Klaviyo data…</div>
+    <div class="right">
+      <span class="updating-pill" id="kvUpdating"><div class="spin"></div>Updating…</span>
+      <button class="btn" id="kvSyncBtn" onclick="kvSync()">🔄 Sync now</button>
+    </div>
+  </div>
   <div class="grid kpis" id="kvKpis"></div>
   <div class="card" style="margin-top:14px">
-    <h2>Recent campaigns <button class="btn" style="float:right;margin:0;padding:5px 12px" id="kvSyncBtn" onclick="kvSync()">🔄 Sync now</button></h2>
+    <h2>Recent campaigns</h2>
     <table id="kvTable"><thead><tr><th>Campaign</th><th>Channel</th><th>Sent</th><th>Recipients</th><th>Opens</th><th>Clicks</th><th>Unsub</th><th>Attributed revenue</th><th>Tickets created</th><th>Tickets closed</th></tr></thead><tbody></tbody></table>
-    <div class="note" id="kvNote">Loading Klaviyo data…</div>
   </div>
   <div class="card">
     <h2>⚙️ Flows <span style="font-weight:400;color:var(--muted);font-size:12px">· automated series · last 365 days, by revenue</span></h2>
@@ -376,6 +401,13 @@ footer{color:rgba(16,17,20,.45)}
 
 <!-- REDO RETURNS -->
 <div class="section" id="s-redo">
+  <div class="card synchead">
+    <div class="note" id="rdNote">Loading Redo data…</div>
+    <div class="right">
+      <span class="updating-pill" id="rdUpdating"><div class="spin"></div>Updating…</span>
+      <button class="btn" id="rdSyncBtn" onclick="rdSync()">🔄 Sync now</button>
+    </div>
+  </div>
   <div class="grid kpis" id="rdKpis"></div>
   <div class="grid two" style="margin-top:14px">
     <div class="card">
@@ -418,9 +450,8 @@ footer{color:rgba(16,17,20,.45)}
     <div class="note">Redo refund value as a share of Shopify revenue. A climbing % means more margin is leaking back out — watch the trend, not any single month.</div>
   </div>
   <div class="card">
-    <h2>Recent returns <button class="btn" style="float:right;margin:0;padding:5px 12px" id="rdSyncBtn" onclick="rdSync()">🔄 Sync now</button></h2>
+    <h2>Recent returns</h2>
     <table id="rdRecent"><thead><tr><th>Order</th><th>Type</th><th>Status</th><th>Date</th><th>Items · reason</th><th>Refund</th><th>Tags</th></tr></thead><tbody></tbody></table>
-    <div class="note" id="rdNote">Loading Redo data…</div>
   </div>
 </div>
 
@@ -1225,6 +1256,7 @@ function renderStockTable() {
 }
 async function loadStock() {
   const note = document.getElementById('stockNote');
+  document.getElementById('stockUpdating').classList.add('on');
   try {
     const s = await api('/api/stock');
     if (!s.configured) { note.textContent = 'UK stock is not connected — an admin can add it on the ＋ page.'; return; }
@@ -1251,14 +1283,15 @@ async function loadStock() {
       : '')
       + (allZero && s.sample_raw ? ` · ⚠️ all quantities read as 0 — raw item from your API: ${JSON.stringify(s.sample_raw).slice(0, 300)}` : '');
   } catch (e) { note.textContent = '⚠️ ' + e.message; }
+  finally { document.getElementById('stockUpdating').classList.remove('on'); }
 }
 document.getElementById('stockSearch').oninput = renderStockTable;
 async function stockSync() {
   const b = document.getElementById('stockSyncBtn');
-  b.disabled = true; b.textContent = '⏳';
+  b.disabled = true; b.textContent = '⏳ Syncing…';
   try { await api('/api/stock/sync', {method:'POST', body:'{}'}); loadStock(); }
   catch (e) { document.getElementById('stockNote').textContent = '⚠️ ' + e.message; }
-  finally { b.disabled = false; b.textContent = '🔄 Sync'; }
+  finally { b.disabled = false; b.textContent = '🔄 Sync now'; }
 }
 // redo returns tab
 // shared product-name label: catalog name + variant (color/model). Used across the returns tab
@@ -1269,6 +1302,7 @@ function prodLabel(name, variant) {
 }
 async function loadRedo() {
   const note = document.getElementById('rdNote');
+  document.getElementById('rdUpdating').classList.add('on');
   try {
     const s = await api('/api/redo/summary');
     if (!s.configured) { note.textContent = 'Redo is not connected — an admin can add it on the ＋ page.'; return; }
@@ -1319,6 +1353,7 @@ async function loadRedo() {
         + ' · 🌱 = green return (no shipment needed)'
       : '';
   } catch (e) { note.textContent = '⚠️ ' + e.message; }
+  finally { document.getElementById('rdUpdating').classList.remove('on'); }
 }
 let rdProductsLoaded = false;
 async function loadReturnProducts() {
@@ -1363,6 +1398,7 @@ async function rdSync() {
 // klaviyo tab
 async function loadKlaviyo() {
   const note = document.getElementById('kvNote');
+  document.getElementById('kvUpdating').classList.add('on');
   try {
     const s = await api('/api/klaviyo/summary');
     if (!s.configured) { note.textContent = 'Klaviyo is not connected — an admin can add it on the ＋ page.'; return; }
@@ -1400,6 +1436,7 @@ async function loadKlaviyo() {
       : '')
       + ' · ticket counts = Gorgias tickets whose subject contains the email subject, within 21 days of the send ("—" until the subject is synced)';
   } catch (e) { note.textContent = '⚠️ ' + e.message; }
+  finally { document.getElementById('kvUpdating').classList.remove('on'); }
 }
 async function openMail(id) {
   try {
@@ -1443,6 +1480,13 @@ async function shopSync() {
   catch (e) { document.getElementById('shopNote').textContent = '⚠️ ' + e.message; }
   finally { b.disabled = false; b.textContent = '🔄 Sync now'; }
 }
+async function gSync() {
+  const b = document.getElementById('gorgiasSyncBtn');
+  b.disabled = true; b.textContent = '⏳ Syncing…';
+  try { await api('/api/gorgias/sync', {method:'POST', body:'{}'}); loadGorgias(); loadOverview(); }
+  catch (e) { document.getElementById('gorgiasNote').textContent = '⚠️ ' + e.message; }
+  finally { b.disabled = false; b.textContent = '🔄 Sync now'; }
+}
 
 // ---------- gorgias live tab ----------
 let gChart;
@@ -1473,6 +1517,7 @@ const gLabel = () => gCustom
 async function loadGorgias() {
   const note = document.getElementById('gorgiasNote');
   document.getElementById('gLoading').classList.add('on');
+  document.getElementById('gUpdating').classList.add('on');
   try {
     const g = await api('/api/gorgias/stats?' + (gCustom ? `from=${gCustom.from}&to=${gCustom.to}` : `days=${gDays}`));
     document.getElementById('gChartTitle').textContent = `Tickets created — ${gCustom ? gLabel() : 'last ' + gLabel()}${g.bucket === 'week' ? ' (weekly)' : ''}`;
@@ -1526,7 +1571,7 @@ async function loadGorgias() {
        <td><span class="tag ${t.status === 'open' ? 'pending' : 'approved'}">${esc(t.status)}</span></td>
        <td>${esc(String(t.d).slice(0,10))}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">—</td></tr>';
   } catch (e) { note.textContent = 'Gorgias error: ' + e.message; }
-  finally { document.getElementById('gLoading').classList.remove('on'); }
+  finally { document.getElementById('gLoading').classList.remove('on'); document.getElementById('gUpdating').classList.remove('on'); }
 }
 
 // ---------- knowledge bases ----------
