@@ -1149,9 +1149,10 @@ app.get('/api/redo/summary', async (_req, res) => {
       } catch (e) { extraError = String(e.message); console.error('redo cross-source:', extraError); }
     }
 
+    const currency = (await pool.query(`SELECT max(currency) c FROM orders_cache WHERE currency <> ''`)).rows[0]?.c || 'USD';
     res.json({ configured: true, totals_30d: tot.rows[0], top_reasons: reasons.rows, open_by_status: statuses.rows,
       recent: recent.rows, leakage, defects, reason_by_product: (typeof reasonByProduct !== 'undefined' ? reasonByProduct : null),
-      extra_error: extraError, sync: ss });
+      currency, extra_error: extraError, sync: ss });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/redo/sync', async (_req, res) => {
@@ -1363,7 +1364,8 @@ app.get('/api/klaviyo/summary', async (_req, res) => {
   const flows = (await pool.query(
     `SELECT name, status, channel, recipients, open_rate, click_rate, revenue FROM flows_cache
      WHERE coalesce(recipients,0) > 0 ORDER BY revenue DESC NULLS LAST LIMIT 15`)).rows;
-  res.json({ configured: !!conn, totals_30d: totals.rows[0], recent: recent.rows, revenue_share, flows, sync: ss });
+  const currency = (await pool.query(`SELECT max(currency) c FROM orders_cache WHERE currency <> ''`)).rows[0]?.c || 'USD';
+  res.json({ configured: !!conn, totals_30d: totals.rows[0], recent: recent.rows, revenue_share, flows, currency, sync: ss });
 });
 app.get('/api/klaviyo/campaign/:id', async (req, res) => {
   const { rows } = await pool.query(

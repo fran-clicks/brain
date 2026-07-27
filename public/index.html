@@ -528,7 +528,7 @@ footer{color:rgba(16,17,20,.45)}
       <div><label>Your name</label><input id="kBy"></div>
     </div>
     <label>What is it &amp; why add it?</label>
-    <textarea id="kDesc" rows="3" placeholder="Describe the source and how it helps. Do NOT paste API keys or passwords — the server rejects them."></textarea>
+    <textarea id="kDesc" rows="3" placeholder="Describe the source and how it helps. DO NOT paste keys or passwords."></textarea>
     <button class="btn" onclick="addKb()">Submit suggestion</button>
     <div class="err" id="kErr"></div>
   </div>
@@ -628,6 +628,9 @@ footer{color:rgba(16,17,20,.45)}
 
 <script>
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// money formatter: currency symbol + amount (falls back to $/USD if unknown)
+const CCY_SYM = { USD:'$', GBP:'£', EUR:'€', AUD:'A$', CAD:'C$', NZD:'NZ$', JPY:'¥' };
+const money = (v, ccy) => `${CCY_SYM[ccy] || (ccy ? ccy + ' ' : '$')}${Number(v || 0).toLocaleString()}`;
 const api = async (p, opts) => {
   const r = await fetch(p, opts ? {headers:{'Content-Type':'application/json'}, ...opts} : undefined);
   const j = await r.json().catch(() => ({}));
@@ -953,7 +956,7 @@ async function loadOverview() {
       {l:`Tickets created (${pl})`, v:t.created},
       {l:`Tickets closed (${pl})`, v:t.closed},
       {l:'Open now (synced)', v:t.open},
-      {l:`Sales (${pl})`, v: sv ? `${(sv.revenue ?? 0).toLocaleString()} ${sv.currency || ''}` : '—'},
+      {l:`Sales (${pl})`, v: sv ? money(sv.revenue, sv.currency) : '—'},
       {l:`Orders (${pl})`, v: sv ? sv.orders : '—'},
       {l:`Cancelled / refunded (${pl})`, v: sv ? `${sv.cancelled} / ${sv.refunded}` : t.cancel_refund + ' tickets'},
       {l:`Events (${pl})`, v:s.events.length}
@@ -995,7 +998,7 @@ async function loadOverview() {
           c.recipients != null ? `${c.recipients.toLocaleString()} recipients` : null,
           c.open_rate != null ? `${Math.round(c.open_rate * 100)}% opens` : null,
           c.click_rate != null ? `${Math.round(c.click_rate * 100)}% clicks` : null,
-          c.revenue ? `${Math.round(+c.revenue).toLocaleString()} attributed` : null
+          c.revenue ? `${money(Math.round(+c.revenue), s.sales?.totals?.currency)} attributed` : null
         ].filter(Boolean).join(' · ')
       }))
     ];
@@ -1038,7 +1041,7 @@ async function loadOverview() {
                 const it = items[0];
                 if (it.dataset.label === '🛒 Orders') {
                   const o = (s.sales?.series || []).find(r => String(r.d).slice(0,10) === it.label);
-                  return o ? [`revenue: ${(o.revenue ?? 0).toLocaleString()} ${s.sales?.totals?.currency || ''}`,
+                  return o ? [`revenue: ${money(o.revenue, s.sales?.totals?.currency)}`,
                               ...(o.refunded ? [`${o.refunded} refunded`] : [])] : '';
                 }
                 if (it.dataset.label === '🛒 Cancelled orders' || it.dataset.label === '🛒 Units fulfilled') return '';
@@ -1116,7 +1119,7 @@ async function loadEvents() {
           description: [
             c.recipients != null ? `${c.recipients.toLocaleString()} recipients` : null,
             c.open_rate != null ? `${Math.round(c.open_rate*100)}% opens` : null,
-            c.revenue ? `${Math.round(+c.revenue).toLocaleString()} attributed` : null
+            c.revenue ? `${money(Math.round(+c.revenue), kv.currency)} attributed` : null
           ].filter(Boolean).join(' · ') });
       }
     });
@@ -1225,7 +1228,7 @@ async function loadShopify() {
     document.querySelectorAll('.shopPer').forEach(el => el.textContent = '· ' + per);
     const t = s.totals_30d;
     document.getElementById('shopKpis').innerHTML = [
-      {l:`Revenue (${per})`, v:`${(t.revenue ?? 0).toLocaleString()} ${t.currency || ''}`},
+      {l:`Revenue (${per})`, v: money(t.revenue, t.currency)},
       {l:`Orders (${per})`, v:t.orders},
       {l:'Fulfilled', v:t.fulfilled},
       {l:'Awaiting fulfillment', v:t.unfulfilled},
@@ -1233,7 +1236,7 @@ async function loadShopify() {
       {l:`Refunded (${per})`, v:t.refunded}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
     document.querySelector('#shopCountries tbody').innerHTML = s.top_countries.map(c =>
-      `<tr><td><b>${esc(c.country)}</b></td><td>${(c.revenue ?? 0).toLocaleString()}</td><td>${c.orders}</td></tr>`).join('') || '<tr><td colspan="3" class="empty">—</td></tr>';
+      `<tr><td><b>${esc(c.country)}</b></td><td>${money(c.revenue, t.currency)}</td><td>${c.orders}</td></tr>`).join('') || '<tr><td colspan="3" class="empty">—</td></tr>';
     document.querySelector('#shopProducts tbody').innerHTML = s.top_products.map(p =>
       `<tr><td>${esc(p.product)}</td><td>${p.qty}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
     document.querySelector('#shopTags tbody').innerHTML = (s.top_order_tags || []).map(t =>
@@ -1248,7 +1251,7 @@ async function loadShopify() {
       return `<tr${o.age_days >= 4 ? ' style="background:rgba(220,38,38,.06)"' : ''}><td>${num}</td>
        <td>${esc(String(o.d).slice(0,10))}</td>
        <td><b>${o.age_days}d</b>${o.age_days >= 4 ? ' ⚠️' : ''}</td>
-       <td>${esc(o.country)}</td><td>${(+o.total_price).toLocaleString()} ${esc(o.currency)}</td>
+       <td>${esc(o.country)}</td><td>${money(o.total_price, o.currency)}</td>
        <td><span class="tag ${o.financial_status === 'paid' ? 'approved' : 'pending'}">${esc(o.financial_status || '—')}</span></td>
        <td><span class="tag pending">${esc(o.fulfillment_status || 'unfulfilled')}</span></td></tr>`;
     }).join('')
@@ -1258,7 +1261,7 @@ async function loadShopify() {
       : '';
     document.querySelector('#shopRecent tbody').innerHTML = s.recent.map(o =>
       `<tr${o.cancelled ? ' style="opacity:.5"' : ''}><td><b>${esc(o.order_number)}</b>${o.cancelled ? ' <span class="tag src">cancelled</span>' : ''}</td>
-       <td>${esc(String(o.d).slice(0,10))}</td><td>${esc(o.country)}</td><td>${(+o.total_price).toLocaleString()} ${esc(o.currency)}</td>
+       <td>${esc(String(o.d).slice(0,10))}</td><td>${esc(o.country)}</td><td>${money(o.total_price, o.currency)}</td>
        <td><span class="tag ${o.financial_status === 'paid' ? 'approved' : 'pending'}">${esc(o.financial_status)}</span></td>
        <td><span class="tag ${o.fulfillment_status === 'fulfilled' ? 'approved' : 'pending'}">${esc(o.fulfillment_status)}</span></td>
        <td>${(o.order_tags || []).map(t => `<span class="tag src">${esc(t)}</span>`).join(' ') || '—'}</td></tr>`).join('');
@@ -1316,7 +1319,7 @@ async function showFulfilledDay(day) {
       return `<tr${lag != null && lag >= 7 ? ' style="background:rgba(220,38,38,.06)"' : ''}><td>${num}</td>
         <td>${esc(String(o.created_at).slice(0,10))}</td><td>${esc(String(o.fulfilled_at).slice(0,10))}</td>
         <td><b>${lag == null ? '—' : lag + 'd'}</b>${lag != null && lag >= 7 ? ' ⚠️' : ''}</td>
-        <td>${esc(o.country)}</td><td>${(+o.total_price).toLocaleString()} ${esc(o.currency)}</td>
+        <td>${esc(o.country)}</td><td>${money(o.total_price, o.currency)}</td>
         <td style="font-size:12px;color:var(--muted)">${esc(items)}</td></tr>`;
     }).join('') : '<tr><td colspan="7" class="empty">No orders fulfilled on this day.</td></tr>';
     document.getElementById('fulDayDetail').scrollIntoView({ behavior: 'smooth' });
@@ -1400,12 +1403,13 @@ async function loadRedo() {
     if (!s.configured) { note.textContent = 'Redo is not connected — an admin can add it on the ＋ page.'; return; }
     if (s.empty) { note.textContent = 'Connected — waiting for the first returns to sync' + (s.sync?.last_error ? ` (⚠️ ${s.sync.last_error})` : '…'); return; }
     const t = s.totals_30d || {};
+    const ccy = s.currency;
     document.getElementById('rdKpis').innerHTML = [
       {l:'Returns (30d)', v: t.returns ?? '—'},
       {l:'Claims / warranties (30d)', v: `${t.claims ?? 0} / ${t.warranties ?? 0}`},
-      {l:'Refunded (30d)', v: (t.refund_total ?? 0).toLocaleString()},
-      {l:'Kept as exchanges (30d)', v: (t.exchange_total ?? 0).toLocaleString()},
-      {l:'Store credit (30d)', v: (t.credit_total ?? 0).toLocaleString()}
+      {l:'Refunded (30d)', v: money(t.refund_total, ccy)},
+      {l:'Kept as exchanges (30d)', v: money(t.exchange_total, ccy)},
+      {l:'Store credit (30d)', v: money(t.credit_total, ccy)}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
     document.querySelector('#rdReasons tbody').innerHTML = (s.top_reasons || []).map(r =>
       `<tr><td>${esc(r.reason)}</td><td>${r.c}</td></tr>`).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
@@ -1428,7 +1432,7 @@ async function loadRedo() {
       `<tr><td>${esc(prodLabel(r.name, r.variant))}</td><td><span class="tag src">${esc(r.sku)}</span></td><td>${esc(r.reason)}</td><td><b>${r.c}</b></td></tr>`).join('')
       : '<tr><td colspan="4" class="empty">No reason/product data yet.</td></tr>';
     document.querySelector('#rdLeakage tbody').innerHTML = (s.leakage || []).length ? s.leakage.map(m =>
-      `<tr><td>${esc(m.month)}</td><td>${(m.revenue||0).toLocaleString()}</td><td>${(m.refunded||0).toLocaleString()}</td>
+      `<tr><td>${esc(m.month)}</td><td>${money(m.revenue, ccy)}</td><td>${money(m.refunded, ccy)}</td>
        <td><b>${m.pct == null ? '—' : m.pct + '%'}</b></td></tr>`).join('') : '<tr><td colspan="4" class="empty">Needs Shopify + Redo synced.</td></tr>';
     document.querySelector('#rdRecent tbody').innerHTML = (s.recent || []).map(r => {
       const items = (r.items || []).map(i => `${i.qty}× ${i.sku || '?'}${i.reason ? ` (${i.reason})` : ''}${i.green ? ' 🌱' : ''}`).join(', ');
@@ -1436,7 +1440,7 @@ async function loadRedo() {
         <td><span class="tag src">${esc(r.type)}</span></td>
         <td><span class="tag ${r.status === 'complete' ? 'approved' : r.status === 'rejected' ? 'src' : 'pending'}">${esc(r.status)}</span></td>
         <td>${esc(String(r.d).slice(0,10))}</td><td>${esc(items)}</td>
-        <td>${(+r.refund) ? (+r.refund).toLocaleString() : '—'}</td>
+        <td>${(+r.refund) ? money(r.refund, ccy) : '—'}</td>
         <td>${(r.return_tags || []).map(t => `<span class="tag src">${esc(t)}</span>`).join(' ') || '—'}</td></tr>`;
     }).join('');
     note.textContent = s.sync
@@ -1496,11 +1500,12 @@ async function loadKlaviyo() {
     if (!s.configured) { note.textContent = 'Klaviyo is not connected — an admin can add it on the ＋ page.'; return; }
     const t = s.totals_30d || {};
     const rs = s.revenue_share;
+    const ccy = s.currency;
     document.getElementById('kvKpis').innerHTML = [
       {l:'Campaigns sent (30d)', v: t.campaigns ?? '—'},
       {l:'Avg open rate (30d)', v: t.avg_open_pct != null ? t.avg_open_pct + '%' : '—'},
       {l:'Avg click rate (30d)', v: t.avg_click_pct != null ? t.avg_click_pct + '%' : '—'},
-      {l:'Attributed revenue (30d)', v: (t.revenue ?? 0).toLocaleString()},
+      {l:'Attributed revenue (30d)', v: money(t.revenue, ccy)},
       {l:'Email share of revenue (30d)', v: rs ? rs.pct + '%' : '—'}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
     const unsub = c => c.unsub_rate == null ? '—' : (Math.round(c.unsub_rate*1000)/10) + '%';
@@ -1511,7 +1516,7 @@ async function loadKlaviyo() {
        <td>${c.open_rate != null ? Math.round(c.open_rate*100) + '%' : '—'}</td>
        <td>${c.click_rate != null ? Math.round(c.click_rate*100) + '%' : '—'}</td>
        <td${c.unsub_rate != null && c.unsub_rate >= 0.005 ? ' style="color:var(--red);font-weight:700"' : ''}>${unsub(c)}${c.unsub_rate != null && c.unsub_rate >= 0.005 ? ' ⚠️' : ''}</td>
-       <td>${c.revenue != null ? Math.round(+c.revenue).toLocaleString() : '—'}</td>
+       <td>${c.revenue != null ? money(Math.round(+c.revenue), ccy) : '—'}</td>
        <td>${c.tickets_created ?? '—'}</td>
        <td>${c.tickets_closed ?? '—'}</td></tr>`).join('')
       : '<tr><td colspan="10" class="empty">No campaigns synced yet — hit Sync now</td></tr>';
@@ -1521,7 +1526,7 @@ async function loadKlaviyo() {
        <td>${f.recipients != null ? f.recipients.toLocaleString() : '—'}</td>
        <td>${f.open_rate != null ? Math.round(f.open_rate*100) + '%' : '—'}</td>
        <td>${f.click_rate != null ? Math.round(f.click_rate*100) + '%' : '—'}</td>
-       <td>${f.revenue != null ? Math.round(+f.revenue).toLocaleString() : '—'}</td></tr>`).join('')
+       <td>${f.revenue != null ? money(Math.round(+f.revenue), ccy) : '—'}</td></tr>`).join('')
       : '<tr><td colspan="7" class="empty">No flow data yet — hit Sync now (flows need a sync to populate)</td></tr>';
     note.textContent = (s.sync
       ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · refreshes hourly${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''} · sends appear as ✉️ on the Overview chart`
