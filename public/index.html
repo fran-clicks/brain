@@ -574,14 +574,15 @@ footer{color:rgba(16,17,20,.45)}
   </div>
   <div class="card" id="membersCard" style="display:none">
     <h2>👥 Members <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
-    <table id="membersTable"><thead><tr><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody></tbody></table>
+    <table id="membersTable"><thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Invite link</th></tr></thead><tbody></tbody></table>
     <div class="grid two" style="margin-top:10px">
       <div><label>Email</label><input id="uEmail" type="email" placeholder="name@clicks.tech"></div>
       <div><label>Role</label><select id="uRole"><option value="member">member</option><option value="admin">admin</option></select></div>
     </div>
     <button class="btn" onclick="addUser()">Add member</button>
     <div class="err" id="uErr"></div>
-    <div class="note">New members set their own password on the login page ("First time?") using the invite code — share it with them privately.</div>
+    <div class="note" id="uInvite" style="display:none"></div>
+    <div class="note">Add a member, then copy their invite link and send it (Slack DM, etc.). They open it, choose a password, and they're in — no shared code. Links are single-use and expire in 7 days.</div>
   </div>
   <div class="card" id="connForm">
     <h2>New connector <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
@@ -1908,23 +1909,55 @@ async function loadHealth() {
 }
 
 // members (admins only)
+const inviteUrl = token => `${location.origin}/login.html?invite=${token}`;
+async function copyInvite(token, btn) {
+  try { await navigator.clipboard.writeText(inviteUrl(token)); const t = btn.textContent; btn.textContent = '✓ Copied'; setTimeout(() => btn.textContent = t, 1500); }
+  catch { prompt('Copy this invite link:', inviteUrl(token)); }
+}
 async function loadMembers() {
   if (!window.isAdmin) return;
   try {
     const users = await api('/api/users');
     document.getElementById('membersCard').style.display = 'block';
-    document.querySelector('#membersTable tbody').innerHTML = users.map(u =>
-      `<tr><td><b>${esc(u.email)}</b></td>
+    document.querySelector('#membersTable tbody').innerHTML = users.map(u => {
+      let invite = '—';
+      if (u.activated) invite = '<span style="color:var(--muted)">—</span>';
+      else if (u.invite_token) {
+        const expired = u.invite_expires && new Date(u.invite_expires) < new Date();
+        invite = expired
+          ? `<span class="tag src">expired</span> <button class="btn" style="margin:0;padding:3px 10px;font-size:12px" onclick="regenInvite('${esc(u.email)}')">New link</button>`
+          : `<button class="btn" style="margin:0;padding:3px 10px;font-size:12px" onclick="copyInvite('${esc(u.invite_token)}',this)">📋 Copy link</button>
+             <button class="btn" style="margin:0;padding:3px 10px;font-size:12px;background:#fff;border:1px solid var(--line);box-shadow:none" onclick="regenInvite('${esc(u.email)}')">↻</button>`;
+      }
+      return `<tr><td><b>${esc(u.email)}</b></td>
        <td><span class="tag ${u.role === 'admin' ? 'date' : 'src'}">${esc(u.role)}</span></td>
-       <td><span class="tag ${u.activated ? 'approved' : 'pending'}">${u.activated ? 'active' : 'awaiting first login'}</span></td></tr>`).join('');
+       <td><span class="tag ${u.activated ? 'approved' : 'pending'}">${u.activated ? 'active' : 'awaiting activation'}</span></td>
+       <td>${invite}</td></tr>`;
+    }).join('');
   } catch {}
+}
+async function regenInvite(email) {
+  try {
+    const u = await api('/api/users/invite', {method:'POST', body: JSON.stringify({ email })});
+    showInvite(u);
+    loadMembers();
+  } catch (e) { document.getElementById('uErr').textContent = e.message; }
+}
+function showInvite(u) {
+  const box = document.getElementById('uInvite');
+  if (!u.invite_token) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  box.innerHTML = `Invite link for <b>${esc(u.email)}</b> (single-use, expires in 7 days):<br>
+    <code style="word-break:break-all;font-size:12px">${esc(inviteUrl(u.invite_token))}</code>
+    <button class="btn" style="margin:6px 0 0;padding:4px 12px;font-size:12px" onclick="copyInvite('${esc(u.invite_token)}',this)">📋 Copy</button>`;
 }
 async function addUser() {
   const el = i => document.getElementById(i);
   el('uErr').textContent = '';
   try {
-    await api('/api/users', {method:'POST', body: JSON.stringify({ email: el('uEmail').value.trim(), role: el('uRole').value })});
+    const u = await api('/api/users', {method:'POST', body: JSON.stringify({ email: el('uEmail').value.trim(), role: el('uRole').value })});
     el('uEmail').value = '';
+    showInvite(u);
     loadMembers();
   } catch (e) { el('uErr').textContent = e.message; }
 }

@@ -104,10 +104,14 @@ app.post('/api/auth/logout', (_req, res) => {
 });
 
 // ---------- member management (admins only) ----------
+const INVITE_TTL_DAYS = 7;
+const newInvite = () => ({ token: crypto.randomBytes(24).toString('hex'),
+  expires: new Date(Date.now() + INVITE_TTL_DAYS * 864e5).toISOString() });
+
 app.get('/api/users', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const { rows } = await pool.query(
-    `SELECT email, role, (pass_hash IS NOT NULL) AS activated, created_at FROM users ORDER BY created_at`);
+    `SELECT email, role, (pass_hash IS NOT NULL) AS activated, invite_token, invite_expires, created_at FROM users ORDER BY created_at`);
   res.json(rows);
 });
 app.post('/api/users', async (req, res) => {
@@ -115,11 +119,51 @@ app.post('/api/users', async (req, res) => {
   const em = String(req.body?.email || '').toLowerCase().trim();
   const role = req.body?.role === 'admin' ? 'admin' : 'member';
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) return res.status(400).json({ error: 'valid email required' });
+  const inv = newInvite();
+  // new member (or re-added not-yet-activated one) gets a fresh single-use invite token; activated members keep their token null
   const { rows } = await pool.query(
-    `INSERT INTO users (email, role) VALUES ($1,$2)
-     ON CONFLICT (email) DO UPDATE SET role=$2
-     RETURNING email, role, (pass_hash IS NOT NULL) AS activated`, [em, role]);
+    `INSERT INTO users (email, role, invite_token, invite_expires) VALUES ($1,$2,$3,$4)
+     ON CONFLICT (email) DO UPDATE SET role=$2,
+       invite_token   = CASE WHEN users.pass_hash IS NULL THEN EXCLUDED.invite_token   ELSE users.invite_token   END,
+       invite_expires = CASE WHEN users.pass_hash IS NULL THEN EXCLUDED.invite_expires ELSE users.invite_expires END
+     RETURNING email, role, (pass_hash IS NOT NULL) AS activated, invite_token, invite_expires`,
+    [em, role, inv.token, inv.expires]);
   res.status(201).json(rows[0]);
+});
+// regenerate a fresh invite link for a member who hasn't activated yet
+app.post('/api/users/invite', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const em = String(req.body?.email || '').toLowerCase().trim();
+  const inv = newInvite();
+  const { rows } = await pool.query(
+    `UPDATE users SET invite_token=$2, invite_expires=$3 WHERE email=$1 AND pass_hash IS NULL
+     RETURNING email, role, (pass_hash IS NOT NULL) AS activated, invite_token, invite_expires`, [em, inv.token, inv.expires]);
+  if (!rows[0]) return res.status(400).json({ error: 'User not found or already activated.' });
+  res.json(rows[0]);
+});
+
+// look up an invite token (public) → returns the email it's for, if still valid
+app.get('/api/auth/invite', async (req, res) => {
+  const token = String(req.query.token || '');
+  if (!token) return res.status(400).json({ error: 'missing token' });
+  const u = (await pool.query('SELECT email, invite_expires FROM users WHERE invite_token=$1 AND pass_hash IS NULL', [token])).rows[0];
+  if (!u) return res.status(404).json({ error: 'This invite link is invalid or has already been used.' });
+  if (u.invite_expires && new Date(u.invite_expires) < new Date()) return res.status(410).json({ error: 'This invite link has expired — ask an admin for a new one.' });
+  res.json({ email: u.email });
+});
+
+// activate an account via invite token (public): sets the password, consumes the token, signs in
+app.post('/api/auth/activate', async (req, res) => {
+  const { token, password } = req.body || {};
+  const u = (await pool.query('SELECT email, invite_expires FROM users WHERE invite_token=$1 AND pass_hash IS NULL', [String(token || '')])).rows[0];
+  if (!u) return res.status(403).json({ error: 'This invite link is invalid or has already been used.' });
+  if (u.invite_expires && new Date(u.invite_expires) < new Date()) return res.status(410).json({ error: 'This invite link has expired — ask an admin for a new one.' });
+  if (String(password || '').length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  const salt = crypto.randomBytes(16).toString('hex');
+  await pool.query('UPDATE users SET pass_hash=$1, invite_token=NULL, invite_expires=NULL WHERE email=$2',
+    [`${salt}:${hashPw(password, salt)}`, u.email]);
+  setSessionCookie(res, u.email);
+  res.json({ ok: true, email: u.email });
 });
 
 app.get('/api/auth/me', async (req, res) => {
@@ -229,6 +273,8 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS users (
       email TEXT PRIMARY KEY, pass_hash TEXT, created_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'member';
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_token TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_expires TIMESTAMPTZ;
     CREATE TABLE IF NOT EXISTS connection_requests (
       id SERIAL PRIMARY KEY, service TEXT NOT NULL, reason TEXT NOT NULL,
       requested_by TEXT DEFAULT 'anonymous', status TEXT DEFAULT 'pending',

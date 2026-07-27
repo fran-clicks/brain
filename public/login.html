@@ -76,24 +76,51 @@ function setMode(m) {
   el('resetLink').textContent = mode === 'reset' ? '← Back to sign in' : 'Forgot password? Reset it';
   el('err').textContent = '';
 }
+let inviteToken = null;
 async function go() {
   const el = id => document.getElementById(id);
   el('err').textContent = '';
-  const path = mode === 'setup' ? '/api/auth/setup' : mode === 'reset' ? '/api/auth/reset' : '/api/auth/login';
+  const path = mode === 'activate' ? '/api/auth/activate'
+    : mode === 'setup' ? '/api/auth/setup'
+    : mode === 'reset' ? '/api/auth/reset' : '/api/auth/login';
+  const body = mode === 'activate'
+    ? { token: inviteToken, password: el('password').value }
+    : { email: el('email').value.trim(), password: el('password').value,
+        ...(mode === 'login' ? {} : { invite_code: el('invite').value }) };
   try {
-    const r = await fetch(path, {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({
-        email: el('email').value.trim(), password: el('password').value,
-        ...(mode === 'login' ? {} : { invite_code: el('invite').value })
-      })
-    });
+    const r = await fetch(path, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || r.statusText);
     location.href = '/';
   } catch (e) { el('err').textContent = e.message; }
 }
 document.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+
+// invite-link activation: /login.html?invite=<token>
+(async function initInvite() {
+  const token = new URLSearchParams(location.search).get('invite');
+  if (!token) return;
+  const el = id => document.getElementById(id);
+  try {
+    const r = await fetch('/api/auth/invite?token=' + encodeURIComponent(token));
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    inviteToken = token;
+    mode = 'activate';
+    el('email').value = j.email; el('email').readOnly = true;
+    el('setupFields').style.display = 'none';
+    el('pwLabel').textContent = 'Choose a password';
+    el('password').setAttribute('autocomplete', 'new-password');
+    el('goBtn').textContent = 'Activate & sign in';
+    el('mode-label').textContent = `Welcome! Set a password (min 8 characters) to activate ${j.email}.`;
+    el('toggleLink').closest('.toggle').style.display = 'none';
+    el('resetLink').closest('.toggle').style.display = 'none';
+    el('password').focus();
+  } catch (e) {
+    el('mode-label').textContent = 'Invite link problem';
+    el('err').textContent = e.message;
+  }
+})();
 </script>
 </body>
 </html>
