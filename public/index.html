@@ -1158,9 +1158,16 @@ async function runImpact() {
           tooltip: { callbacks: { title: items => items[0].label + (labels[items[0].dataIndex] === r.date ? ' · event day' : '') } } },
         scales: { y: { beginAtZero: true, ticks: { precision: 0 } }, x: { ticks: { maxRotation: 0, autoSkipPadding: 12 }, grid: { display: false } } } }
     });
-    const others = (r.confounders || []).filter(c => !(c.label === selLabel && c.d === r.date));
+    const others = (r.confounders || []).filter(c => !(c.label === selLabel && c.d === r.date))
+      .sort((a, b) => a.d < b.d ? -1 : 1);
     document.getElementById('impNote').innerHTML = others.length
-      ? `⚠️ ${others.length} other event${others.length > 1 ? 's' : ''} in this window — the change may not be from this one alone: ${others.map(c => `${esc(c.label)} (${esc(c.d)})`).join(', ')}`
+      ? `⚠️ ${others.length} other event${others.length > 1 ? 's' : ''} in this window — the change may not be from this one alone:
+         <div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">${others.map(c =>
+           `<div style="display:flex;align-items:center;gap:8px">
+              <span>${c.kind === 'campaign' ? '✉️' : '📌'}</span>
+              <b>${esc(c.label)}</b>
+              <span style="color:var(--muted)">· ${esc(c.d)}</span>
+            </div>`).join('')}</div>`
       : '✅ No other events in this window. Yellow bars = the event day onward.';
     document.getElementById('impResult').style.display = 'block';
   } catch (e) { document.getElementById('impNote').textContent = '⚠️ ' + e.message; document.getElementById('impResult').style.display = 'block'; }
