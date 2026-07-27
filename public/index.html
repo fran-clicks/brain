@@ -1161,14 +1161,15 @@ async function runImpact() {
     const others = (r.confounders || []).filter(c => !(c.label === selLabel && c.d === r.date))
       .sort((a, b) => a.d < b.d ? -1 : 1);
     document.getElementById('impNote').innerHTML = others.length
-      ? `⚠️ ${others.length} other event${others.length > 1 ? 's' : ''} in this window — the change may not be from this one alone:
-         <div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">${others.map(c =>
-           `<div style="display:flex;align-items:center;gap:8px">
-              <span>${c.kind === 'campaign' ? '✉️' : '📌'}</span>
-              <b>${esc(c.label)}</b>
-              <span style="color:var(--muted)">· ${esc(c.d)}</span>
+      ? `<div style="font-weight:600;color:var(--ink)">⚠️ ${others.length} other event${others.length > 1 ? 's' : ''} in this window</div>
+         <div style="color:var(--muted);font-size:12px;margin:2px 0 8px">The change may not be from this event alone:</div>
+         <div style="display:flex;flex-direction:column;gap:6px">${others.map(c =>
+           `<div style="display:flex;align-items:center;gap:10px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:#fff">
+              <span style="font-size:15px">${c.kind === 'campaign' ? '✉️' : '📌'}</span>
+              <b style="flex:1;min-width:0">${esc(c.label)}</b>
+              <span class="tag src">${esc(c.d)}</span>
             </div>`).join('')}</div>`
-      : '✅ No other events in this window. Yellow bars = the event day onward.';
+      : '✅ No other events in this window. Yellow bars mark the event day onward.';
     document.getElementById('impResult').style.display = 'block';
   } catch (e) { document.getElementById('impNote').textContent = '⚠️ ' + e.message; document.getElementById('impResult').style.display = 'block'; }
   finally { pill.classList.remove('on'); }
