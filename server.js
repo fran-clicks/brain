@@ -1954,6 +1954,75 @@ app.get('/api/stats/overview', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ---------- impact analyzer: how a metric moved around an event ----------
+// metric registry — agg strings are fixed (never user input), so no injection risk
+const IMPACT_METRICS = {
+  orders:          { table: 'orders_cache', col: 'created_at',        agg: 'count(*)',                                                                                         where: 'cancelled_at IS NULL', label: 'Orders' },
+  revenue:         { table: 'orders_cache', col: 'created_at',        agg: 'round(coalesce(sum(total_price),0))',                                                               where: 'cancelled_at IS NULL', label: 'Revenue', money: true },
+  units_fulfilled: { table: 'orders_cache', col: 'fulfilled_at',      agg: "coalesce(sum((SELECT sum(coalesce((it->>'qty')::int,0)) FROM jsonb_array_elements(items) it)),0)",   where: 'cancelled_at IS NULL', label: 'Units fulfilled' },
+  cancelled:       { table: 'orders_cache', col: 'cancelled_at',      agg: 'count(*)',                                                                                         where: 'true', label: 'Cancelled orders' },
+  returns:         { table: 'returns_cache', col: 'created_at',       agg: 'count(*)',                                                                                         where: 'true', label: 'Returns' },
+  tickets_created: { table: 'tickets_cache', col: 'created_datetime', agg: 'count(*)',                                                                                         where: 'NOT spam', label: 'Tickets created' },
+  tickets_closed:  { table: 'tickets_cache', col: 'closed_datetime',  agg: 'count(*)',                                                                                         where: 'NOT spam', label: 'Tickets closed' }
+};
+async function metricDailyMap(mkey, startISO, endISO) {
+  const m = IMPACT_METRICS[mkey];
+  const rows = (await pool.query(
+    `SELECT to_char(date_trunc('day', ${m.col})::date,'YYYY-MM-DD') d, (${m.agg})::numeric v
+     FROM ${m.table} WHERE ${m.col} >= $1 AND ${m.col} < $2 AND (${m.where}) GROUP BY 1`, [startISO, endISO])).rows;
+  const map = {}; rows.forEach(r => { map[r.d] = Number(r.v) || 0; });
+  return map;
+}
+// list of selectable events: Klaviyo sends + team-logged events
+app.get('/api/impact/events', async (_req, res) => {
+  try {
+    const cmps = (await pool.query(
+      `SELECT klaviyo_id, name, channel, to_char(send_time::date,'YYYY-MM-DD') d FROM campaigns_cache
+       WHERE send_time IS NOT NULL ORDER BY send_time DESC LIMIT 300`)).rows
+      .map(c => ({ id: 'kv' + c.klaviyo_id, label: c.name || '(campaign)', date: c.d, kind: 'campaign', sub: c.channel }));
+    const evs = (await pool.query(
+      `SELECT id, title, to_char(event_date,'YYYY-MM-DD') d FROM events ORDER BY event_date DESC LIMIT 300`)).rows
+      .map(e => ({ id: 'ev' + e.id, label: e.title, date: e.d, kind: 'event', sub: 'team event' }));
+    res.json([...cmps, ...evs].sort((a, b) => a.date < b.date ? 1 : -1));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/impact', async (req, res) => {
+  try {
+    const mkey = String(req.query.metric || 'orders');
+    const m = IMPACT_METRICS[mkey];
+    if (!m) return res.status(400).json({ error: 'unknown metric' });
+    const window = Math.min(Math.max(parseInt(req.query.window) || 3, 1), 30);
+    const dateStr = String(req.query.date || '').slice(0, 10);
+    const D = new Date(dateStr + 'T00:00:00Z');
+    if (isNaN(D)) return res.status(400).json({ error: 'bad date' });
+    const addDays = (dt, n) => new Date(dt.getTime() + n * 864e5);
+    const key = dt => dt.toISOString().slice(0, 10);
+    const map = await metricDailyMap(mkey, addDays(D, -(window + 7)).toISOString(), addDays(D, window).toISOString());
+    const sumRange = (from, days) => { let t = 0; for (let i = 0; i < days; i++) t += map[key(addDays(from, i))] || 0; return t; };
+    const before = sumRange(addDays(D, -window), window);
+    const after = sumRange(D, window);          // event day counts as day 0 of "after"
+    const prevWeek = sumRange(addDays(D, -7), window);
+    const series = [];
+    for (let i = -window; i < window; i++) { const k = key(addDays(D, i)); series.push({ d: k, v: map[k] || 0 }); }
+    // other events inside the window (confounders)
+    const wStart = key(addDays(D, -window)), wEnd = key(addDays(D, window));
+    const [evs, cmps] = await Promise.all([
+      pool.query(`SELECT title label, to_char(event_date,'YYYY-MM-DD') d FROM events WHERE event_date >= $1::date AND event_date < $2::date`, [wStart, wEnd]),
+      pool.query(`SELECT name label, to_char(send_time::date,'YYYY-MM-DD') d FROM campaigns_cache WHERE send_time >= $1 AND send_time < $2`, [addDays(D, -window).toISOString(), addDays(D, window).toISOString()])
+    ]);
+    const confounders = [...evs.rows.map(r => ({ ...r, kind: 'event' })), ...cmps.rows.map(r => ({ ...r, kind: 'campaign' }))];
+    const currency = m.money ? ((await pool.query(`SELECT max(currency) c FROM orders_cache WHERE currency <> ''`)).rows[0]?.c || 'USD') : null;
+    res.json({
+      metric: mkey, label: m.label, money: !!m.money, currency, date: dateStr, window,
+      before, after, prev_week: prevWeek,
+      change_abs: after - before,
+      change_pct: before > 0 ? Math.round((after - before) / before * 1000) / 10 : null,
+      vs_prev_week_pct: prevWeek > 0 ? Math.round((after - prevWeek) / prevWeek * 1000) / 10 : null,
+      series, confounders
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Gorgias tab: synced-cache stats always; live extras (CSAT, FRT, all-time total) when the connector is available
 app.get('/api/gorgias/stats', async (req, res) => {
   const cfg = await getGorgiasConfig();

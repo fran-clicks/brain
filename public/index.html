@@ -205,6 +205,40 @@ footer{color:rgba(16,17,20,.45)}
     </div>
     <div class="note" id="homeNote"></div>
   </div>
+  <div class="card" style="margin-top:14px">
+    <h2>📈 Impact analyzer</h2>
+    <div class="note" style="margin-top:0">Pick a metric and an event to see how it moved in the days around that event. This is correlation, not proof — check for other events in the same window.</div>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:10px 0">
+      <div>
+        <label style="display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:3px">Metric</label>
+        <select id="impMetric" style="width:auto">
+          <option value="orders">Orders</option>
+          <option value="revenue">Revenue</option>
+          <option value="units_fulfilled">Units fulfilled</option>
+          <option value="cancelled">Cancelled orders</option>
+          <option value="returns">Returns</option>
+          <option value="tickets_created">Tickets created</option>
+          <option value="tickets_closed">Tickets closed</option>
+        </select>
+      </div>
+      <div>
+        <label style="display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:3px">Event</label>
+        <select id="impEvent" style="width:auto;max-width:340px"><option value="">Select an event…</option></select>
+      </div>
+      <div>
+        <label style="display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:3px">Window</label>
+        <div class="periods" id="impWindow" style="margin:0">
+          <button data-w="1">±1d</button><button data-w="3" class="active">±3d</button><button data-w="7">±7d</button><button data-w="14">±14d</button>
+        </div>
+      </div>
+      <span class="updating-pill" id="impUpdating"><div class="spin"></div>Loading…</span>
+    </div>
+    <div id="impResult" style="display:none">
+      <div class="grid kpis" id="impKpis"></div>
+      <div class="chart-wrap" style="height:200px;margin-top:12px"><canvas id="impChart"></canvas></div>
+      <div class="note" id="impNote" style="margin-top:8px"></div>
+    </div>
+  </div>
   <div class="grid two">
     <div class="card">
       <h2>📌 Recent events <span style="font-weight:400;color:var(--muted);font-size:12px">· today & last 7 days</span></h2>
@@ -1076,6 +1110,61 @@ async function loadOverview() {
   } catch (e) {
     document.getElementById('homeNote').textContent = 'Overview error: ' + e.message;
   }
+}
+// ---------- impact analyzer ----------
+let impEventsLoaded = false, impWindow = 3, impChart;
+async function loadImpactEvents() {
+  if (impEventsLoaded) return;
+  try {
+    const evs = await api('/api/impact/events');
+    const sel = document.getElementById('impEvent');
+    sel.innerHTML = '<option value="">Select an event…</option>' + evs.map(e =>
+      `<option value="${esc(e.date)}" data-id="${esc(e.id)}" data-label="${esc(e.label)}">${e.kind === 'campaign' ? '✉️' : '📌'} ${esc(e.label)} — ${esc(e.date)}</option>`).join('');
+    impEventsLoaded = true;
+  } catch {}
+}
+document.querySelectorAll('#impWindow button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#impWindow button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active'); impWindow = +b.dataset.w; runImpact();
+});
+['impMetric', 'impEvent'].forEach(id => document.getElementById(id).addEventListener('change', runImpact));
+async function runImpact() {
+  const metric = document.getElementById('impMetric').value;
+  const evSel = document.getElementById('impEvent');
+  const date = evSel.value;
+  if (!date) { document.getElementById('impResult').style.display = 'none'; return; }
+  const selLabel = evSel.selectedOptions[0]?.dataset.label || '';
+  const pill = document.getElementById('impUpdating'); pill.classList.add('on');
+  try {
+    const r = await api(`/api/impact?metric=${metric}&date=${date}&window=${impWindow}`);
+    const fmt = v => r.money ? money(Math.round(v), r.currency) : Math.round(v).toLocaleString();
+    const pct = p => p == null ? '—' : (p > 0 ? '+' : '') + p + '%';
+    const arrow = p => p == null ? '' : p > 0 ? ' ▲' : p < 0 ? ' ▼' : '';
+    document.getElementById('impKpis').innerHTML = [
+      {l:`Before (${impWindow}d)`, v: fmt(r.before)},
+      {l:`After (${impWindow}d)`, v: fmt(r.after)},
+      {l:'Change', v: `${r.change_abs > 0 ? '+' : ''}${fmt(r.change_abs)} (${pct(r.change_pct)})${arrow(r.change_pct)}`},
+      {l:'vs same days last week', v: `${pct(r.vs_prev_week_pct)}${arrow(r.vs_prev_week_pct)}`}
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    if (impChart) impChart.destroy();
+    const labels = r.series.map(p => p.d);
+    const evIdx = labels.indexOf(r.date);
+    impChart = new Chart(document.getElementById('impChart'), {
+      type: 'bar',
+      data: { labels, datasets: [{ label: r.label, data: r.series.map(p => p.v),
+        backgroundColor: labels.map((l, i) => i >= evIdx ? '#ffc800' : 'rgba(16,17,20,.22)') }] },
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { title: items => items[0].label + (labels[items[0].dataIndex] === r.date ? ' · event day' : '') } } },
+        scales: { y: { beginAtZero: true, ticks: { precision: 0 } }, x: { ticks: { maxRotation: 0, autoSkipPadding: 12 }, grid: { display: false } } } }
+    });
+    const others = (r.confounders || []).filter(c => !(c.label === selLabel && c.d === r.date));
+    document.getElementById('impNote').innerHTML = others.length
+      ? `⚠️ ${others.length} other event${others.length > 1 ? 's' : ''} in this window — the change may not be from this one alone: ${others.map(c => `${esc(c.label)} (${esc(c.d)})`).join(', ')}`
+      : '✅ No other events in this window. Yellow bars = the event day onward.';
+    document.getElementById('impResult').style.display = 'block';
+  } catch (e) { document.getElementById('impNote').textContent = '⚠️ ' + e.message; document.getElementById('impResult').style.display = 'block'; }
+  finally { pill.classList.remove('on'); }
 }
 async function syncNow() {
   const b = document.getElementById('syncBtn');
@@ -2097,7 +2186,7 @@ api('/api/auth/me').then(m => {
   }
 }).catch(() => {});
 
-loadOverview().then(prefetchPeriods); loadEvents(); loadShopify(); loadStock(); loadKlaviyo(); loadRedo(); loadGorgias(); loadKbs(); loadKbAudit(); loadConnectorTypes(); loadConnectors(); loadRequests();
+loadOverview().then(prefetchPeriods); loadEvents(); loadShopify(); loadStock(); loadKlaviyo(); loadRedo(); loadGorgias(); loadKbs(); loadKbAudit(); loadConnectorTypes(); loadConnectors(); loadRequests(); loadImpactEvents();
 </script>
 </body>
 </html>
