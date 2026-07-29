@@ -130,6 +130,16 @@ app.post('/api/users', async (req, res) => {
     [em, role, inv.token, inv.expires]);
   res.status(201).json(rows[0]);
 });
+// remove a member entirely (admin only). Can't delete your own logged-in account.
+app.post('/api/users/remove', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const em = String(req.body?.email || '').toLowerCase().trim();
+  const me = readSession(req);
+  if (em && em === String(me || '').toLowerCase()) return res.status(400).json({ error: "You can't remove your own account." });
+  const r = await pool.query('DELETE FROM users WHERE email=$1', [em]);
+  if (!r.rowCount) return res.status(404).json({ error: 'User not found.' });
+  res.json({ ok: true });
+});
 // regenerate a fresh invite link for a member who hasn't activated yet
 app.post('/api/users/invite', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });

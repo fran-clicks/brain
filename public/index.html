@@ -608,7 +608,7 @@ footer{color:rgba(16,17,20,.45)}
   </div>
   <div class="card" id="membersCard" style="display:none">
     <h2>👥 Members <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
-    <table id="membersTable"><thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Invite link</th></tr></thead><tbody></tbody></table>
+    <table id="membersTable"><thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Invite link</th><th></th></tr></thead><tbody></tbody></table>
     <div class="grid two" style="margin-top:10px">
       <div><label>Email</label><input id="uEmail" type="email" placeholder="name@clicks.tech"></div>
       <div><label>Role</label><select id="uRole"><option value="member">member</option><option value="admin">admin</option></select></div>
@@ -2052,12 +2052,24 @@ async function loadMembers() {
           : `<button class="btn" style="margin:0;padding:3px 10px;font-size:12px" onclick="copyInvite('${esc(u.invite_token)}',this)">📋 Copy link</button>
              <button class="btn" style="margin:0;padding:3px 10px;font-size:12px;background:#fff;border:1px solid var(--line);box-shadow:none" onclick="regenInvite('${esc(u.email)}')">↻</button>`;
       }
+      const canRemove = u.email !== window.myEmail;
+      const remove = canRemove
+        ? `<button class="btn" style="margin:0;padding:3px 10px;font-size:12px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="removeUser('${esc(u.email)}')">Remove</button>`
+        : '<span style="color:var(--muted);font-size:12px">you</span>';
       return `<tr><td><b>${esc(u.email)}</b></td>
        <td><span class="tag ${u.role === 'admin' ? 'date' : 'src'}">${esc(u.role)}</span></td>
        <td><span class="tag ${u.activated ? 'approved' : 'pending'}">${u.activated ? 'active' : 'awaiting activation'}</span></td>
-       <td>${invite}</td></tr>`;
+       <td>${invite}</td><td>${remove}</td></tr>`;
     }).join('');
   } catch {}
+}
+async function removeUser(email) {
+  if (!confirm(`Remove ${email}? Their account and password are deleted. You can re-add them to send a fresh invite.`)) return;
+  try {
+    await api('/api/users/remove', {method:'POST', body: JSON.stringify({ email })});
+    document.getElementById('uInvite').style.display = 'none';
+    loadMembers();
+  } catch (e) { document.getElementById('uErr').textContent = e.message; }
 }
 async function regenInvite(email) {
   try {
@@ -2200,6 +2212,7 @@ api('/api/auth/me').then(m => {
   const w = document.getElementById('whoami');
   if (m.email) {
     window.isAdmin = m.role === 'admin';
+    window.myEmail = m.email;
     w.textContent = `👤 ${m.email}${window.isAdmin ? ' · admin' : ''} · sign out`;
     w.onclick = async () => { await api('/api/auth/logout', {method:'POST', body:'{}'}); location.href = '/login.html'; };
     if (window.isAdmin) {
