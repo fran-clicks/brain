@@ -1829,16 +1829,19 @@ app.post('/api/shopify/sync', async (_req, res) => {
 
 // ---------- overview stats (from local cache → any period) ----------
 const CANCEL_RX = 'cancel|refund|return|chargeback';
+// choose a sensible bucket so long ranges don't turn into 52+ noisy points:
+// ≤31d daily · ≤180d weekly · beyond that monthly (so a year = 12 points)
+const bucketFor = days => days <= 31 ? 'day' : days <= 180 ? 'week' : 'month';
 // resolve a time window from query params: ?days=N (preset) or ?from=ISO&to=ISO (custom)
 function resolveWindow(query) {
   const from = query.from ? new Date(query.from) : null;
   const to = query.to ? new Date(query.to) : null;
   if (from && to && !isNaN(from) && !isNaN(to) && from < to) {
     const days = Math.max(1, Math.round((to - from) / 864e5));
-    return { start: from, end: to, days, bucket: days <= 31 ? 'day' : 'week', custom: true };
+    return { start: from, end: to, days, bucket: bucketFor(days), custom: true };
   }
   const days = Math.min(Math.max(parseInt(query.days) || 7, 1), 366);
-  return { start: new Date(Date.now() - days * 864e5), end: new Date(), days, bucket: days <= 31 ? 'day' : 'week', custom: false };
+  return { start: new Date(Date.now() - days * 864e5), end: new Date(), days, bucket: bucketFor(days), custom: false };
 }
 
 async function overviewStats(win) {
