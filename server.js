@@ -1829,9 +1829,8 @@ app.post('/api/shopify/sync', async (_req, res) => {
 
 // ---------- overview stats (from local cache → any period) ----------
 const CANCEL_RX = 'cancel|refund|return|chargeback';
-// choose a sensible bucket so long ranges don't turn into 52+ noisy points:
-// ≤31d daily · ≤180d weekly · beyond that monthly (so a year = 12 points)
-const bucketFor = days => days <= 31 ? 'day' : days <= 180 ? 'week' : 'month';
+// ≤31d daily, otherwise weekly
+const bucketFor = days => days <= 31 ? 'day' : 'week';
 // resolve a time window from query params: ?days=N (preset) or ?from=ISO&to=ISO (custom)
 function resolveWindow(query) {
   const from = query.from ? new Date(query.from) : null;

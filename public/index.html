@@ -1714,7 +1714,7 @@ async function loadGorgias() {
   document.getElementById('gUpdating').classList.add('on');
   try {
     const g = await api('/api/gorgias/stats?' + (gCustom ? `from=${gCustom.from}&to=${gCustom.to}` : `days=${gDays}`));
-    document.getElementById('gChartTitle').textContent = `Tickets created and closed — ${gCustom ? gLabel() : 'last ' + gLabel()}${g.bucket === 'week' ? ' (weekly)' : g.bucket === 'month' ? ' (monthly)' : ''}`;
+    document.getElementById('gChartTitle').textContent = `Tickets created and closed — ${gCustom ? gLabel() : 'last ' + gLabel()}${g.bucket === 'week' ? ' (weekly)' : ''}`;
     const frt = g.avg_first_response_seconds != null ? (g.avg_first_response_seconds/3600).toFixed(1) + 'h' : '—';
     document.getElementById('gorgiasKpis').innerHTML = [
       {l:'Total tickets (all time)', v: g.total_tickets ?? (g.cached_total != null ? `${g.cached_total} synced` : '—')},
