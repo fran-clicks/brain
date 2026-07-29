@@ -1065,7 +1065,14 @@ async function loadOverview() {
             callbacks: {
               title(items) {
                 const it = items[0];
-                return `${it.dataset.label} · ${it.label}`;
+                let when = it.label;
+                if (s.bucket === 'week') { // label is the week-start (Mon); show the full week it covers
+                  const start = new Date(it.label + 'T00:00:00');
+                  const end = new Date(start.getTime() + 6 * 864e5);
+                  const f = d => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+                  when = `week of ${f(start)} – ${f(end)}`;
+                }
+                return `${it.dataset.label} · ${when}`;
               },
               label(it) {
                 const l = it.dataset.label;
