@@ -694,7 +694,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (s === 'redo') loadRedo();
   if (s === 'home') loadOverview();
   if (s === 'kb') { loadKbs(); loadKbAudit(); }
-  if (s === 'conn') { loadConnectors(); loadRequests(); loadMembers(); loadHealth(); }
+  if (s === 'conn') { loadConnectorTypes(); loadConnectors(); loadRequests(); loadMembers(); loadHealth(); }
 });
 
 // ---------- overview ----------
@@ -2215,7 +2215,10 @@ api('/api/auth/me').then(m => {
   }
 }).catch(() => {});
 
-loadOverview().then(prefetchPeriods); loadEvents(); loadShopify(); loadStock(); loadKlaviyo(); loadRedo(); loadGorgias(); loadKbs(); loadKbAudit(); loadConnectorTypes(); loadConnectors(); loadRequests(); loadImpactEvents();
+// only load what the default (Overview) tab needs up front; every other tab loads its own data
+// when you switch to it (see the nav handler), so we don't hammer the DB with ~13 concurrent
+// queries on first paint. prefetch of other periods is deferred so it doesn't compete with the first render.
+loadOverview().then(() => setTimeout(prefetchPeriods, 4000)); loadEvents(); loadImpactEvents();
 </script>
 </body>
 </html>
