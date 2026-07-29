@@ -665,6 +665,14 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 // money formatter: currency symbol + amount (falls back to $/USD if unknown)
 const CCY_SYM = { USD:'$', GBP:'£', EUR:'€', AUD:'A$', CAD:'C$', NZD:'NZ$', JPY:'¥' };
 const money = (v, ccy) => `${CCY_SYM[ccy] || (ccy ? ccy + ' ' : '$')}${Number(v || 0).toLocaleString()}`;
+// axis date formatter: daily → "Jul 5"; weekly (label is week-start Mon) → "Dec 29–Jan 4"
+function fmtAxisDate(iso, bucket) {
+  const d = new Date(String(iso).slice(0,10) + 'T00:00:00');
+  if (isNaN(d)) return iso;
+  const f = dt => dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  if (bucket === 'week') { const e = new Date(d.getTime() + 6 * 864e5); return `${f(d)}–${f(e)}`; }
+  return f(d);
+}
 const api = async (p, opts) => {
   const r = await fetch(p, opts ? {headers:{'Content-Type':'application/json'}, ...opts} : undefined);
   const j = await r.json().catch(() => ({}));
@@ -1102,7 +1110,8 @@ async function loadOverview() {
                     ticks:{precision:0, color:'#5f6368', font:{size:11}},
                     grid:{color:'rgba(16,17,20,.06)'}, border:{display:false},
                     title:{display:true, text:'Count per day (detail below 300)', color:'#5f6368', font:{size:11}}},
-                 x:{ticks:{color:'#5f6368', font:{size:11}, maxRotation:0, autoSkipPadding:16},
+                 x:{ticks:{color:'#5f6368', font:{size:11}, maxRotation:0, autoSkipPadding: s.bucket === 'week' ? 26 : 16,
+                    callback: function(v){ return fmtAxisDate(this.getLabelForValue(v), s.bucket); }},
                     grid:{display:false}, border:{display:false}} } }
     });
     document.getElementById('syncInfo').textContent = s.last_sync
