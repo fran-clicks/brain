@@ -1150,6 +1150,7 @@ async function runImpact() {
   const date = evSel.value;
   if (!date) { document.getElementById('impResult').style.display = 'none'; return; }
   const selLabel = evSel.selectedOptions[0]?.dataset.label || '';
+  const selId = evSel.selectedOptions[0]?.dataset.id || '';
   const pill = document.getElementById('impUpdating'); pill.classList.add('on');
   try {
     const r = await api(`/api/impact?metric=${metric}&date=${date}&window=${impWindow}`);
@@ -1165,13 +1166,37 @@ async function runImpact() {
     if (impChart) impChart.destroy();
     const labels = r.series.map(p => p.d);
     const evIdx = labels.indexOf(r.date);
+    // map each day → the events on it (icon + names), including the selected one, for markers + tooltips
+    const dayEvents = {};
+    const push = (d, kind, label) => { (dayEvents[d] = dayEvents[d] || []).push({ icon: kind === 'campaign' ? '✉️' : '📌', label }); };
+    (r.confounders || []).forEach(c => push(c.d, c.kind, c.label));
+    push(r.date, selId.startsWith('kv') ? 'campaign' : 'event', selLabel); // the selected event itself
+    const iconPlugin = {
+      id: 'impIcons',
+      afterDatasetsDraw(chart) {
+        const { ctx, scales: { x }, chartArea } = chart;
+        ctx.save(); ctx.font = '13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+        labels.forEach((lab, i) => {
+          const evs = dayEvents[lab];
+          if (!evs || !evs.length) return;
+          const icons = [...new Set(evs.map(e => e.icon))].join('');
+          ctx.fillText(icons, x.getPixelForValue(i), chartArea.top - 16);
+        });
+        ctx.restore();
+      }
+    };
     impChart = new Chart(document.getElementById('impChart'), {
       type: 'bar',
       data: { labels, datasets: [{ label: r.label, data: r.series.map(p => p.v),
         backgroundColor: labels.map((l, i) => i >= evIdx ? '#ffc800' : 'rgba(16,17,20,.22)') }] },
+      plugins: [iconPlugin],
       options: { responsive: true, maintainAspectRatio: false,
+        layout: { padding: { top: 20 } },
         plugins: { legend: { display: false },
-          tooltip: { callbacks: { title: items => items[0].label + (labels[items[0].dataIndex] === r.date ? ' · event day' : '') } } },
+          tooltip: { callbacks: {
+            title: items => items[0].label + (labels[items[0].dataIndex] === r.date ? ' · event day' : ''),
+            afterBody: items => (dayEvents[items[0].label] || []).map(e => `${e.icon} ${e.label}`)
+          } } },
         scales: { y: { beginAtZero: true, ticks: { precision: 0 } }, x: { ticks: { maxRotation: 0, autoSkipPadding: 12 }, grid: { display: false } } } }
     });
     const others = (r.confounders || []).filter(c => !(c.label === selLabel && c.d === r.date))
