@@ -268,6 +268,9 @@ async function initDb() {
       sku TEXT PRIMARY KEY, name TEXT DEFAULT '', upc TEXT DEFAULT '',
       on_hand INT, fulfillable INT, committed INT, by_fc JSONB DEFAULT '[]', updated_at TIMESTAMPTZ DEFAULT now());
     DROP TABLE IF EXISTS shipbob_inventory;
+    CREATE TABLE IF NOT EXISTS floship_stock (
+      sku TEXT PRIMARY KEY, description TEXT DEFAULT '', upc TEXT DEFAULT '',
+      qty INT, on_hand INT, by_wh JSONB DEFAULT '[]', updated_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS orders_cache (
       shopify_id BIGINT PRIMARY KEY, order_number TEXT DEFAULT '',
       created_at TIMESTAMPTZ, cancelled_at TIMESTAMPTZ,
@@ -519,7 +522,7 @@ app.post('/api/connectors', async (req, res) => {
     } else if (type === 'floship') {
       const p = await floshipProbe(config.base_url, config.token);
       if (!p.ok) throw new Error(`no auth style worked (last: ${p.auth || '?'} → ${p.status || p.error})`);
-      meta = { endpoint: String(config.base_url).replace(/^https?:\/\//, '').split('/')[0], auth: p.auth };
+      meta = { endpoint: String(config.base_url).replace(/^https?:\/\//, '').split('/')[0], auth: p.auth, products_url: p.url };
     } else if (type === 'klaviyo') {
       const m = await klaviyoRequest(config, '/api/metrics/');
       meta = { metrics_visible: (m.data || []).length };
@@ -548,6 +551,7 @@ app.post('/api/connectors', async (req, res) => {
   if (type === 'klaviyo') syncKlaviyo().catch(e => console.error('initial klaviyo sync:', e.message));
   if (type === 'redo') syncRedo(20).catch(e => console.error('initial redo sync:', e.message));
   if (type === 'shipbob') syncShipbob().catch(e => console.error('initial shipbob sync:', e.message));
+  if (type === 'floship') syncFloship().catch(e => console.error('initial floship sync:', e.message));
   res.status(201).json(rows[0]);
 });
 
@@ -939,6 +943,12 @@ setInterval(async () => {
       await syncShipbob();
     }
   } catch (e) { console.error('interval shipbob sync:', e.message); }
+  try {
+    const fs = (await pool.query(`SELECT v FROM sync_state WHERE k='floship'`)).rows[0]?.v;
+    if (await getConnector('floship') && (!fs?.last_run || Date.now() - Date.parse(fs.last_run) > 55 * 60 * 1000)) {
+      await syncFloship();
+    }
+  } catch (e) { console.error('interval floship sync:', e.message); }
 }, 5 * 60 * 1000);
 
 async function bootSync() {
@@ -1847,6 +1857,81 @@ app.post('/api/floship/probe', async (req, res) => {
   const { base_url, token } = req.body || {};
   if (!base_url) return res.status(400).json({ error: 'base_url required' });
   res.json(await floshipProbe(String(base_url).trim(), String(token || '')));
+});
+// apply a discovered auth style (by its probe label) to a url
+function floshipAuthApply(auth, url, token) {
+  const qp = (u, k) => u + (u.includes('?') ? '&' : '?') + k + '=' + encodeURIComponent(token);
+  const map = {
+    'Bearer': [url, { Authorization: `Bearer ${token}` }],
+    'Token': [url, { Authorization: `Token ${token}` }],
+    'Token token=': [url, { Authorization: `Token token=${token}` }],
+    'Api-Key': [url, { Authorization: `Api-Key ${token}` }],
+    'raw Authorization': [url, { Authorization: token }],
+    'X-API-Key': [url, { 'X-API-Key': token }],
+    'api-token': [url, { 'api-token': token }],
+    'api_key header': [url, { api_key: token }],
+    'Basic key:': [url, { Authorization: 'Basic ' + Buffer.from(token + ':').toString('base64') }],
+    '?api_key=': [qp(url, 'api_key'), {}],
+    '?token=': [qp(url, 'token'), {}]
+  };
+  return map[auth] || [url, { Authorization: `Token ${token}` }];
+}
+let floshipSyncRunning = false;
+async function syncFloship() {
+  if (floshipSyncRunning) return { skipped: true };
+  const conn = await getConnector('floship');
+  if (!conn) return { configured: false };
+  const cfg = conn.config;
+  const auth = conn.meta?.auth || 'Token';
+  const first = conn.meta?.products_url || (String(cfg.base_url).replace(/\/+$/, '') + '/products');
+  floshipSyncRunning = true;
+  let upserts = 0, lastError = null;
+  try {
+    const skusSeen = [];
+    let page = first, guard = 0;
+    while (page && guard++ < 200) {
+      const [u, hdrs] = floshipAuthApply(auth, page, cfg.token);
+      const r = await fetch(u, { headers: { ...hdrs, Accept: 'application/json' } });
+      if (!r.ok) throw new Error(`Floship ${r.status} at ${page}`);
+      const body = await r.json();
+      const results = Array.isArray(body) ? body : (body.results || []);
+      for (const p of results) {
+        const sku = String(p.sku || '').trim();
+        if (!sku) continue;
+        const wh = p.warehouses_stock || [];
+        const qty = wh.reduce((s, w) => s + (w.qty || 0), 0);
+        const onHand = wh.reduce((s, w) => s + (w.qty_on_hand || 0), 0);
+        await pool.query(
+          `INSERT INTO floship_stock (sku, description, upc, qty, on_hand, by_wh, updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,now())
+           ON CONFLICT (sku) DO UPDATE SET description=$2, upc=$3, qty=$4, on_hand=$5, by_wh=$6, updated_at=now()`,
+          [sku, String(p.description || '').slice(0, 300), String(p.upc || ''), qty, onHand, JSON.stringify(wh)]);
+        skusSeen.push(sku); upserts++;
+      }
+      page = (body && typeof body === 'object' && body.next) ? body.next : null;
+    }
+    if (skusSeen.length) await pool.query('DELETE FROM floship_stock WHERE sku <> ALL($1)', [skusSeen]);
+  } catch (e) { lastError = String(e.message); console.error('floship sync:', lastError); }
+  finally {
+    await pool.query(`INSERT INTO sync_state (k, v) VALUES ('floship', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
+      [JSON.stringify({ last_run: new Date().toISOString(), upserts, last_error: lastError })]).catch(() => {});
+    floshipSyncRunning = false;
+  }
+  return { upserts, error: lastError };
+}
+app.get('/api/floship/summary', async (_req, res) => {
+  const conn = await getConnector('floship');
+  const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='floship'`)).rows[0]?.v || null;
+  const items = (await pool.query(
+    `SELECT sku, description, upc, qty, on_hand, by_wh FROM floship_stock ORDER BY sku`)).rows;
+  const totals = (await pool.query(
+    `SELECT count(*)::int items, coalesce(sum(qty),0)::int qty, coalesce(sum(on_hand),0)::int on_hand FROM floship_stock`)).rows[0];
+  res.json({ configured: !!conn, items, totals, sync: ss });
+});
+app.post('/api/floship/sync', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  try { res.json(await syncFloship()); }
+  catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 // ---------- Shopify (orders sync, same pattern as Gorgias) ----------

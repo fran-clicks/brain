@@ -593,20 +593,25 @@ footer{color:rgba(16,17,20,.45)}
   </div>
 
   <!-- Floship -->
+  <div class="grid kpis" id="flKpis"></div>
   <div class="card">
-    <h2><span class="src-badge" style="background:#2563eb">Floship</span>Inventory <span style="font-weight:400;color:var(--muted);font-size:12px">· HK</span>
+    <h2><span class="src-badge" style="background:#2563eb">Floship</span>Inventory <span style="font-weight:400;color:var(--muted);font-size:12px">· HK / EU</span>
+      <span class="updating-pill" id="flUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
       <span id="flAdminBar" style="display:none;float:right">
+        <button class="btn" style="margin:0 0 0 6px;padding:5px 12px" onclick="flSync()">🔄 Sync now</button>
         <button class="btn" style="margin:0 0 0 6px;padding:5px 12px;background:#fff;border:1px solid var(--line);box-shadow:none" onclick="flDebug()">🧪 Test API</button>
       </span>
     </h2>
-    <div class="note" id="flNote" style="margin-top:0">Not connected yet. Use the probe below to find the right endpoint URL + auth before saving the connector.</div>
-    <div id="flProbeForm" style="display:none;margin-top:10px">
-      <div class="grid two">
-        <div><label>Endpoint URL to test</label><input id="flUrl" placeholder="https://api.floship.com/…"></div>
+    <input class="search" id="flSearch" placeholder="Search SKU or description…">
+    <table id="flTable"><thead><tr><th>SKU</th><th>Description</th><th style="text-align:center">Available</th><th style="text-align:center">On hand</th><th>By warehouse</th></tr></thead><tbody></tbody></table>
+    <div class="note" id="flNote" style="margin-top:8px">Loading…</div>
+    <div id="flProbeForm" style="display:none;margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
+      <div class="note" style="margin-top:0">Not connected? Probe the endpoint first, then add it on the ＋ page.</div>
+      <div class="grid two" style="margin-top:6px">
+        <div><label>Endpoint URL to test</label><input id="flUrl" placeholder="https://admin.floship.com/api/v2/"></div>
         <div><label>Token / key</label><input id="flTok" type="password" autocomplete="off"></div>
       </div>
       <button class="btn" style="margin:6px 0 0" onclick="flProbe()">🧪 Probe (no save)</button>
-      <span style="color:var(--muted);font-size:12px;margin-left:8px">tries many auth styles and shows each status — find the one that returns 200, then save it as the connector.</span>
     </div>
     <pre id="flDebugOut" style="display:none;white-space:pre-wrap;font-size:11px;background:rgba(16,17,20,.04);border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px;max-height:360px;overflow:auto"></pre>
   </div>
@@ -827,8 +832,6 @@ function renderSbTable() {
 async function loadFulfillment() {
   const note = document.getElementById('sbNote');
   document.getElementById('sbAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
-  document.getElementById('flAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
-  document.getElementById('flProbeForm').style.display = window.isAdmin ? 'block' : 'none';
   document.getElementById('sbUpdating').classList.add('on');
   try {
     const s = await api('/api/shipbob/summary');
@@ -853,8 +856,57 @@ async function loadFulfillment() {
       : (window.isAdmin ? 'Connected — hit Sync now to pull inventory.' : 'Waiting for first sync.');
   } catch (e) { note.textContent = '⚠️ ' + e.message; }
   finally { document.getElementById('sbUpdating').classList.remove('on'); }
+  loadFloship();
 }
 document.getElementById('sbSearch').oninput = renderSbTable;
+// ---- Floship ----
+let flItems = [];
+function renderFlTable() {
+  const q = (document.getElementById('flSearch').value || '').toLowerCase();
+  const rows = flItems.filter(i => ((i.sku || '') + ' ' + (i.description || '')).toLowerCase().includes(q));
+  const num = v => v == null ? '<span style="color:var(--muted)">—</span>' : Number(v).toLocaleString();
+  document.querySelector('#flTable tbody').innerHTML = rows.length ? rows.map(i => {
+    const wh = (i.by_wh || []).filter(w => (w.qty || 0) > 0 || (w.qty_on_hand || 0) > 0)
+      .map(w => `${esc((w.warehouse_name || '').replace('Floship ', ''))}: ${w.qty ?? 0}`).join(' · ');
+    return `<tr><td>${i.sku ? `<span class="tag src">${esc(i.sku)}</span>` : '—'}</td>
+      <td>${esc(i.description || '')}</td>
+      <td style="text-align:center;font-weight:600">${num(i.qty)}</td>
+      <td style="text-align:center">${num(i.on_hand)}</td>
+      <td style="font-size:12px;color:var(--muted)">${esc(wh) || '—'}</td></tr>`;
+  }).join('') : '<tr><td colspan="5" class="empty">No matches</td></tr>';
+}
+async function loadFloship() {
+  const note = document.getElementById('flNote');
+  document.getElementById('flAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
+  document.getElementById('flUpdating').classList.add('on');
+  try {
+    const s = await api('/api/floship/summary');
+    document.getElementById('flProbeForm').style.display = (window.isAdmin && !s.configured) ? 'block' : 'none';
+    if (!s.configured) {
+      note.textContent = window.isAdmin ? 'Floship is not connected — probe the endpoint below, then add it on the ＋ page.' : 'Floship is not connected yet.';
+      document.getElementById('flKpis').innerHTML = ''; flItems = []; renderFlTable();
+      return;
+    }
+    const t = s.totals || {};
+    document.getElementById('flKpis').innerHTML = [
+      {l:'SKUs', v: (t.items ?? 0).toLocaleString()},
+      {l:'Available', v: (t.qty ?? 0).toLocaleString()},
+      {l:'On hand', v: (t.on_hand ?? 0).toLocaleString()}
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    flItems = s.items || [];
+    renderFlTable();
+    note.textContent = s.sync
+      ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · ${flItems.length} SKUs${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''}`
+      : (window.isAdmin ? 'Connected — hit Sync now to pull inventory.' : 'Waiting for first sync.');
+  } catch (e) { note.textContent = '⚠️ ' + e.message; }
+  finally { document.getElementById('flUpdating').classList.remove('on'); }
+}
+document.getElementById('flSearch').oninput = renderFlTable;
+async function flSync() {
+  document.getElementById('flUpdating').classList.add('on');
+  try { await api('/api/floship/sync', {method:'POST', body:'{}'}); loadFloship(); }
+  catch (e) { document.getElementById('flNote').textContent = '⚠️ ' + e.message; document.getElementById('flUpdating').classList.remove('on'); }
+}
 async function sbSync() {
   document.getElementById('sbUpdating').classList.add('on');
   try { await api('/api/shipbob/sync', {method:'POST', body:'{}'}); loadFulfillment(); }
