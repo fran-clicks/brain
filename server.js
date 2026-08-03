@@ -271,6 +271,9 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS floship_stock (
       sku TEXT PRIMARY KEY, description TEXT DEFAULT '', upc TEXT DEFAULT '',
       qty INT, on_hand INT, by_wh JSONB DEFAULT '[]', updated_at TIMESTAMPTZ DEFAULT now());
+    CREATE TABLE IF NOT EXISTS manual_stock (
+      sku TEXT, source TEXT, qty INT, description TEXT DEFAULT '', updated_at TIMESTAMPTZ DEFAULT now(),
+      PRIMARY KEY (sku, source));
     CREATE TABLE IF NOT EXISTS freight_shipments (
       id SERIAL PRIMARY KEY, reference TEXT DEFAULT '', description TEXT DEFAULT '',
       units INT, origin TEXT DEFAULT '', destination TEXT DEFAULT '', carrier TEXT DEFAULT '',
@@ -1976,23 +1979,106 @@ app.post('/api/freight/delete', async (req, res) => {
   res.json({ ok: true });
 });
 
-// combined inventory grid: one row per SKU, available-to-fulfill from every source + per-location breakdown
+// combined inventory grid: one row per SKU, one column per source (ShipBob + Floship live from API, plus any imported sheet columns)
+const GRID_PALETTE = ['#db2777', '#ea580c', '#7c3aed', '#0891b2', '#65a30d', '#9333ea', '#0d9488', '#c026d3', '#dc2626', '#ca8a04'];
 app.get('/api/fulfillment/grid', async (_req, res) => {
-  const rows = (await pool.query(`
-    SELECT coalesce(sb.sku, fl.sku) sku,
-      coalesce(nullif(sb.name,''), fl.description) name,
-      coalesce(sb.fulfillable,0) sb_avail, sb.on_hand sb_onhand, sb.committed sb_committed, sb.by_fc,
-      coalesce(fl.qty,0) fl_avail, fl.on_hand fl_onhand, fl.by_wh
-    FROM shipbob_stock sb FULL OUTER JOIN floship_stock fl ON fl.sku = sb.sku
-    WHERE coalesce(sb.sku, fl.sku) ~ '[A-Za-z]'
-    ORDER BY (coalesce(sb.fulfillable,0)+coalesce(fl.qty,0)) DESC, coalesce(sb.sku, fl.sku)`)).rows;
-  const totals = rows.reduce((a, r) => { a.shipbob += r.sb_avail || 0; a.floship += r.fl_avail || 0; a.skus++; return a; },
-    { skus: 0, shipbob: 0, floship: 0 });
-  totals.total = totals.shipbob + totals.floship;
-  res.json({
-    sources: { shipbob: !!(await getConnector('shipbob')), floship: !!(await getConnector('floship')) },
-    totals, rows
+  const [sb, fl, man] = await Promise.all([
+    pool.query(`SELECT sku, name, fulfillable FROM shipbob_stock WHERE sku ~ '[A-Za-z]'`),
+    pool.query(`SELECT sku, description, qty FROM floship_stock WHERE sku ~ '[A-Za-z]'`),
+    pool.query(`SELECT sku, source, qty, description FROM manual_stock WHERE sku ~ '[A-Za-z]'`)
+  ]);
+  const bySku = {};
+  const ensure = s => (bySku[s] = bySku[s] || { sku: s, name: '', vals: {} });
+  sb.rows.forEach(r => { const x = ensure(r.sku); x.name = x.name || r.name || ''; x.vals.shipbob = r.fulfillable || 0; });
+  fl.rows.forEach(r => { const x = ensure(r.sku); x.name = x.name || r.description || ''; x.vals.floship = r.qty || 0; });
+  const manualSources = {}; // key -> label
+  man.rows.forEach(r => {
+    const key = 'm_' + String(r.source).toLowerCase().replace(/[^a-z0-9]+/g, '_');
+    manualSources[key] = r.source;
+    const x = ensure(r.sku); x.name = x.name || r.description || '';
+    x.vals[key] = (x.vals[key] || 0) + (r.qty || 0);
   });
+  const sources = [
+    { key: 'shipbob', label: 'ShipBob', color: '#059669', api: true },
+    { key: 'floship', label: 'Floship', color: '#2563eb', api: true },
+    ...Object.entries(manualSources).sort((a, b) => a[1].localeCompare(b[1])).map(([key, label], i) =>
+      ({ key, label, color: GRID_PALETTE[i % GRID_PALETTE.length], api: false }))
+  ];
+  const rows = Object.values(bySku).map(x => { x.total = sources.reduce((s, src) => s + (x.vals[src.key] || 0), 0); return x; })
+    .sort((a, b) => b.total - a.total || a.sku.localeCompare(b.sku));
+  const totals = { total: 0 }; sources.forEach(s => totals[s.key] = 0);
+  rows.forEach(x => { sources.forEach(s => totals[s.key] += x.vals[s.key] || 0); totals.total += x.total; });
+  res.json({ sources, rows, totals, connected: { shipbob: !!(await getConnector('shipbob')), floship: !!(await getConnector('floship')), manual: man.rows.length > 0 } });
+});
+
+// import a spreadsheet (CSV): rows = products, columns = inventory sources. ShipBob/Floship columns are ignored (API is source of truth).
+function parseCsv(text) {
+  const rows = []; let row = [], cell = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === ',') { row.push(cell); cell = ''; }
+    else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+    else if (ch === '\r') { /* skip */ }
+    else cell += ch;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter(r => r.some(c => String(c).trim() !== ''));
+}
+app.post('/api/inventory/import', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const rows = parseCsv(String(req.body?.csv || ''));
+  if (rows.length < 2) return res.status(400).json({ error: 'Need a header row plus at least one data row.' });
+  const header = rows[0].map(h => String(h).trim());
+  const idxSku = header.findIndex(h => /^sku$/i.test(h)) >= 0 ? header.findIndex(h => /^sku$/i.test(h)) : 0;
+  const idxDesc = header.findIndex(h => /desc|name|product|title/i.test(h));
+  // source columns = everything else, minus the API-owned ones (ShipBob / Floship / Shipbob US / Floship HK …)
+  const skipRe = /shipbob|floship|flowship/i;
+  const sourceCols = header.map((h, i) => ({ label: h, i }))
+    .filter(c => c.i !== idxSku && c.i !== idxDesc && c.label && !skipRe.test(c.label));
+  if (!sourceCols.length) return res.status(400).json({ error: 'No importable source columns found (ShipBob/Floship columns are ignored on purpose).' });
+  const sourcesPresent = sourceCols.map(c => c.label);
+  const skipped = header.filter(h => skipRe.test(h));
+  const client = await pool.connect();
+  let imported = 0, skus = 0;
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM manual_stock WHERE source = ANY($1)', [sourcesPresent]); // refresh these columns
+    for (let r = 1; r < rows.length; r++) {
+      const cells = rows[r];
+      const sku = String(cells[idxSku] || '').trim();
+      if (!sku || !/[A-Za-z]/.test(sku)) continue;
+      const desc = idxDesc >= 0 ? String(cells[idxDesc] || '').trim().slice(0, 300) : '';
+      let any = false;
+      for (const c of sourceCols) {
+        const raw = String(cells[c.i] ?? '').replace(/[, ]/g, '').trim();
+        if (raw === '') continue;
+        const qty = parseInt(raw, 10);
+        if (!Number.isFinite(qty)) continue;
+        await client.query(
+          `INSERT INTO manual_stock (sku, source, qty, description, updated_at) VALUES ($1,$2,$3,$4,now())
+           ON CONFLICT (sku, source) DO UPDATE SET qty=$3, description=$4, updated_at=now()`,
+          [sku, c.label, qty, desc]);
+        imported++; any = true;
+      }
+      if (any) skus++;
+    }
+    await client.query('COMMIT');
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); return res.status(400).json({ error: e.message }); }
+  finally { client.release(); }
+  res.json({ ok: true, imported, skus, sources: sourcesPresent, skipped });
+});
+// list the imported (manual) sources so admins can clear one
+app.get('/api/inventory/manual-sources', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const rows = (await pool.query(`SELECT source, count(*)::int rows, max(updated_at) updated FROM manual_stock GROUP BY 1 ORDER BY 1`)).rows;
+  res.json(rows);
+});
+app.post('/api/inventory/clear-source', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const r = await pool.query('DELETE FROM manual_stock WHERE source=$1', [String(req.body?.source || '')]);
+  res.json({ ok: true, removed: r.rowCount });
 });
 
 // ---------- Shopify (orders sync, same pattern as Gorgias) ----------

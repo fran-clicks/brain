@@ -573,8 +573,11 @@ footer{color:rgba(16,17,20,.45)}
 <!-- FULFILLMENT (3PL: ShipBob, Floship, …) -->
 <div class="section" id="s-fulfillment">
   <div class="synchead">
-    <div style="color:var(--muted);font-size:12px">"Available" = units you can ship now. <span class="src-badge" style="background:#059669">ShipBob</span><span class="src-badge" style="background:#2563eb">Floship</span></div>
-    <button class="btn" id="fulSyncAllBtn" onclick="syncAllFulfillment()" style="display:none;margin:0;padding:6px 14px">🔄 Sync all</button>
+    <div style="color:var(--muted);font-size:12px">Each column is a source. <span class="src-badge" style="background:#059669">ShipBob</span><span class="src-badge" style="background:#2563eb">Floship</span> are live from API; other columns come from imported sheets.</div>
+    <div class="right">
+      <button class="btn" id="fulImportBtn" onclick="openImport()" style="display:none;margin:0 6px 0 0;padding:6px 14px;background:#fff;border:1px solid var(--line);box-shadow:none">📥 Import sheet</button>
+      <button class="btn" id="fulSyncAllBtn" onclick="syncAllFulfillment()" style="display:none;margin:0;padding:6px 14px">🔄 Sync all</button>
+    </div>
   </div>
 
   <!-- Combined grid -->
@@ -584,10 +587,7 @@ footer{color:rgba(16,17,20,.45)}
       <span class="updating-pill" id="fgUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
     </h2>
     <input class="search" id="fgSearch" placeholder="Search SKU or description…">
-    <table id="fgTable"><thead><tr><th>SKU</th><th>Description</th>
-      <th style="text-align:center"><span class="src-badge" style="background:#059669">ShipBob</span></th>
-      <th style="text-align:center"><span class="src-badge" style="background:#2563eb">Floship</span></th>
-      <th style="text-align:center">Total</th><th>By location</th></tr></thead><tbody></tbody></table>
+    <div style="overflow-x:auto"><table id="fgTable"><thead id="fgHead"></thead><tbody></tbody></table></div>
     <div class="note" id="fgNote" style="margin-top:8px"></div>
   </div>
 
@@ -650,6 +650,24 @@ footer{color:rgba(16,17,20,.45)}
     <input class="search" id="frSearch" placeholder="Search reference, product, warehouse…">
     <table id="frTable"><thead><tr><th>Reference</th><th>Product</th><th style="text-align:center">Units</th><th>From → To</th><th>Carrier</th><th>Status</th><th>ETA</th><th>Notes</th><th></th></tr></thead><tbody></tbody></table>
     <div class="note" id="frNote" style="margin-top:8px">Loading…</div>
+  </div>
+</div>
+
+<!-- inventory sheet import modal (admins) -->
+<div id="importModal" style="display:none;position:fixed;inset:0;z-index:70;background:rgba(16,17,20,.45);align-items:center;justify-content:center" onclick="if(event.target===this)closeImport()">
+  <div class="card" style="width:min(660px,94vw);margin:0;max-height:92vh;overflow:auto">
+    <h2>📥 Import inventory sheet</h2>
+    <div class="note" style="margin-top:0">Each row is a product (needs a <b>SKU</b> column). Every other column becomes an inventory source. <b>ShipBob / Floship columns are ignored on purpose</b> — those stay live from the API. Importing a source replaces its previous values.</div>
+    <input type="file" id="impFile" accept=".csv,text/csv" style="margin:12px 0 6px">
+    <label>…or paste CSV</label>
+    <textarea id="impText" rows="6" placeholder="SKU,Description,Pattern US,PPR US,Amazon,Eternity SZ&#10;CK-7100-1,17 Pro - Smoke,12,40,8,100"></textarea>
+    <div class="err" id="impErr"></div>
+    <div class="note" id="impResult" style="margin-top:6px"></div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="btn" onclick="doImport()">Import</button>
+      <button class="btn" style="background:#fff;border:1px solid var(--line);box-shadow:none" onclick="closeImport()">Close</button>
+    </div>
+    <div id="impSources" style="margin-top:14px;border-top:1px solid var(--line);padding-top:10px"></div>
   </div>
 </div>
 
@@ -886,42 +904,69 @@ function renderSbTable() {
       <td style="font-size:12px;color:var(--muted)">${esc(fc) || '—'}</td></tr>`;
   }).join('') : '<tr><td colspan="6" class="empty">No matches</td></tr>';
 }
-// ---- combined grid ----
-let fgRows = [];
+// ---- combined grid (dynamic columns: ShipBob + Floship from API, plus imported sheet sources) ----
+let fgData = { sources: [], rows: [] };
 function renderFgTable() {
   const q = (document.getElementById('fgSearch').value || '').toLowerCase();
-  const rows = fgRows.filter(r => ((r.sku || '') + ' ' + (r.name || '')).toLowerCase().includes(q));
+  const srcs = fgData.sources || [];
+  document.getElementById('fgHead').innerHTML = `<tr><th>SKU</th><th>Description</th>${srcs.map(s =>
+    `<th style="text-align:center"><span class="src-badge" style="background:${s.color}">${esc(s.label)}</span></th>`).join('')}<th style="text-align:center">Total</th></tr>`;
+  const rows = (fgData.rows || []).filter(r => ((r.sku || '') + ' ' + (r.name || '')).toLowerCase().includes(q));
   const cell = (v, bg) => (v ? `<span style="background:${bg};color:#fff;font-weight:600;padding:1px 8px;border-radius:6px">${Number(v).toLocaleString()}</span>` : '<span style="color:var(--muted)">0</span>');
-  document.querySelector('#fgTable tbody').innerHTML = rows.length ? rows.map(r => {
-    const total = (r.sb_avail || 0) + (r.fl_avail || 0);
-    const locs = [
-      ...(r.by_fc || []).filter(f => (f.fulfillable_quantity ?? 0) > 0).map(f => ({ c: '#059669', n: f.name, q: f.fulfillable_quantity })),
-      ...(r.by_wh || []).filter(w => (w.qty ?? 0) > 0).map(w => ({ c: '#2563eb', n: (w.warehouse_name || '').replace('Floship ', ''), q: w.qty }))
-    ];
-    const chips = locs.map(l => `<span style="display:inline-block;font-size:11px;padding:1px 7px;border-radius:6px;margin:1px 3px 1px 0;background:${l.c}1a;color:${l.c};border:1px solid ${l.c}55">${esc(l.n)}: ${l.q.toLocaleString()}</span>`).join('') || '—';
-    return `<tr><td>${r.sku ? `<span class="tag src">${esc(r.sku)}</span>` : '—'}</td><td>${esc(r.name || '')}</td>
-      <td style="text-align:center">${cell(r.sb_avail, '#059669')}</td>
-      <td style="text-align:center">${cell(r.fl_avail, '#2563eb')}</td>
-      <td style="text-align:center;font-weight:700">${total.toLocaleString()}</td>
-      <td>${chips}</td></tr>`;
-  }).join('') : '<tr><td colspan="6" class="empty">No matches</td></tr>';
+  document.querySelector('#fgTable tbody').innerHTML = rows.length ? rows.map(r =>
+    `<tr><td>${r.sku ? `<span class="tag src">${esc(r.sku)}</span>` : '—'}</td><td>${esc(r.name || '')}</td>${srcs.map(s =>
+      `<td style="text-align:center">${cell(r.vals[s.key], s.color)}</td>`).join('')}<td style="text-align:center;font-weight:700">${(r.total || 0).toLocaleString()}</td></tr>`
+  ).join('') : `<tr><td colspan="${srcs.length + 3}" class="empty">No matches</td></tr>`;
 }
 async function loadFulfillmentGrid() {
   document.getElementById('fgUpdating').classList.add('on');
   try {
     const g = await api('/api/fulfillment/grid');
-    document.getElementById('fgKpis').innerHTML = [
-      {l:'SKUs', v: (g.totals.skus ?? 0).toLocaleString()},
-      {l:'ShipBob available', v: (g.totals.shipbob ?? 0).toLocaleString()},
-      {l:'Floship available', v: (g.totals.floship ?? 0).toLocaleString()},
-      {l:'Total available', v: (g.totals.total ?? 0).toLocaleString()}
-    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
-    fgRows = g.rows || [];
+    fgData = g;
+    const kpis = [{l:'SKUs', v: (g.rows || []).length.toLocaleString()}, {l:'Total available', v: (g.totals.total ?? 0).toLocaleString()}];
+    (g.sources || []).forEach(s => kpis.push({ l: s.label + ' available', v: (g.totals[s.key] ?? 0).toLocaleString() }));
+    document.getElementById('fgKpis').innerHTML = kpis.map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
     renderFgTable();
-    const on = Object.entries(g.sources).filter(([, v]) => v).map(([k]) => k);
-    document.getElementById('fgNote').textContent = on.length ? `Merging: ${on.join(' + ')}. Green = ShipBob, blue = Floship.` : 'No fulfillment sources connected yet.';
+    document.getElementById('fgNote').textContent = (g.sources || []).length
+      ? `${g.sources.length} source${g.sources.length === 1 ? '' : 's'}: ${g.sources.map(s => s.label).join(', ')}`
+      : 'No sources yet — connect ShipBob/Floship or import a sheet.';
   } catch (e) { document.getElementById('fgNote').textContent = '⚠️ ' + e.message; }
   finally { document.getElementById('fgUpdating').classList.remove('on'); }
+}
+// ---- sheet import ----
+function openImport() { document.getElementById('importModal').style.display = 'flex'; document.getElementById('impErr').textContent = ''; document.getElementById('impResult').textContent = ''; loadManualSources(); }
+function closeImport() { document.getElementById('importModal').style.display = 'none'; }
+document.getElementById('impFile').addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  const rd = new FileReader(); rd.onload = () => document.getElementById('impText').value = rd.result; rd.readAsText(f);
+});
+async function doImport() {
+  const csv = document.getElementById('impText').value;
+  const err = document.getElementById('impErr'), out = document.getElementById('impResult');
+  err.textContent = '';
+  if (!csv.trim()) { err.textContent = 'Paste CSV or choose a file first.'; return; }
+  out.textContent = 'Importing…';
+  try {
+    const r = await api('/api/inventory/import', {method:'POST', body: JSON.stringify({ csv })});
+    out.innerHTML = `✅ Imported ${r.imported} values across ${r.skus} SKUs. Sources: <b>${r.sources.map(esc).join(', ')}</b>.${r.skipped.length ? ` Ignored (API-owned): ${r.skipped.map(esc).join(', ')}.` : ''}`;
+    loadFulfillmentGrid(); loadManualSources();
+  } catch (e) { out.textContent = ''; err.textContent = e.message; }
+}
+async function loadManualSources() {
+  try {
+    const rows = await api('/api/inventory/manual-sources');
+    document.getElementById('impSources').innerHTML = rows.length
+      ? `<div style="font-weight:600;margin-bottom:6px">Imported sources</div>` + rows.map(s =>
+        `<div style="display:flex;align-items:center;gap:8px;padding:3px 0"><b style="flex:1">${esc(s.source)}</b>
+          <span style="color:var(--muted);font-size:12px">${s.rows} SKUs</span>
+          <button class="btn" style="margin:0;padding:2px 9px;font-size:12px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="clearSource('${esc(s.source).replace(/'/g,'&#39;')}')">Remove</button></div>`).join('')
+      : '<div class="note" style="margin:0">No imported sources yet.</div>';
+  } catch {}
+}
+async function clearSource(src) {
+  if (!confirm(`Remove all imported data for "${src}"?`)) return;
+  try { await api('/api/inventory/clear-source', {method:'POST', body: JSON.stringify({ source: src })}); loadManualSources(); loadFulfillmentGrid(); }
+  catch (e) { alert(e.message); }
 }
 function toggleSrc(p) {
   const body = document.getElementById(p + 'Body'), chev = document.getElementById(p + 'Chev');
@@ -940,6 +985,7 @@ async function loadFulfillment() {
   loadFulfillmentGrid();
   const note = document.getElementById('sbNote');
   document.getElementById('fulSyncAllBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
+  document.getElementById('fulImportBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
   document.getElementById('sbAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
   document.getElementById('sbUpdating').classList.add('on');
   try {
