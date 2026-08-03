@@ -422,18 +422,55 @@ footer{color:rgba(16,17,20,.45)}
     <div class="note" id="stockNote">Loading stock…</div>
     <div class="right">
       <span class="updating-pill" id="stockUpdating"><div class="spin"></div>Updating…</span>
-      <button class="btn" id="stockSyncBtn" onclick="stockSync()">🔄 Sync now</button>
+      <button class="btn" id="stockSyncBtn" onclick="stockSync()" style="display:none">↻ Re-import from clicks_ruk</button>
     </div>
   </div>
   <div class="grid kpis" id="stockKpis"></div>
   <div class="card" style="margin-top:14px">
-    <h2>📦 Stock levels</h2>
-    <input class="search" id="stockSearch" placeholder="Search SKU or product…">
-    <table id="stockTable"><thead><tr><th>SKU</th><th>Description</th><th>Brand new</th><th>Non-pristine</th><th>Damaged</th><th>Founders</th><th>Total</th></tr></thead><tbody></tbody></table>
+    <h2>📦 Stock levels
+      <span id="stockAdminBar" style="display:none;float:right">
+        <button class="btn" style="margin:0 0 0 6px;padding:5px 12px" onclick="openStockModal()">＋ Add product</button>
+        <button class="btn" style="margin:0 0 0 6px;padding:5px 12px" onclick="openScan()">📷 Scan</button>
+        <button class="btn" style="margin:0 0 0 6px;padding:5px 12px" onclick="exportStock()">⬇️ Export CSV</button>
+      </span>
+    </h2>
+    <input class="search" id="stockSearch" placeholder="Search SKU, UPC or description…">
+    <table id="stockTable"><thead><tr><th>UPC</th><th>SKU</th><th>Description</th><th style="text-align:center">Brand new</th><th style="text-align:center">Non-pristine</th><th style="text-align:center">Damaged</th><th style="text-align:center">Founders</th><th style="text-align:center">Total</th><th></th></tr></thead><tbody></tbody></table>
   </div>
   <div class="card">
     <h2>Recent changes</h2>
     <table id="stockHistory"><thead><tr><th>When</th><th>SKU</th><th>Product</th><th>Units</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+
+<!-- stock add/edit modal (admins) -->
+<div id="stockModal" style="display:none;position:fixed;inset:0;z-index:70;background:rgba(16,17,20,.45);align-items:center;justify-content:center" onclick="if(event.target===this)closeStockModal()">
+  <div class="card" style="width:min(440px,92vw);margin:0;max-height:90vh;overflow:auto">
+    <h2 id="stockModalTitle">Add product</h2>
+    <input type="hidden" id="stkOldSku">
+    <label>UPC</label><input id="stkUpc" placeholder="e.g. 860009467835">
+    <label>SKU</label><input id="stkSku" placeholder="e.g. CK-5100-1">
+    <label>Description</label><input id="stkDesc" placeholder="e.g. 15 Pro - London Sky">
+    <div class="grid two">
+      <div><label>Brand new</label><input type="number" id="stkNew" value="0" min="0"></div>
+      <div><label>Non-pristine</label><input type="number" id="stkNonp" value="0" min="0"></div>
+      <div><label>Damaged</label><input type="number" id="stkDmg" value="0" min="0"></div>
+      <div><label>Founders</label><input type="number" id="stkFnd" value="0" min="0"></div>
+    </div>
+    <div class="err" id="stkErr"></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn" onclick="saveStock()">Save</button>
+      <button class="btn" style="background:#fff;border:1px solid var(--line);box-shadow:none" onclick="closeStockModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- barcode scan modal (admins) -->
+<div id="scanModal" style="display:none;position:fixed;inset:0;z-index:70;background:rgba(16,17,20,.6);align-items:center;justify-content:center" onclick="if(event.target===this)closeScan()">
+  <div class="card" style="width:min(460px,92vw);margin:0">
+    <h2>📷 Scan barcode <button class="btn" style="float:right;margin:0;padding:4px 10px;background:#fff;border:1px solid var(--line);box-shadow:none" onclick="closeScan()">✕</button></h2>
+    <div id="scanReader" style="width:100%;border-radius:10px;overflow:hidden;background:#000;min-height:240px"></div>
+    <div class="note" id="scanNote" style="margin-top:8px">Point the camera at a product barcode.</div>
   </div>
 </div>
 
@@ -1465,23 +1502,113 @@ async function showFulfilledDay(day) {
   finally { pill.classList.remove('on'); }
 }
 let stockItems = [];
+const stockColor = v => v == null ? 'var(--muted)' : v < 10 ? '#dc2626' : v <= 25 ? '#b45309' : '#059669';
 function renderStockTable() {
   const q = (document.getElementById('stockSearch').value || '').toLowerCase();
-  const rows = stockItems.filter(i => (i.sku + ' ' + i.name).toLowerCase().includes(q));
-  const cell = v => v == null ? '<span style="color:var(--muted)">—</span>' : v;
-  document.querySelector('#stockTable tbody').innerHTML = rows.length ? rows.map(i =>
-    `<tr${i.qty === 0 ? ' style="background:rgba(220,38,38,.12)"' : i.qty != null && i.qty < 10 ? ' style="background:rgba(220,38,38,.05)"' : ''}>
-     <td><span class="tag src" title="UPC ${esc(i.upc || '—')}">${esc(i.sku)}</span></td><td>${esc(i.name)}</td>
-     <td>${cell(i.brand_new)}</td><td>${cell(i.non_pristine)}</td><td>${cell(i.damaged)}</td><td>${cell(i.founders)}</td>
-     <td><b>${i.qty ?? '?'}</b>${i.qty === 0 ? ' 🚨' : i.qty != null && i.qty < 10 ? ' ⚠️' : ''}</td></tr>`).join('')
-    : '<tr><td colspan="7" class="empty">No matches</td></tr>';
+  const rows = stockItems.filter(i => (i.sku + ' ' + i.name + ' ' + (i.upc || '')).toLowerCase().includes(q));
+  const cell = v => v == null ? '<span style="color:var(--muted)">—</span>' : `<span style="color:${stockColor(v)};font-weight:600">${v}</span>`;
+  const admin = window.isAdmin;
+  document.querySelector('#stockTable tbody').innerHTML = rows.length ? rows.map(i => {
+    const actions = admin
+      ? `<div style="display:flex;gap:4px;justify-content:flex-end">
+          <button class="btn" style="margin:0;padding:2px 9px;font-size:13px" onclick="editStock('${esc(i.sku)}')" title="Edit">✎</button>
+          <button class="btn" style="margin:0;padding:2px 9px;font-size:13px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="deleteStock('${esc(i.sku)}')" title="Delete">✕</button></div>`
+      : '';
+    return `<tr>
+     <td style="font-size:12px;color:var(--muted)">${esc(i.upc || '—')}</td>
+     <td><span class="tag src">${esc(i.sku)}</span></td><td>${esc(i.name)}</td>
+     <td style="text-align:center">${cell(i.brand_new)}</td><td style="text-align:center">${cell(i.non_pristine)}</td>
+     <td style="text-align:center">${cell(i.damaged)}</td><td style="text-align:center">${cell(i.founders)}</td>
+     <td style="text-align:center;font-weight:700;color:${stockColor(i.qty)}">${i.qty ?? '?'}</td>
+     <td>${actions}</td></tr>`;
+  }).join('') : '<tr><td colspan="9" class="empty">No matches</td></tr>';
+}
+// ---- admin stock management ----
+function editStock(sku) { const i = stockItems.find(x => x.sku === sku); if (i) openStockModal(i); }
+function openStockModal(item) {
+  const el = id => document.getElementById(id);
+  el('stockModalTitle').textContent = item ? 'Edit product' : 'Add product';
+  el('stkOldSku').value = item ? item.sku : '';
+  el('stkUpc').value = item?.upc || ''; el('stkSku').value = item?.sku || ''; el('stkDesc').value = item?.name || '';
+  el('stkNew').value = item?.brand_new ?? 0; el('stkNonp').value = item?.non_pristine ?? 0;
+  el('stkDmg').value = item?.damaged ?? 0; el('stkFnd').value = item?.founders ?? 0;
+  el('stkErr').textContent = '';
+  el('stockModal').style.display = 'flex';
+}
+function closeStockModal() { document.getElementById('stockModal').style.display = 'none'; }
+async function saveStock() {
+  const el = id => document.getElementById(id);
+  el('stkErr').textContent = '';
+  const sku = el('stkSku').value.trim();
+  if (!sku) { el('stkErr').textContent = 'SKU is required.'; return; }
+  try {
+    await api('/api/stock/item', {method:'POST', body: JSON.stringify({
+      old_sku: el('stkOldSku').value, sku, upc: el('stkUpc').value.trim(), description: el('stkDesc').value.trim(),
+      brand_new: el('stkNew').value, non_pristine: el('stkNonp').value, damaged: el('stkDmg').value, founders: el('stkFnd').value
+    })});
+    closeStockModal(); loadStock();
+  } catch (e) { el('stkErr').textContent = e.message; }
+}
+async function deleteStock(sku) {
+  if (!confirm(`Delete ${sku} from stock?`)) return;
+  try { await api('/api/stock/item/delete', {method:'POST', body: JSON.stringify({ sku })}); loadStock(); }
+  catch (e) { document.getElementById('stockNote').textContent = '⚠️ ' + e.message; }
+}
+function exportStock() { window.open('/api/stock/export', '_blank'); }
+// ---- barcode scanner ----
+let scanInstance = null;
+function loadScanLib() {
+  return new Promise((res, rej) => {
+    if (window.Html5Qrcode) return res();
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js';
+    s.onload = res; s.onerror = () => rej(new Error('Could not load the scanner library.'));
+    document.head.appendChild(s);
+  });
+}
+async function openScan() {
+  document.getElementById('scanModal').style.display = 'flex';
+  const note = document.getElementById('scanNote'); note.textContent = 'Starting camera…';
+  try {
+    await loadScanLib();
+    scanInstance = new Html5Qrcode('scanReader');
+    const F = Html5QrcodeSupportedFormats;
+    await scanInstance.start({ facingMode: 'environment' },
+      { fps: 10, qrbox: { width: 260, height: 150 }, formatsToSupport: [F.UPC_A, F.UPC_E, F.EAN_13, F.EAN_8, F.CODE_128] },
+      onScan, () => {});
+    note.textContent = 'Point the camera at a product barcode.';
+  } catch (e) { note.textContent = '⚠️ ' + (e.message || 'Camera error — allow camera access and use HTTPS.'); }
+}
+let scanBusy = false;
+async function onScan(code) {
+  if (scanBusy) return; scanBusy = true;
+  const upc = String(code).trim();
+  await closeScan();
+  try {
+    const r = await api('/api/stock/by-upc?upc=' + encodeURIComponent(upc));
+    if (r.found) { editStock(r.item.sku); document.getElementById('stkErr').textContent = '✓ Found — update quantities and save.'; }
+    else { openStockModal(); document.getElementById('stkUpc').value = upc; document.getElementById('stkErr').textContent = 'New UPC — fill in the product details.'; }
+  } catch (e) { openStockModal(); document.getElementById('stkUpc').value = upc; }
+  scanBusy = false;
+}
+async function closeScan() {
+  document.getElementById('scanModal').style.display = 'none';
+  if (scanInstance) { try { await scanInstance.stop(); scanInstance.clear(); } catch {} scanInstance = null; }
 }
 async function loadStock() {
   const note = document.getElementById('stockNote');
   document.getElementById('stockUpdating').classList.add('on');
   try {
     const s = await api('/api/stock');
-    if (!s.configured) { note.textContent = 'UK stock is not connected — an admin can add it on the ＋ page.'; return; }
+    // clicks-brain now owns UK stock, so show admin controls to admins
+    document.getElementById('stockAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
+    document.getElementById('stockSyncBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
+    if (!s.configured && !(s.items && s.items.length)) {
+      note.textContent = window.isAdmin
+        ? 'No stock yet — use ＋ Add product or 📷 Scan to start, or re-import from clicks_ruk.'
+        : 'No stock data yet.';
+      return;
+    }
     const t = s.totals || {};
     document.getElementById('stockKpis').innerHTML = [
       {l:'Total units', v: (t.units ?? 0).toLocaleString()},
@@ -1509,11 +1636,12 @@ async function loadStock() {
 }
 document.getElementById('stockSearch').oninput = renderStockTable;
 async function stockSync() {
+  if (!confirm('Re-import stock from clicks_ruk? This overwrites any edits made here with the clicks_ruk data.')) return;
   const b = document.getElementById('stockSyncBtn');
-  b.disabled = true; b.textContent = '⏳ Syncing…';
+  b.disabled = true; b.textContent = '⏳ Importing…';
   try { await api('/api/stock/sync', {method:'POST', body:'{}'}); loadStock(); }
   catch (e) { document.getElementById('stockNote').textContent = '⚠️ ' + e.message; }
-  finally { b.disabled = false; b.textContent = '🔄 Sync now'; }
+  finally { b.disabled = false; b.textContent = '↻ Re-import from clicks_ruk'; }
 }
 // redo returns tab
 // shared product-name label: catalog name + only the variant bits it doesn't already say.

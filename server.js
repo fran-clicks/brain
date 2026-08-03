@@ -888,12 +888,8 @@ setInterval(async () => {
       await syncShopifyProducts(); // product images change rarely — daily is plenty
     }
   } catch (e) { console.error('interval product sync:', e.message); }
-  try {
-    const us = (await pool.query(`SELECT v FROM sync_state WHERE k='uk_stock'`)).rows[0]?.v;
-    if (await getConnector('uk_stock') && (!us?.last_run || Date.now() - Date.parse(us.last_run) > 55 * 60 * 1000)) {
-      await syncUkStock();
-    }
-  } catch (e) { console.error('interval stock sync:', e.message); }
+  // UK stock is now owned/edited inside clicks-brain — no auto-sync so admin edits aren't overwritten.
+  // Admins can still trigger a one-time re-import from clicks_ruk via POST /api/stock/sync.
   try {
     const ks = (await pool.query(`SELECT v FROM sync_state WHERE k='klaviyo'`)).rows[0]?.v;
     if (await getConnector('klaviyo') && (!ks?.last_run || Date.now() - Date.parse(ks.last_run) > 55 * 60 * 1000)) {
@@ -1528,9 +1524,60 @@ app.get('/api/stock', async (_req, res) => {
   const sample = (await pool.query('SELECT raw FROM uk_stock LIMIT 1')).rows[0]?.raw || null;
   res.json({ configured: !!conn, items: items.rows, totals: totals.rows[0], history: history.rows, sync: ss, sample_raw: sample });
 });
-app.post('/api/stock/sync', async (_req, res) => {
+// one-time re-import from clicks_ruk (admin only) — overwrites, so it's opt-in now
+app.post('/api/stock/sync', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   try { res.json(await syncUkStock()); }
   catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ---------- UK stock management (clicks-brain is the source of truth; admins only) ----------
+const stockInt = v => { const n = parseInt(v); return Number.isFinite(n) && n >= 0 ? n : 0; };
+// add or update a stock item
+app.post('/api/stock/item', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const b = req.body || {};
+  const sku = String(b.sku || '').trim();
+  if (!sku) return res.status(400).json({ error: 'SKU is required.' });
+  const name = String(b.description ?? b.name ?? '').trim().slice(0, 300);
+  const upc = String(b.upc || '').trim().slice(0, 50);
+  const bn = stockInt(b.brand_new), np = stockInt(b.non_pristine), dm = stockInt(b.damaged), fd = stockInt(b.founders);
+  const qty = bn + np + dm + fd;
+  // if renaming an existing SKU, remove the old row
+  const oldSku = String(b.old_sku || '').trim();
+  if (oldSku && oldSku !== sku) await pool.query('DELETE FROM uk_stock WHERE sku=$1', [oldSku]);
+  await pool.query(
+    `INSERT INTO uk_stock (sku, name, upc, brand_new, non_pristine, damaged, founders, qty, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
+     ON CONFLICT (sku) DO UPDATE SET name=$2, upc=$3, brand_new=$4, non_pristine=$5, damaged=$6, founders=$7, qty=$8, updated_at=now()`,
+    [sku, name, upc, bn, np, dm, fd, qty]);
+  await pool.query('INSERT INTO uk_stock_history (sku, qty) VALUES ($1,$2)', [sku, qty]).catch(() => {});
+  res.json({ ok: true, sku });
+});
+// delete a stock item
+app.post('/api/stock/item/delete', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const sku = String(req.body?.sku || '').trim();
+  const r = await pool.query('DELETE FROM uk_stock WHERE sku=$1', [sku]);
+  if (!r.rowCount) return res.status(404).json({ error: 'SKU not found.' });
+  res.json({ ok: true });
+});
+// look up a single item by UPC (for the scanner)
+app.get('/api/stock/by-upc', async (req, res) => {
+  const upc = String(req.query.upc || '').trim();
+  if (!upc) return res.status(400).json({ error: 'upc required' });
+  const row = (await pool.query('SELECT sku, name, upc, brand_new, non_pristine, damaged, founders, qty FROM uk_stock WHERE upc=$1 LIMIT 1', [upc])).rows[0] || null;
+  res.json({ found: !!row, item: row });
+});
+// CSV export of all stock
+app.get('/api/stock/export', async (_req, res) => {
+  const rows = (await pool.query('SELECT upc, sku, name, brand_new, non_pristine, damaged, founders, qty FROM uk_stock ORDER BY sku')).rows;
+  const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const head = ['UPC', 'SKU', 'Description', 'Brand New', 'Non-Pristine', 'Damaged', 'Founders', 'Total'];
+  const csv = [head.join(','), ...rows.map(r => [r.upc, r.sku, r.name, r.brand_new ?? 0, r.non_pristine ?? 0, r.damaged ?? 0, r.founders ?? 0, r.qty ?? 0].map(esc).join(','))].join('\r\n');
+  res.set('Content-Type', 'text/csv');
+  res.set('Content-Disposition', `attachment; filename="uk-stock-${new Date().toISOString().slice(0,10)}.csv"`);
+  res.send(csv);
 });
 
 // ---------- Shopify (orders sync, same pattern as Gorgias) ----------
