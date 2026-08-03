@@ -2028,13 +2028,17 @@ function parseCsv(text) {
 }
 app.post('/api/inventory/import', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
-  const rows = parseCsv(String(req.body?.csv || ''));
-  if (rows.length < 2) return res.status(400).json({ error: 'Need a header row plus at least one data row.' });
-  const header = rows[0].map(h => String(h).trim());
+  const all = parseCsv(String(req.body?.csv || ''));
+  // find the real header row (the one with a "SKU" cell) so preamble rows like "Updated / Inventory" are skipped
+  let hIdx = all.findIndex(r => r.some(c => /^\s*sku\s*$/i.test(String(c))));
+  if (hIdx < 0) hIdx = 0;
+  const header = all[hIdx].map(h => String(h).trim());
+  const rows = all.slice(hIdx); // header + data (loop starts at r=1 below)
+  if (rows.length < 2) return res.status(400).json({ error: 'Need a header row (with a SKU column) plus at least one data row.' });
   const idxSku = header.findIndex(h => /^sku$/i.test(h)) >= 0 ? header.findIndex(h => /^sku$/i.test(h)) : 0;
   const idxDesc = header.findIndex(h => /desc|name|product|title/i.test(h));
-  // source columns = everything else, minus the API-owned ones (ShipBob / Floship / Shipbob US / Floship HK …)
-  const skipRe = /shipbob|floship|flowship/i;
+  // source columns = everything else, minus API-owned (ShipBob/Floship) and computed totals (Available/Total)
+  const skipRe = /shipbob|floship|flowship|available|^total$|^units$/i;
   const sourceCols = header.map((h, i) => ({ label: h, i }))
     .filter(c => c.i !== idxSku && c.i !== idxDesc && c.label && !skipRe.test(c.label));
   if (!sourceCols.length) return res.status(400).json({ error: 'No importable source columns found (ShipBob/Floship columns are ignored on purpose).' });
