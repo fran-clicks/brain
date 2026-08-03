@@ -2169,10 +2169,10 @@ app.get('/api/shopify/summary', async (_req, res) => {
       pool.query(`SELECT country, round(sum(total_price))::int revenue, count(*)::int orders
         FROM orders_cache WHERE ${W} AND cancelled_at IS NULL AND country <> ''
         GROUP BY 1 ORDER BY 2 DESC LIMIT 6`, p),
-      pool.query(`SELECT it->>'title' product, sum(coalesce((it->>'qty')::int,0))::int qty
+      pool.query(`SELECT it->>'title' product, max(nullif(it->>'sku','')) sku, sum(coalesce((it->>'qty')::int,0))::int qty
         FROM orders_cache, LATERAL jsonb_array_elements(items) it
         WHERE ${W} AND cancelled_at IS NULL
-        GROUP BY 1 ORDER BY 2 DESC LIMIT 6`, p),
+        GROUP BY 1 ORDER BY 3 DESC LIMIT 6`, p),
       pool.query(`SELECT order_number, created_at::date d, country, total_price, currency, financial_status, fulfillment_status,
         order_tags, (cancelled_at IS NOT NULL) cancelled FROM orders_cache WHERE ${W} ORDER BY created_at DESC LIMIT 12`, p)
     ]);
@@ -2201,10 +2201,10 @@ app.get('/api/shopify/summary', async (_req, res) => {
         WHERE created_at >= now()-interval '365 days' AND country <> '' GROUP BY 1 ORDER BY 2 DESC LIMIT 100`),
       pool.query(`SELECT t.tag, count(*)::int c FROM orders_cache, LATERAL jsonb_array_elements_text(order_tags) t(tag)
         WHERE created_at >= now()-interval '365 days' GROUP BY 1 ORDER BY 2 DESC LIMIT 100`),
-      pool.query(`SELECT it->>'title' product, sum(coalesce((it->>'qty')::int,0))::int qty
+      pool.query(`SELECT it->>'title' product, max(nullif(it->>'sku','')) sku, sum(coalesce((it->>'qty')::int,0))::int qty
         FROM orders_cache, LATERAL jsonb_array_elements(items) it
         WHERE created_at >= now()-interval '365 days' AND it->>'title' <> ''
-        GROUP BY 1 ORDER BY 2 DESC LIMIT 200`)
+        GROUP BY 1 ORDER BY 3 DESC LIMIT 200`)
     ]);
     const adminBase = shopifyAdminOrderBase(conn?.config?.store_domain);
     res.json({ configured: true, totals_30d: tot.rows[0], top_countries: countries.rows, top_products: products.rows,
@@ -2213,7 +2213,7 @@ app.get('/api/shopify/summary', async (_req, res) => {
       filters: { active: { product: product || null, country: country || null, tag: tag || null },
         countries: optCountries.rows.map(r => r.country),
         tags: optTags.rows.map(r => r.tag),
-        products: optProducts.rows.map(r => r.product) } });
+        products: optProducts.rows.map(r => ({ product: r.product, sku: r.sku })) } });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
