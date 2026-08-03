@@ -571,9 +571,9 @@ footer{color:rgba(16,17,20,.45)}
 
 <!-- FULFILLMENT (3PL: ShipBob, Floship, …) -->
 <div class="section" id="s-fulfillment">
-  <div class="card" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-    <b>🚚 Fulfillment across providers</b>
-    <span style="color:var(--muted);font-size:12px">"Available" = units you can ship now (on hand − committed). Each source is colour-coded: <span class="src-badge" style="background:#059669">ShipBob</span><span class="src-badge" style="background:#2563eb">Floship</span></span>
+  <div class="synchead">
+    <div style="color:var(--muted);font-size:12px">"Available" = units you can ship now. <span class="src-badge" style="background:#059669">ShipBob</span><span class="src-badge" style="background:#2563eb">Floship</span></div>
+    <button class="btn" id="fulSyncAllBtn" onclick="syncAllFulfillment()" style="display:none;margin:0;padding:6px 14px">🔄 Sync all</button>
   </div>
 
   <!-- Combined grid -->
@@ -880,9 +880,17 @@ async function loadFulfillmentGrid() {
   } catch (e) { document.getElementById('fgNote').textContent = '⚠️ ' + e.message; }
   finally { document.getElementById('fgUpdating').classList.remove('on'); }
 }
+async function syncAllFulfillment() {
+  const b = document.getElementById('fulSyncAllBtn');
+  b.disabled = true; b.textContent = '⏳ Syncing…';
+  ['sbUpdating', 'flUpdating', 'fgUpdating'].forEach(id => document.getElementById(id).classList.add('on'));
+  try { await Promise.allSettled([api('/api/shipbob/sync', {method:'POST', body:'{}'}), api('/api/floship/sync', {method:'POST', body:'{}'})]); }
+  finally { b.disabled = false; b.textContent = '🔄 Sync all'; loadFulfillment(); }
+}
 async function loadFulfillment() {
   loadFulfillmentGrid();
   const note = document.getElementById('sbNote');
+  document.getElementById('fulSyncAllBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
   document.getElementById('sbAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
   document.getElementById('sbUpdating').classList.add('on');
   try {
