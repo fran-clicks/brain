@@ -906,12 +906,22 @@ function renderSbTable() {
 }
 // ---- combined grid (dynamic columns: ShipBob + Floship from API, plus imported sheet sources) ----
 let fgData = { sources: [], rows: [] };
+let fgSort = null; // {key} — click a column to sort by it (biggest first); click again for sheet order
+function sortFg(key) { fgSort = (fgSort && fgSort.key === key) ? null : { key }; renderFgTable(); }
 function renderFgTable() {
   const q = (document.getElementById('fgSearch').value || '').toLowerCase();
   const srcs = fgData.sources || [];
-  document.getElementById('fgHead').innerHTML = `<tr><th>SKU</th><th>Description</th>${srcs.map(s =>
-    `<th style="text-align:center"><span class="src-badge" style="background:${s.color}">${esc(s.label)}</span></th>`).join('')}<th style="text-align:center">Total</th></tr>`;
-  const rows = (fgData.rows || []).filter(r => ((r.sku || '') + ' ' + (r.name || '')).toLowerCase().includes(q));
+  const arrow = key => fgSort && fgSort.key === key ? ' ▼' : '';
+  document.getElementById('fgHead').innerHTML = `<tr>
+    <th style="cursor:pointer" onclick="sortFg('__sku')">SKU${arrow('__sku')}</th><th>Description</th>${srcs.map(s =>
+      `<th style="text-align:center;cursor:pointer" onclick="sortFg('${s.key}')"><span class="src-badge" style="background:${s.color}">${esc(s.label)}</span>${!s.api && window.isAdmin ? ` <span title="Remove this source" style="color:var(--red);cursor:pointer" onclick="event.stopPropagation();clearSource('${esc(s.label).replace(/'/g,'&#39;')}')">✕</span>` : ''}${arrow(s.key)}</th>`).join('')}
+    <th style="text-align:center;cursor:pointer" onclick="sortFg('__total')">Total${arrow('__total')}</th></tr>`;
+  let rows = (fgData.rows || []).filter(r => ((r.sku || '') + ' ' + (r.name || '')).toLowerCase().includes(q));
+  if (fgSort) {
+    const k = fgSort.key;
+    rows = rows.slice().sort((a, b) => k === '__sku' ? (a.sku || '').localeCompare(b.sku || '')
+      : (k === '__total' ? (b.total || 0) - (a.total || 0) : (b.vals[k] || 0) - (a.vals[k] || 0)));
+  }
   const cell = (v, bg) => (v ? `<span style="background:${bg};color:#fff;font-weight:600;padding:1px 8px;border-radius:6px">${Number(v).toLocaleString()}</span>` : '<span style="color:var(--muted)">0</span>');
   document.querySelector('#fgTable tbody').innerHTML = rows.length ? rows.map(r =>
     `<tr><td>${r.sku ? `<span class="tag src">${esc(r.sku)}</span>` : '—'}</td><td>${esc(r.name || '')}</td>${srcs.map(s =>
