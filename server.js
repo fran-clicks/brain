@@ -1792,33 +1792,61 @@ app.post('/api/shipbob/sync', async (req, res) => {
 });
 
 // ---------- Floship (3PL, shape unknown until we probe the live API) ----------
-// try common auth styles and report which one works + the raw body, so we can finalize the parser
-async function floshipProbe(baseUrl, token) {
-  const attempts = [
-    ['Bearer', { Authorization: `Bearer ${token}` }],
-    ['Token', { Authorization: `Token ${token}` }],
-    ['Token token=', { Authorization: `Token token=${token}` }],
-    ['raw Authorization', { Authorization: token }],
-    ['X-API-Key', { 'X-API-Key': token }],
-    ['api-token', { 'api-token': token }]
+// auth-style variants to try against a given URL
+function floshipAuthAttempts(url, token) {
+  const q = (u, k) => u + (u.includes('?') ? '&' : '?') + k + '=' + encodeURIComponent(token);
+  const basic = 'Basic ' + Buffer.from(token + ':').toString('base64');
+  return [
+    ['Bearer', url, { Authorization: `Bearer ${token}` }],
+    ['Token', url, { Authorization: `Token ${token}` }],
+    ['Token token=', url, { Authorization: `Token token=${token}` }],
+    ['Api-Key', url, { Authorization: `Api-Key ${token}` }],
+    ['raw Authorization', url, { Authorization: token }],
+    ['X-API-Key', url, { 'X-API-Key': token }],
+    ['api-token', url, { 'api-token': token }],
+    ['api_key header', url, { api_key: token }],
+    ['Basic key:', url, { Authorization: basic }],
+    ['?api_key=', q(url, 'api_key'), {}],
+    ['?token=', q(url, 'token'), {}]
   ];
-  let last = null;
-  for (const [desc, hdrs] of attempts) {
-    try {
-      const r = await fetch(baseUrl, { headers: { ...hdrs, Accept: 'application/json' } });
-      const text = await r.text();
-      let body; try { body = JSON.parse(text); } catch { body = text; }
-      if (r.ok) return { ok: true, auth: desc, status: r.status, body };
-      last = { ok: false, auth: desc, status: r.status, body: typeof body === 'string' ? body.slice(0, 300) : body };
-    } catch (e) { last = { ok: false, auth: desc, error: e.message }; }
+}
+// try many auth styles across common resource paths under the base; report the first 200 or a compact log
+async function floshipProbe(baseUrl, token) {
+  const b = String(baseUrl).replace(/\/+$/, '');
+  const looksBase = /\/api(\/v\d+)?$/i.test(b) || String(baseUrl).endsWith('/');
+  const paths = looksBase
+    ? ['', '/inventory', '/inventories', '/inventory/summary', '/products', '/product', '/stock', '/stocks', '/sku', '/skus', '/warehouses', '/warehouse', '/orders']
+    : [''];
+  const log = [];
+  for (const p of paths) {
+    const url = b + p;
+    let pathAlive = false;
+    for (const [desc, u, hdrs] of floshipAuthAttempts(url, token)) {
+      try {
+        const r = await fetch(u, { headers: { ...hdrs, Accept: 'application/json' } });
+        const text = await r.text();
+        let body; try { body = JSON.parse(text); } catch { body = text; }
+        if (r.ok) return { ok: true, url: u, auth: desc, status: r.status, body };
+        log.push({ url, auth: desc, status: r.status });
+        if (r.status !== 404) pathAlive = true;
+        if (desc === 'Bearer' && r.status === 404) break; // path doesn't exist → don't try more auth on it
+      } catch (e) { log.push({ url, auth: desc, error: e.message }); break; }
+    }
   }
-  return last || { ok: false, error: 'no attempts' };
+  return { ok: false, tried: log.slice(0, 80) };
 }
 app.get('/api/floship/debug', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const conn = await getConnector('floship');
   if (!conn) return res.status(400).json({ error: 'Floship not connected — add it on the ＋ page first.' });
   res.json(await floshipProbe(conn.config.base_url, conn.config.token));
+});
+// probe an arbitrary URL+token without saving a connector — for figuring out the right endpoint/auth
+app.post('/api/floship/probe', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const { base_url, token } = req.body || {};
+  if (!base_url) return res.status(400).json({ error: 'base_url required' });
+  res.json(await floshipProbe(String(base_url).trim(), String(token || '')));
 });
 
 // ---------- Shopify (orders sync, same pattern as Gorgias) ----------
