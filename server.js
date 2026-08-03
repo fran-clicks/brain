@@ -264,9 +264,10 @@ async function initDb() {
       id SERIAL PRIMARY KEY, po_number TEXT NOT NULL, destination TEXT DEFAULT '',
       notes TEXT DEFAULT '', created_by TEXT DEFAULT '', include_invoice BOOLEAN DEFAULT false,
       items JSONB DEFAULT '[]', created_at TIMESTAMPTZ DEFAULT now());
-    CREATE TABLE IF NOT EXISTS shipbob_inventory (
-      inventory_id BIGINT PRIMARY KEY, sku TEXT DEFAULT '', name TEXT DEFAULT '',
+    CREATE TABLE IF NOT EXISTS shipbob_stock (
+      sku TEXT PRIMARY KEY, name TEXT DEFAULT '', upc TEXT DEFAULT '',
       on_hand INT, fulfillable INT, committed INT, by_fc JSONB DEFAULT '[]', updated_at TIMESTAMPTZ DEFAULT now());
+    DROP TABLE IF EXISTS shipbob_inventory;
     CREATE TABLE IF NOT EXISTS orders_cache (
       shopify_id BIGINT PRIMARY KEY, order_number TEXT DEFAULT '',
       created_at TIMESTAMPTZ, cancelled_at TIMESTAMPTZ,
@@ -921,6 +922,12 @@ setInterval(async () => {
       else if (!rs.last_run || Date.now() - Date.parse(rs.last_run) > 55 * 60 * 1000) await syncRedo(6);
     }
   } catch (e) { console.error('interval redo sync:', e.message); }
+  try {
+    const sb = (await pool.query(`SELECT v FROM sync_state WHERE k='shipbob'`)).rows[0]?.v;
+    if (await getConnector('shipbob') && (!sb?.last_run || Date.now() - Date.parse(sb.last_run) > 55 * 60 * 1000)) {
+      await syncShipbob();
+    }
+  } catch (e) { console.error('interval shipbob sync:', e.message); }
 }, 5 * 60 * 1000);
 
 async function bootSync() {
@@ -1714,27 +1721,29 @@ async function syncShipbob() {
   shipbobSyncRunning = true;
   let upserts = 0, lastError = null;
   try {
-    // map inventory_id → sku via products (products carry the SKU; inventory carries quantities)
+    // products carry SKU + quantities + per-fulfillment-center breakdown — everything we need in one call
     const products = await shipbobList(cfg, '/1.0/product');
-    const skuByInv = {};
+    const bySku = {};
     for (const p of products) {
-      const sku = p.sku || p.reference_id || '';
-      const invs = p.fulfillable_inventory_items || p.inventory_items || [];
-      for (const iv of invs) if (iv?.id != null) skuByInv[iv.id] = sku;
+      const sku = String(p.sku || '').trim();
+      if (!sku) continue;
+      const onHand = p.total_onhand_quantity ?? 0;
+      if (bySku[sku] && (bySku[sku].on_hand ?? 0) >= onHand) continue; // dedupe channel copies, keep the richest
+      bySku[sku] = { sku, name: String(p.name || '').slice(0, 300), upc: String(p.upc || p.barcode || ''),
+        on_hand: onHand, fulfillable: p.total_fulfillable_quantity ?? 0, committed: p.total_committed_quantity ?? 0,
+        by_fc: p.fulfillable_quantity_by_fulfillment_center || [] };
     }
-    const inventory = await shipbobList(cfg, '/1.0/inventory');
-    for (const it of inventory) {
-      const onHand = it.total_onhand_quantity ?? it.total_on_hand_quantity ?? null;
-      const fulfillable = it.total_fulfillable_quantity ?? null;
-      const committed = it.total_committed_quantity ?? null;
-      const byFc = it.fulfillable_quantity_by_fulfillment_center || [];
+    const skus = Object.keys(bySku);
+    for (const sku of skus) {
+      const r = bySku[sku];
       await pool.query(
-        `INSERT INTO shipbob_inventory (inventory_id, sku, name, on_hand, fulfillable, committed, by_fc, updated_at)
+        `INSERT INTO shipbob_stock (sku, name, upc, on_hand, fulfillable, committed, by_fc, updated_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,now())
-         ON CONFLICT (inventory_id) DO UPDATE SET sku=$2, name=$3, on_hand=$4, fulfillable=$5, committed=$6, by_fc=$7, updated_at=now()`,
-        [it.id, skuByInv[it.id] || it.sku || '', (it.name || '').slice(0, 300), onHand, fulfillable, committed, JSON.stringify(byFc)]);
+         ON CONFLICT (sku) DO UPDATE SET name=$2, upc=$3, on_hand=$4, fulfillable=$5, committed=$6, by_fc=$7, updated_at=now()`,
+        [r.sku, r.name, r.upc, r.on_hand, r.fulfillable, r.committed, JSON.stringify(r.by_fc)]);
       upserts++;
     }
+    if (skus.length) await pool.query('DELETE FROM shipbob_stock WHERE sku <> ALL($1)', [skus]); // drop SKUs no longer in ShipBob
   } catch (e) { lastError = String(e.message); console.error('shipbob sync:', lastError); }
   finally {
     await pool.query(`INSERT INTO sync_state (k, v) VALUES ('shipbob', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
@@ -1759,10 +1768,10 @@ app.get('/api/shipbob/summary', async (_req, res) => {
   const conn = await getConnector('shipbob');
   const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='shipbob'`)).rows[0]?.v || null;
   const items = (await pool.query(
-    `SELECT inventory_id, sku, name, on_hand, fulfillable, committed, by_fc FROM shipbob_inventory ORDER BY sku, name`)).rows;
+    `SELECT sku, name, upc, on_hand, fulfillable, committed, by_fc FROM shipbob_stock ORDER BY sku, name`)).rows;
   const totals = (await pool.query(
     `SELECT count(*)::int items, coalesce(sum(on_hand),0)::int on_hand, coalesce(sum(fulfillable),0)::int fulfillable,
-            coalesce(sum(committed),0)::int committed FROM shipbob_inventory`)).rows[0];
+            coalesce(sum(committed),0)::int committed FROM shipbob_stock`)).rows[0];
   res.json({ configured: !!conn, items, totals, sync: ss });
 });
 app.post('/api/shipbob/sync', async (req, res) => {
