@@ -260,6 +260,10 @@ async function initDb() {
     ALTER TABLE uk_stock ADD COLUMN IF NOT EXISTS founders INT;
     CREATE TABLE IF NOT EXISTS uk_stock_history (
       taken_at TIMESTAMPTZ DEFAULT now(), sku TEXT, qty INT);
+    CREATE TABLE IF NOT EXISTS stock_sign_outs (
+      id SERIAL PRIMARY KEY, po_number TEXT NOT NULL, destination TEXT DEFAULT '',
+      notes TEXT DEFAULT '', created_by TEXT DEFAULT '', include_invoice BOOLEAN DEFAULT false,
+      items JSONB DEFAULT '[]', created_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS orders_cache (
       shopify_id BIGINT PRIMARY KEY, order_number TEXT DEFAULT '',
       created_at TIMESTAMPTZ, cancelled_at TIMESTAMPTZ,
@@ -1569,6 +1573,89 @@ app.get('/api/stock/by-upc', async (req, res) => {
   const row = (await pool.query('SELECT sku, name, upc, brand_new, non_pristine, damaged, founders, qty FROM uk_stock WHERE upc=$1 LIMIT 1', [upc])).rows[0] || null;
   res.json({ found: !!row, item: row });
 });
+// ---------- sign-out / PO cart (admins): deduct stock, keep a record, print docs ----------
+const STOCK_CONDS = ['brand_new', 'non_pristine', 'damaged', 'founders'];
+const CONDLABEL = { brand_new: 'Brand New', non_pristine: 'Non-Pristine', damaged: 'Damaged', founders: 'Founders' };
+app.post('/api/stock/sign-out', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const b = req.body || {};
+  const items = Array.isArray(b.items) ? b.items : [];
+  if (!items.length) return res.status(400).json({ error: 'Cart is empty.' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // validate availability with row locks, then deduct
+    for (const it of items) {
+      const sku = String(it.sku || '');
+      const cond = STOCK_CONDS.includes(it.condition) ? it.condition : 'brand_new';
+      const qty = Math.max(0, parseInt(it.qty) || 0);
+      const row = (await client.query(`SELECT ${cond} AS c FROM uk_stock WHERE sku=$1 FOR UPDATE`, [sku])).rows[0];
+      if (!row) throw new Error(`Unknown SKU ${sku}`);
+      if ((row.c || 0) < qty) throw new Error(`Insufficient ${CONDLABEL[cond]} for ${sku} (have ${row.c || 0}, need ${qty})`);
+    }
+    for (const it of items) {
+      const sku = String(it.sku || '');
+      const cond = STOCK_CONDS.includes(it.condition) ? it.condition : 'brand_new';
+      const qty = Math.max(0, parseInt(it.qty) || 0);
+      await client.query(`UPDATE uk_stock SET ${cond}=GREATEST(0,coalesce(${cond},0)-$2), qty=GREATEST(0,coalesce(qty,0)-$2), updated_at=now() WHERE sku=$1`, [sku, qty]);
+      await client.query(`INSERT INTO uk_stock_history (sku, qty) SELECT sku, qty FROM uk_stock WHERE sku=$1`, [sku]);
+    }
+    const po = String(b.po_number || '').trim() || ('PO-' + Date.now());
+    const clean = items.map(it => ({ sku: String(it.sku || ''), description: String(it.description || ''), upc: String(it.upc || ''),
+      condition: STOCK_CONDS.includes(it.condition) ? it.condition : 'brand_new', qty: Math.max(0, parseInt(it.qty) || 0) }));
+    const ins = await client.query(
+      `INSERT INTO stock_sign_outs (po_number, destination, notes, created_by, include_invoice, items)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+      [po, String(b.destination || ''), String(b.notes || ''), readSession(req) || '', !!b.include_invoice, JSON.stringify(clean)]);
+    await client.query('COMMIT');
+    res.json({ ok: true, id: ins.rows[0].id, po_number: po });
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(400).json({ error: e.message }); }
+  finally { client.release(); }
+});
+app.get('/api/stock/sign-outs', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const rows = (await pool.query(
+    `SELECT id, po_number, destination, notes, created_by, include_invoice, items, created_at
+     FROM stock_sign_outs ORDER BY id DESC LIMIT 50`)).rows;
+  res.json(rows);
+});
+// printable packing list / commercial invoice
+app.get('/api/stock/sign-out-doc', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).send('admins only');
+  const id = parseInt(req.query.id);
+  const type = req.query.type === 'invoice' ? 'invoice' : 'packing';
+  const so = (await pool.query('SELECT * FROM stock_sign_outs WHERE id=$1', [id])).rows[0];
+  if (!so) return res.status(404).send('Not found');
+  const items = Array.isArray(so.items) ? so.items : [];
+  const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  const totalUnits = items.reduce((n, i) => n + (i.qty || 0), 0);
+  const title = type === 'invoice' ? 'Commercial Invoice' : 'Packing List';
+  const rows = items.map((i, n) => `<tr><td>${n + 1}</td><td><b>${esc(i.sku)}</b></td><td>${esc(i.description)}</td><td>${esc(i.upc)}</td><td>${esc(CONDLABEL[i.condition] || i.condition)}</td><td style="text-align:right">${i.qty}</td></tr>`).join('');
+  res.set('Content-Type', 'text/html');
+  res.send(`<!doctype html><html><head><meta charset="utf-8"><title>${title} · ${esc(so.po_number)}</title>
+<style>body{font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#111;max-width:820px;margin:28px auto;padding:0 20px}
+h1{font-size:22px;margin:0 0 2px}.muted{color:#666}.meta{margin:14px 0 18px;display:flex;flex-wrap:wrap;gap:6px 28px}
+.meta div span{color:#666}table{width:100%;border-collapse:collapse;margin-top:8px}
+th{background:#f3f4f6;text-align:left;padding:8px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:2px solid #e5e7eb}
+td{padding:8px 10px;border-bottom:1px solid #eee}tfoot td{font-weight:700;border-top:2px solid #e5e7eb}
+.btn{margin:18px 0;padding:8px 16px;border:1px solid #ccc;border-radius:8px;background:#ffc800;font-weight:700;cursor:pointer}
+@media print{.btn{display:none}}</style></head><body>
+<button class="btn" onclick="window.print()">🖨 Print</button>
+<h1>${title}</h1><div class="muted">Clicks Technology — UK stock sign-out</div>
+<div class="meta">
+  <div><span>PO number:</span> <b>${esc(so.po_number)}</b></div>
+  <div><span>Destination:</span> ${esc(so.destination) || '—'}</div>
+  <div><span>Date:</span> ${new Date(so.created_at).toLocaleString()}</div>
+  <div><span>Signed out by:</span> ${esc(so.created_by) || '—'}</div>
+  ${so.notes ? `<div><span>Notes:</span> ${esc(so.notes)}</div>` : ''}
+</div>
+<table><thead><tr><th>#</th><th>SKU</th><th>Description</th><th>UPC</th><th>Condition</th><th style="text-align:right">Qty</th></tr></thead>
+<tbody>${rows}</tbody>
+<tfoot><tr><td colspan="5">Total units</td><td style="text-align:right">${totalUnits}</td></tr></tfoot></table>
+${type === 'invoice' ? '<p class="muted" style="margin-top:20px">This commercial invoice is issued for customs/shipping purposes. Goods described above are transferred as stated.</p>' : ''}
+</body></html>`);
+});
+
 // CSV export of all stock
 app.get('/api/stock/export', async (_req, res) => {
   const rows = (await pool.query('SELECT upc, sku, name, brand_new, non_pristine, damaged, founders, qty FROM uk_stock ORDER BY sku')).rows;

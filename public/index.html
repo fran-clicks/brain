@@ -437,9 +437,33 @@ footer{color:rgba(16,17,20,.45)}
     <input class="search" id="stockSearch" placeholder="Search SKU, UPC or description…">
     <table id="stockTable"><thead><tr><th>UPC</th><th>SKU</th><th>Description</th><th style="text-align:center">Brand new</th><th style="text-align:center">Non-pristine</th><th style="text-align:center">Damaged</th><th style="text-align:center">Founders</th><th style="text-align:center">Total</th><th></th></tr></thead><tbody></tbody></table>
   </div>
-  <div class="card">
-    <h2>Recent changes</h2>
-    <table id="stockHistory"><thead><tr><th>When</th><th>SKU</th><th>Product</th><th>Units</th></tr></thead><tbody></tbody></table>
+  <div id="stockAdminCards" style="display:none">
+    <div class="card">
+      <h2>🛒 Sign-out cart <span style="font-weight:400;color:var(--muted);font-size:12px">· deduct stock for a PO / shipment</span></h2>
+      <div class="grid two">
+        <div><label>PO number</label><input id="cartPo" placeholder="Auto-generated"></div>
+        <div><label>Destination</label><input id="cartDest" placeholder="e.g. Amazon FBA, customer order…"></div>
+      </div>
+      <label>Notes</label><input id="cartNotes" placeholder="Optional">
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:10px">
+        <div style="flex:1;min-width:200px"><label>Product</label><select id="cartProduct"><option value="">Select product…</option></select></div>
+        <div><label>Condition</label><select id="cartCond"><option value="brand_new">Brand New</option><option value="non_pristine">Non-Pristine</option><option value="damaged">Damaged</option><option value="founders">Founders</option></select></div>
+        <div><label>Qty</label><input type="number" id="cartQty" value="1" min="1" style="width:80px"></div>
+        <button class="btn" style="margin:0" onclick="addToCart()">Add</button>
+      </div>
+      <table id="cartTable" style="margin-top:12px"><thead><tr><th>SKU</th><th>Description</th><th>Condition</th><th style="text-align:center">Qty</th><th style="text-align:center">Available</th><th></th></tr></thead><tbody></tbody></table>
+      <div class="err" id="cartErr"></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px">
+        <label style="margin:0;display:flex;align-items:center;gap:6px;font-weight:400"><input type="checkbox" id="cartInvoice" style="width:auto"> Include commercial invoice</label>
+        <span style="flex:1"></span>
+        <button class="btn" style="margin:0;background:#fff;border:1px solid var(--line);box-shadow:none" onclick="clearCart()">Clear</button>
+        <button class="btn" style="margin:0" onclick="signOutCart()">Sign out &amp; deduct stock</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>📋 Sign-out history <span style="font-weight:400;color:var(--muted);font-size:12px">· recent POs</span></h2>
+      <table id="poTable"><thead><tr><th>PO</th><th>Destination</th><th>Items</th><th>By</th><th>Date</th><th>Docs</th></tr></thead><tbody></tbody></table>
+    </div>
   </div>
 </div>
 
@@ -1595,6 +1619,78 @@ async function closeScan() {
   document.getElementById('scanModal').style.display = 'none';
   if (scanInstance) { try { await scanInstance.stop(); scanInstance.clear(); } catch {} scanInstance = null; }
 }
+// ---- sign-out cart (admins) ----
+const CONDLBL = { brand_new: 'Brand New', non_pristine: 'Non-Pristine', damaged: 'Damaged', founders: 'Founders' };
+let cartItems = [];
+function populateCartProduct() {
+  const sel = document.getElementById('cartProduct'); const cur = sel.value;
+  sel.innerHTML = '<option value="">Select product…</option>' + stockItems.map(i =>
+    `<option value="${esc(i.sku)}">${esc(i.sku)} — ${esc(i.name)} (${i.qty ?? 0} in stock)</option>`).join('');
+  sel.value = cur;
+}
+function addToCart() {
+  const sku = document.getElementById('cartProduct').value;
+  if (!sku) return;
+  const it = stockItems.find(i => i.sku === sku);
+  if (!it) return;
+  cartItems.push({ sku, description: it.name, upc: it.upc || '', condition: document.getElementById('cartCond').value,
+    qty: Math.max(1, parseInt(document.getElementById('cartQty').value) || 1) });
+  document.getElementById('cartQty').value = 1;
+  renderCart();
+}
+function renderCart() {
+  document.querySelector('#cartTable tbody').innerHTML = cartItems.length ? cartItems.map((c, i) => {
+    const it = stockItems.find(x => x.sku === c.sku);
+    const avail = it ? (it[c.condition] || 0) : 0;
+    const over = c.qty > avail;
+    return `<tr><td><span class="tag src">${esc(c.sku)}</span></td><td>${esc(c.description)}</td><td>${CONDLBL[c.condition]}</td>
+      <td style="text-align:center"><input type="number" value="${c.qty}" min="1" style="width:70px;text-align:center" onchange="updateCartQty(${i},this.value)"></td>
+      <td style="text-align:center;color:${over ? 'var(--red)' : 'inherit'}">${avail}${over ? ' ⚠️' : ''}</td>
+      <td style="text-align:right"><button class="btn" style="margin:0;padding:2px 9px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="removeCartItem(${i})">✕</button></td></tr>`;
+  }).join('') : '<tr><td colspan="6" class="empty">Cart is empty — add products above.</td></tr>';
+}
+function updateCartQty(i, v) { cartItems[i].qty = Math.max(1, parseInt(v) || 1); renderCart(); }
+function removeCartItem(i) { cartItems.splice(i, 1); renderCart(); }
+function clearCart() {
+  cartItems = [];
+  ['cartPo', 'cartDest', 'cartNotes'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('cartInvoice').checked = false;
+  document.getElementById('cartErr').textContent = '';
+  renderCart();
+}
+async function signOutCart() {
+  const err = document.getElementById('cartErr'); err.textContent = '';
+  if (!cartItems.length) { err.textContent = 'Cart is empty.'; return; }
+  const po = document.getElementById('cartPo').value.trim() ||
+    ('PO-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '-' + Math.random().toString(36).slice(2,6).toUpperCase());
+  for (const c of cartItems) {
+    const it = stockItems.find(x => x.sku === c.sku);
+    if (!it || (it[c.condition] || 0) < c.qty) { err.textContent = `Insufficient ${CONDLBL[c.condition]} for ${c.sku}.`; return; }
+  }
+  if (!confirm(`Sign out ${cartItems.length} line(s) under ${po}? This deducts stock.`)) return;
+  const invoice = document.getElementById('cartInvoice').checked;
+  try {
+    const r = await api('/api/stock/sign-out', {method:'POST', body: JSON.stringify({
+      po_number: po, destination: document.getElementById('cartDest').value.trim(),
+      notes: document.getElementById('cartNotes').value.trim(), include_invoice: invoice, items: cartItems })});
+    window.open('/api/stock/sign-out-doc?id=' + r.id + '&type=packing', '_blank');
+    if (invoice) window.open('/api/stock/sign-out-doc?id=' + r.id + '&type=invoice', '_blank');
+    clearCart(); loadStock(); loadSignOuts();
+  } catch (e) { err.textContent = e.message; }
+}
+async function loadSignOuts() {
+  if (!window.isAdmin) return;
+  try {
+    const rows = await api('/api/stock/sign-outs');
+    document.querySelector('#poTable tbody').innerHTML = rows.length ? rows.map(p => {
+      const units = (p.items || []).reduce((n, i) => n + (i.qty || 0), 0);
+      return `<tr><td><b>${esc(p.po_number)}</b></td><td>${esc(p.destination || '—')}</td>
+        <td>${(p.items || []).length} line(s) · ${units} units</td><td>${esc(p.created_by || '—')}</td>
+        <td>${esc(new Date(p.created_at).toLocaleString())}</td>
+        <td><a href="/api/stock/sign-out-doc?id=${p.id}&type=packing" target="_blank">Packing</a>${p.include_invoice ? ` · <a href="/api/stock/sign-out-doc?id=${p.id}&type=invoice" target="_blank">Invoice</a>` : ''}</td></tr>`;
+    }).join('') : '<tr><td colspan="6" class="empty">No sign-outs yet.</td></tr>';
+  } catch {}
+}
 async function loadStock() {
   const note = document.getElementById('stockNote');
   document.getElementById('stockUpdating').classList.add('on');
@@ -1603,6 +1699,7 @@ async function loadStock() {
     // clicks-brain now owns UK stock, so show admin controls to admins
     document.getElementById('stockAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
     document.getElementById('stockSyncBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
+    document.getElementById('stockAdminCards').style.display = window.isAdmin ? 'block' : 'none';
     if (!s.configured && !(s.items && s.items.length)) {
       note.textContent = window.isAdmin
         ? 'No stock yet — use ＋ Add product or 📷 Scan to start, or re-import from clicks_ruk.'
@@ -1622,6 +1719,7 @@ async function loadStock() {
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
     stockItems = s.items || [];
     renderStockTable();
+    if (window.isAdmin) { populateCartProduct(); renderCart(); loadSignOuts(); }
     document.querySelector('#stockHistory tbody').innerHTML = (s.history || []).length ? s.history.map(h =>
       `<tr><td>${esc(new Date(h.taken_at).toLocaleString())}</td><td><span class="tag src">${esc(h.sku)}</span></td>
        <td>${esc(h.name || '')}</td><td><b>${h.qty ?? '?'}</b></td></tr>`).join('')
