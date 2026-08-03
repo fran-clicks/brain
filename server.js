@@ -271,6 +271,11 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS floship_stock (
       sku TEXT PRIMARY KEY, description TEXT DEFAULT '', upc TEXT DEFAULT '',
       qty INT, on_hand INT, by_wh JSONB DEFAULT '[]', updated_at TIMESTAMPTZ DEFAULT now());
+    CREATE TABLE IF NOT EXISTS freight_shipments (
+      id SERIAL PRIMARY KEY, reference TEXT DEFAULT '', description TEXT DEFAULT '',
+      units INT, origin TEXT DEFAULT '', destination TEXT DEFAULT '', carrier TEXT DEFAULT '',
+      status TEXT DEFAULT 'Packed at factory', eta DATE, notes TEXT DEFAULT '',
+      created_by TEXT DEFAULT '', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS orders_cache (
       shopify_id BIGINT PRIMARY KEY, order_number TEXT DEFAULT '',
       created_at TIMESTAMPTZ, cancelled_at TIMESTAMPTZ,
@@ -1747,7 +1752,7 @@ async function syncShipbob() {
     const bySku = {};
     for (const p of products) {
       const sku = String(p.sku || '').trim();
-      if (!sku) continue;
+      if (!sku || !/[A-Za-z]/.test(sku)) continue; // skip blank and all-numeric (barcode) SKUs
       const onHand = p.total_onhand_quantity ?? 0;
       if (bySku[sku] && (bySku[sku].on_hand ?? 0) >= onHand) continue; // dedupe channel copies, keep the richest
       bySku[sku] = { sku, name: String(p.name || '').slice(0, 300), upc: String(p.upc || p.barcode || ''),
@@ -1789,10 +1794,10 @@ app.get('/api/shipbob/summary', async (_req, res) => {
   const conn = await getConnector('shipbob');
   const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='shipbob'`)).rows[0]?.v || null;
   const items = (await pool.query(
-    `SELECT sku, name, upc, on_hand, fulfillable, committed, by_fc FROM shipbob_stock ORDER BY sku, name`)).rows;
+    `SELECT sku, name, upc, on_hand, fulfillable, committed, by_fc FROM shipbob_stock WHERE sku ~ '[A-Za-z]' ORDER BY sku, name`)).rows;
   const totals = (await pool.query(
     `SELECT count(*)::int items, coalesce(sum(on_hand),0)::int on_hand, coalesce(sum(fulfillable),0)::int fulfillable,
-            coalesce(sum(committed),0)::int committed FROM shipbob_stock`)).rows[0];
+            coalesce(sum(committed),0)::int committed FROM shipbob_stock WHERE sku ~ '[A-Za-z]'`)).rows[0];
   res.json({ configured: !!conn, items, totals, sync: ss });
 });
 app.post('/api/shipbob/sync', async (req, res) => {
@@ -1897,7 +1902,7 @@ async function syncFloship() {
       const results = Array.isArray(body) ? body : (body.results || []);
       for (const p of results) {
         const sku = String(p.sku || '').trim();
-        if (!sku) continue;
+        if (!sku || !/[A-Za-z]/.test(sku)) continue; // skip blank and all-numeric (barcode) SKUs
         const wh = p.warehouses_stock || [];
         const qty = wh.reduce((s, w) => s + (w.qty || 0), 0);
         const onHand = wh.reduce((s, w) => s + (w.qty_on_hand || 0), 0);
@@ -1923,15 +1928,52 @@ app.get('/api/floship/summary', async (_req, res) => {
   const conn = await getConnector('floship');
   const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='floship'`)).rows[0]?.v || null;
   const items = (await pool.query(
-    `SELECT sku, description, upc, qty, on_hand, by_wh FROM floship_stock ORDER BY sku`)).rows;
+    `SELECT sku, description, upc, qty, on_hand, by_wh FROM floship_stock WHERE sku ~ '[A-Za-z]' ORDER BY sku`)).rows;
   const totals = (await pool.query(
-    `SELECT count(*)::int items, coalesce(sum(qty),0)::int qty, coalesce(sum(on_hand),0)::int on_hand FROM floship_stock`)).rows[0];
+    `SELECT count(*)::int items, coalesce(sum(qty),0)::int qty, coalesce(sum(on_hand),0)::int on_hand FROM floship_stock WHERE sku ~ '[A-Za-z]'`)).rows[0];
   res.json({ configured: !!conn, items, totals, sync: ss });
 });
 app.post('/api/floship/sync', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   try { res.json(await syncFloship()); }
   catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ---------- Freight tracker (manual bulk shipments factory → warehouse) ----------
+const FREIGHT_STATUSES = ['Packed at factory', 'Booked', 'In transit', 'At port', 'Customs clearance', 'Delivered to warehouse', 'Cleared'];
+app.get('/api/freight', async (_req, res) => {
+  const rows = (await pool.query(
+    `SELECT id, reference, description, units, origin, destination, carrier, status,
+       to_char(eta,'YYYY-MM-DD') eta, notes, created_by, updated_at
+     FROM freight_shipments ORDER BY (status='Cleared'), eta ASC NULLS LAST, id DESC`)).rows;
+  res.json({ statuses: FREIGHT_STATUSES, shipments: rows });
+});
+app.post('/api/freight', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const b = req.body || {};
+  const status = FREIGHT_STATUSES.includes(b.status) ? b.status : 'Packed at factory';
+  const units = Number.isFinite(parseInt(b.units)) ? parseInt(b.units) : null;
+  const eta = b.eta ? String(b.eta).slice(0, 10) : null;
+  const fields = [String(b.reference || '').slice(0, 120), String(b.description || '').slice(0, 300), units,
+    String(b.origin || '').slice(0, 160), String(b.destination || '').slice(0, 160), String(b.carrier || '').slice(0, 120),
+    status, eta, String(b.notes || '').slice(0, 800)];
+  if (b.id) {
+    const r = await pool.query(
+      `UPDATE freight_shipments SET reference=$1, description=$2, units=$3, origin=$4, destination=$5, carrier=$6,
+         status=$7, eta=$8, notes=$9, updated_at=now() WHERE id=$10 RETURNING id`, [...fields, parseInt(b.id)]);
+    if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
+    return res.json({ ok: true, id: r.rows[0].id });
+  }
+  const r = await pool.query(
+    `INSERT INTO freight_shipments (reference, description, units, origin, destination, carrier, status, eta, notes, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [...fields, readSession(req) || '']);
+  res.json({ ok: true, id: r.rows[0].id });
+});
+app.post('/api/freight/delete', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const r = await pool.query('DELETE FROM freight_shipments WHERE id=$1', [parseInt(req.body?.id)]);
+  if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
+  res.json({ ok: true });
 });
 
 // combined inventory grid: one row per SKU, available-to-fulfill from every source + per-location breakdown
@@ -1942,6 +1984,7 @@ app.get('/api/fulfillment/grid', async (_req, res) => {
       coalesce(sb.fulfillable,0) sb_avail, sb.on_hand sb_onhand, sb.committed sb_committed, sb.by_fc,
       coalesce(fl.qty,0) fl_avail, fl.on_hand fl_onhand, fl.by_wh
     FROM shipbob_stock sb FULL OUTER JOIN floship_stock fl ON fl.sku = sb.sku
+    WHERE coalesce(sb.sku, fl.sku) ~ '[A-Za-z]'
     ORDER BY (coalesce(sb.fulfillable,0)+coalesce(fl.qty,0)) DESC, coalesce(sb.sku, fl.sku)`)).rows;
   const totals = rows.reduce((a, r) => { a.shipbob += r.sb_avail || 0; a.floship += r.fl_avail || 0; a.skus++; return a; },
     { skus: 0, shipbob: 0, floship: 0 });

@@ -172,8 +172,8 @@ footer{color:rgba(16,17,20,.45)}
   <button data-s="sales">🛒 Shopify</button>
   <button data-s="redo">↩️ Returns</button>
   <button data-s="stock">📦 UK Stock</button>
-  <button data-s="fulfillment">🚚 Fulfillment</button>
-  <button data-s="ops">🗂️ Operations</button>
+  <button data-s="fulfillment">🌍 Global Inventory</button>
+  <button data-s="freight">🚢 Freight Tracker</button>
   <button data-s="kb">💡 Knowledge Bases</button>
   <button data-s="conn" title="Connectors" style="font-size:16px;padding:8px 16px;font-weight:800">＋</button>
 </nav>
@@ -636,11 +636,48 @@ footer{color:rgba(16,17,20,.45)}
   </div>
 </div>
 
-<!-- OPERATIONS (manual imports + trackers for KP) -->
-<div class="section" id="s-ops">
-  <div class="card">
-    <h2>🗂️ Operations <span style="font-weight:400;color:var(--muted);font-size:12px">· imports & manual trackers</span></h2>
-    <div class="note" style="margin-top:0">Home for data imported from spreadsheets (stock snapshots, samples, bulk shipments) and the manual trackers we build for them. Admins import CSVs here; others get view/role-scoped access. Being built out — tell me which sheet to model first.</div>
+<!-- FREIGHT TRACKER (manual bulk shipments factory → warehouse) -->
+<div class="section" id="s-freight">
+  <div class="synchead">
+    <div style="color:var(--muted);font-size:12px">Manual tracker for bulk shipments moving from factories to warehouses — status, ETA and notes for the whole team.</div>
+    <button class="btn" id="frAddBtn" onclick="openFreight()" style="display:none;margin:0;padding:6px 14px">＋ Add shipment</button>
+  </div>
+  <div class="grid kpis" id="frKpis"></div>
+  <div class="card" style="margin-top:14px">
+    <h2>🚢 Shipments
+      <span class="updating-pill" id="frUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
+    </h2>
+    <input class="search" id="frSearch" placeholder="Search reference, product, warehouse…">
+    <table id="frTable"><thead><tr><th>Reference</th><th>Product</th><th style="text-align:center">Units</th><th>From → To</th><th>Carrier</th><th>Status</th><th>ETA</th><th>Notes</th><th></th></tr></thead><tbody></tbody></table>
+    <div class="note" id="frNote" style="margin-top:8px">Loading…</div>
+  </div>
+</div>
+
+<!-- freight add/edit modal (admins) -->
+<div id="freightModal" style="display:none;position:fixed;inset:0;z-index:70;background:rgba(16,17,20,.45);align-items:center;justify-content:center" onclick="if(event.target===this)closeFreight()">
+  <div class="card" style="width:min(520px,94vw);margin:0;max-height:92vh;overflow:auto">
+    <h2 id="freightModalTitle">Add shipment</h2>
+    <input type="hidden" id="frId">
+    <div class="grid two">
+      <div><label>Reference / PO</label><input id="frRef" placeholder="e.g. PO-2026-014"></div>
+      <div><label>Units</label><input type="number" id="frUnits" min="0" placeholder="e.g. 5000"></div>
+    </div>
+    <label>Product / contents</label><input id="frDesc" placeholder="e.g. Power Keyboard — Onyx">
+    <div class="grid two">
+      <div><label>From (factory / origin)</label><input id="frOrigin" placeholder="e.g. Shenzhen, CN"></div>
+      <div><label>To (warehouse)</label><input id="frDest" placeholder="e.g. Floship HK — Yuen Long 3"></div>
+    </div>
+    <div class="grid two">
+      <div><label>Carrier / forwarder</label><input id="frCarrier" placeholder="e.g. DHL, sea freight"></div>
+      <div><label>ETA</label><input type="date" lang="en-GB" id="frEta"></div>
+    </div>
+    <label>Status</label><select id="frStatus"></select>
+    <label>Notes</label><textarea id="frNotes" rows="2" placeholder="Anything the team should know"></textarea>
+    <div class="err" id="frErr"></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn" onclick="saveFreight()">Save</button>
+      <button class="btn" style="background:#fff;border:1px solid var(--line);box-shadow:none" onclick="closeFreight()">Cancel</button>
+    </div>
   </div>
 </div>
 
@@ -829,6 +866,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (s === 'home') loadOverview();
   if (s === 'kb') { loadKbs(); loadKbAudit(); }
   if (s === 'fulfillment') loadFulfillment();
+  if (s === 'freight') loadFreight();
   if (s === 'conn') { loadConnectorTypes(); loadConnectors(); loadRequests(); loadMembers(); loadHealth(); }
 });
 
@@ -978,6 +1016,78 @@ async function flSync() {
   document.getElementById('flUpdating').classList.add('on');
   try { await api('/api/floship/sync', {method:'POST', body:'{}'}); loadFloship(); loadFulfillmentGrid(); }
   catch (e) { document.getElementById('flNote').textContent = '⚠️ ' + e.message; document.getElementById('flUpdating').classList.remove('on'); }
+}
+// ---------- freight tracker ----------
+let frShipments = [], frStatuses = [];
+const FR_COLORS = { 'Packed at factory':'#6b7280','Booked':'#0891b2','In transit':'#2563eb','At port':'#7c3aed','Customs clearance':'#b45309','Delivered to warehouse':'#059669','Cleared':'#16a34a' };
+function renderFrTable() {
+  const q = (document.getElementById('frSearch').value || '').toLowerCase();
+  const rows = frShipments.filter(s => ((s.reference || '') + ' ' + (s.description || '') + ' ' + (s.destination || '') + ' ' + (s.origin || '')).toLowerCase().includes(q));
+  const admin = window.isAdmin;
+  document.querySelector('#frTable tbody').innerHTML = rows.length ? rows.map(s => {
+    const c = FR_COLORS[s.status] || '#6b7280';
+    const badge = `<span style="display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:6px;background:${c}1a;color:${c};border:1px solid ${c}55">${esc(s.status)}</span>`;
+    const eta = s.eta ? new Date(s.eta + 'T00:00:00').toLocaleDateString(undefined, { day:'numeric', month:'short', year:'numeric' }) : '—';
+    const late = s.eta && s.status !== 'Cleared' && new Date(s.eta + 'T00:00:00') < new Date() ? ' ⚠️' : '';
+    const actions = admin ? `<div style="display:flex;gap:4px;justify-content:flex-end">
+      <button class="btn" style="margin:0;padding:2px 9px;font-size:13px" onclick="editFreight(${s.id})">✎</button>
+      <button class="btn" style="margin:0;padding:2px 9px;font-size:13px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="deleteFreight(${s.id})">✕</button></div>` : '';
+    return `<tr><td><b>${esc(s.reference || '—')}</b></td><td>${esc(s.description || '')}</td>
+      <td style="text-align:center">${s.units != null ? s.units.toLocaleString() : '—'}</td>
+      <td style="font-size:12px">${esc(s.origin || '?')} → ${esc(s.destination || '?')}</td>
+      <td>${esc(s.carrier || '—')}</td><td>${badge}</td><td>${eta}${late}</td>
+      <td style="font-size:12px;color:var(--muted)">${esc(s.notes || '')}</td><td>${actions}</td></tr>`;
+  }).join('') : `<tr><td colspan="9" class="empty">${admin ? 'No shipments yet — click ＋ Add shipment.' : 'No shipments tracked yet.'}</td></tr>`;
+}
+async function loadFreight() {
+  document.getElementById('frAddBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
+  document.getElementById('frUpdating').classList.add('on');
+  try {
+    const r = await api('/api/freight');
+    frStatuses = r.statuses || []; frShipments = r.shipments || [];
+    const active = frShipments.filter(s => s.status !== 'Cleared');
+    const units = active.reduce((n, s) => n + (s.units || 0), 0);
+    const soon = active.filter(s => s.eta && (new Date(s.eta + 'T00:00:00') - new Date()) / 864e5 <= 14).length;
+    document.getElementById('frKpis').innerHTML = [
+      {l:'Active shipments', v: active.length},
+      {l:'Units in transit', v: units.toLocaleString()},
+      {l:'Arriving ≤14 days', v: soon},
+      {l:'Cleared', v: frShipments.filter(s => s.status === 'Cleared').length}
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    renderFrTable();
+    document.getElementById('frNote').textContent = `${frShipments.length} shipment${frShipments.length === 1 ? '' : 's'}`;
+  } catch (e) { document.getElementById('frNote').textContent = '⚠️ ' + e.message; }
+  finally { document.getElementById('frUpdating').classList.remove('on'); }
+}
+document.getElementById('frSearch').oninput = renderFrTable;
+function openFreight(sh) {
+  const el = id => document.getElementById(id);
+  el('frStatus').innerHTML = frStatuses.map(s => `<option>${esc(s)}</option>`).join('');
+  el('freightModalTitle').textContent = sh ? 'Edit shipment' : 'Add shipment';
+  el('frId').value = sh ? sh.id : '';
+  el('frRef').value = sh?.reference || ''; el('frUnits').value = sh?.units ?? ''; el('frDesc').value = sh?.description || '';
+  el('frOrigin').value = sh?.origin || ''; el('frDest').value = sh?.destination || ''; el('frCarrier').value = sh?.carrier || '';
+  el('frEta').value = sh?.eta || ''; el('frStatus').value = sh?.status || frStatuses[0] || ''; el('frNotes').value = sh?.notes || '';
+  el('frErr').textContent = '';
+  el('freightModal').style.display = 'flex';
+}
+function editFreight(id) { const s = frShipments.find(x => x.id === id); if (s) openFreight(s); }
+function closeFreight() { document.getElementById('freightModal').style.display = 'none'; }
+async function saveFreight() {
+  const el = id => document.getElementById(id);
+  el('frErr').textContent = '';
+  try {
+    await api('/api/freight', {method:'POST', body: JSON.stringify({
+      id: el('frId').value || undefined, reference: el('frRef').value.trim(), description: el('frDesc').value.trim(),
+      units: el('frUnits').value, origin: el('frOrigin').value.trim(), destination: el('frDest').value.trim(),
+      carrier: el('frCarrier').value.trim(), status: el('frStatus').value, eta: el('frEta').value, notes: el('frNotes').value.trim() })});
+    closeFreight(); loadFreight();
+  } catch (e) { el('frErr').textContent = e.message; }
+}
+async function deleteFreight(id) {
+  if (!confirm('Delete this shipment?')) return;
+  try { await api('/api/freight/delete', {method:'POST', body: JSON.stringify({ id })}); loadFreight(); }
+  catch (e) { document.getElementById('frNote').textContent = '⚠️ ' + e.message; }
 }
 async function sbSync() {
   document.getElementById('sbUpdating').classList.add('on');
