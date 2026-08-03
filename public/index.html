@@ -590,44 +590,48 @@ footer{color:rgba(16,17,20,.45)}
     <div class="note" id="fgNote" style="margin-top:8px"></div>
   </div>
 
-  <!-- ShipBob -->
-  <div class="grid kpis" id="sbKpis" style="margin-top:14px"></div>
+  <!-- ShipBob (collapsible detail) -->
   <div class="card" style="margin-top:14px">
-    <h2><span class="src-badge" style="background:#059669">ShipBob</span>Inventory <span style="font-weight:400;color:var(--muted);font-size:12px">· US</span>
+    <h2 style="cursor:pointer" onclick="toggleSrc('sb')"><span id="sbChev" style="display:inline-block;width:14px;color:var(--muted)">▶</span> <span class="src-badge" style="background:#059669">ShipBob</span>Inventory <span style="font-weight:400;color:var(--muted);font-size:12px">· US</span>
       <span class="updating-pill" id="sbUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
-      <span id="sbAdminBar" style="display:none;float:right">
+      <span id="sbAdminBar" style="display:none;float:right" onclick="event.stopPropagation()">
         <button class="btn" style="margin:0 0 0 6px;padding:5px 12px" onclick="sbSync()">🔄 Sync now</button>
         <button class="btn" style="margin:0 0 0 6px;padding:5px 12px;background:#fff;border:1px solid var(--line);box-shadow:none" onclick="sbDebug()">🧪 Test API</button>
       </span>
     </h2>
-    <input class="search" id="sbSearch" placeholder="Search SKU or name…">
-    <table id="sbTable"><thead><tr><th>SKU</th><th>Name</th><th style="text-align:center">On hand</th><th style="text-align:center">Fulfillable</th><th style="text-align:center">Committed</th><th>By fulfillment center</th></tr></thead><tbody></tbody></table>
-    <div class="note" id="sbNote" style="margin-top:8px">Loading…</div>
-    <pre id="sbDebugOut" style="display:none;white-space:pre-wrap;font-size:11px;background:rgba(16,17,20,.04);border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px;max-height:360px;overflow:auto"></pre>
+    <div id="sbBody" style="display:none">
+      <div class="grid kpis" id="sbKpis" style="margin-bottom:12px"></div>
+      <input class="search" id="sbSearch" placeholder="Search SKU or name…">
+      <table id="sbTable"><thead><tr><th>SKU</th><th>Name</th><th style="text-align:center">On hand</th><th style="text-align:center">Fulfillable</th><th style="text-align:center">Committed</th><th>By fulfillment center</th></tr></thead><tbody></tbody></table>
+      <div class="note" id="sbNote" style="margin-top:8px">Loading…</div>
+      <pre id="sbDebugOut" style="display:none;white-space:pre-wrap;font-size:11px;background:rgba(16,17,20,.04);border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px;max-height:360px;overflow:auto"></pre>
+    </div>
   </div>
 
-  <!-- Floship -->
-  <div class="grid kpis" id="flKpis"></div>
+  <!-- Floship (collapsible detail) -->
   <div class="card">
-    <h2><span class="src-badge" style="background:#2563eb">Floship</span>Inventory <span style="font-weight:400;color:var(--muted);font-size:12px">· HK / EU</span>
+    <h2 style="cursor:pointer" onclick="toggleSrc('fl')"><span id="flChev" style="display:inline-block;width:14px;color:var(--muted)">▶</span> <span class="src-badge" style="background:#2563eb">Floship</span>Inventory <span style="font-weight:400;color:var(--muted);font-size:12px">· HK / EU</span>
       <span class="updating-pill" id="flUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
-      <span id="flAdminBar" style="display:none;float:right">
+      <span id="flAdminBar" style="display:none;float:right" onclick="event.stopPropagation()">
         <button class="btn" style="margin:0 0 0 6px;padding:5px 12px" onclick="flSync()">🔄 Sync now</button>
         <button class="btn" style="margin:0 0 0 6px;padding:5px 12px;background:#fff;border:1px solid var(--line);box-shadow:none" onclick="flDebug()">🧪 Test API</button>
       </span>
     </h2>
-    <input class="search" id="flSearch" placeholder="Search SKU or description…">
-    <table id="flTable"><thead><tr><th>SKU</th><th>Description</th><th style="text-align:center">Available</th><th style="text-align:center">On hand</th><th>By warehouse</th></tr></thead><tbody></tbody></table>
-    <div class="note" id="flNote" style="margin-top:8px">Loading…</div>
-    <div id="flProbeForm" style="display:none;margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
-      <div class="note" style="margin-top:0">Not connected? Probe the endpoint first, then add it on the ＋ page.</div>
-      <div class="grid two" style="margin-top:6px">
-        <div><label>Endpoint URL to test</label><input id="flUrl" placeholder="https://admin.floship.com/api/v2/"></div>
-        <div><label>Token / key</label><input id="flTok" type="password" autocomplete="off"></div>
+    <div id="flBody" style="display:none">
+      <input class="search" id="flSearch" placeholder="Search SKU or description…">
+      <table id="flTable"><thead><tr><th>SKU</th><th>Description</th><th style="text-align:center">Available</th><th style="text-align:center">On hand</th><th>By warehouse</th></tr></thead><tbody></tbody></table>
+      <div class="note" id="flNote" style="margin-top:8px">Loading…</div>
+      <div class="grid kpis" id="flKpis" style="margin-top:10px"></div>
+      <div id="flProbeForm" style="display:none;margin-top:10px;border-top:1px solid var(--line);padding-top:10px">
+        <div class="note" style="margin-top:0">Not connected? Probe the endpoint first, then add it on the ＋ page.</div>
+        <div class="grid two" style="margin-top:6px">
+          <div><label>Endpoint URL to test</label><input id="flUrl" placeholder="https://admin.floship.com/api/v2/"></div>
+          <div><label>Token / key</label><input id="flTok" type="password" autocomplete="off"></div>
+        </div>
+        <button class="btn" style="margin:6px 0 0" onclick="flProbe()">🧪 Probe (no save)</button>
       </div>
-      <button class="btn" style="margin:6px 0 0" onclick="flProbe()">🧪 Probe (no save)</button>
+      <pre id="flDebugOut" style="display:none;white-space:pre-wrap;font-size:11px;background:rgba(16,17,20,.04);border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px;max-height:360px;overflow:auto"></pre>
     </div>
-    <pre id="flDebugOut" style="display:none;white-space:pre-wrap;font-size:11px;background:rgba(16,17,20,.04);border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px;max-height:360px;overflow:auto"></pre>
   </div>
 </div>
 
@@ -879,6 +883,12 @@ async function loadFulfillmentGrid() {
     document.getElementById('fgNote').textContent = on.length ? `Merging: ${on.join(' + ')}. Green = ShipBob, blue = Floship.` : 'No fulfillment sources connected yet.';
   } catch (e) { document.getElementById('fgNote').textContent = '⚠️ ' + e.message; }
   finally { document.getElementById('fgUpdating').classList.remove('on'); }
+}
+function toggleSrc(p) {
+  const body = document.getElementById(p + 'Body'), chev = document.getElementById(p + 'Chev');
+  const show = body.style.display === 'none';
+  body.style.display = show ? 'block' : 'none';
+  chev.textContent = show ? '▼' : '▶';
 }
 async function syncAllFulfillment() {
   const b = document.getElementById('fulSyncAllBtn');
