@@ -912,9 +912,10 @@ function renderFgTable() {
   const q = (document.getElementById('fgSearch').value || '').toLowerCase();
   const srcs = fgData.sources || [];
   const arrow = key => fgSort && fgSort.key === key ? ' ▼' : '';
+  const delBtn = label => `<button title="Remove this source" onclick="event.stopPropagation();clearSource('${esc(label).replace(/'/g,'&#39;')}')" style="display:block;margin:0 auto 4px;width:20px;height:20px;line-height:1;font-weight:800;font-size:13px;color:#101114;background:var(--yellow);border:1px solid rgba(16,17,20,.3);border-radius:4px;cursor:pointer">✕</button>`;
   document.getElementById('fgHead').innerHTML = `<tr>
     <th style="cursor:pointer" onclick="sortFg('__sku')">SKU${arrow('__sku')}</th><th>Description</th>${srcs.map(s =>
-      `<th style="text-align:center;cursor:pointer" onclick="sortFg('${s.key}')"><span class="src-badge" style="background:${s.color}">${esc(s.label)}</span>${!s.api && window.isAdmin ? ` <span title="Remove this source" style="color:var(--red);cursor:pointer" onclick="event.stopPropagation();clearSource('${esc(s.label).replace(/'/g,'&#39;')}')">✕</span>` : ''}${arrow(s.key)}</th>`).join('')}
+      `<th style="text-align:center;cursor:pointer;vertical-align:bottom" onclick="sortFg('${s.key}')">${!s.api && window.isAdmin ? delBtn(s.label) : ''}<span class="src-badge" style="background:${s.color}">${esc(s.label)}</span>${arrow(s.key)}</th>`).join('')}
     <th style="text-align:center;cursor:pointer" onclick="sortFg('__total')">Total${arrow('__total')}</th></tr>`;
   let rows = (fgData.rows || []).filter(r => ((r.sku || '') + ' ' + (r.name || '')).toLowerCase().includes(q));
   if (fgSort) {
@@ -922,10 +923,16 @@ function renderFgTable() {
     rows = rows.slice().sort((a, b) => k === '__sku' ? (a.sku || '').localeCompare(b.sku || '')
       : (k === '__total' ? (b.total || 0) - (a.total || 0) : (b.vals[k] || 0) - (a.vals[k] || 0)));
   }
-  const cell = (v, bg) => (v ? `<span style="background:${bg};color:#fff;font-weight:600;padding:1px 8px;border-radius:6px">${Number(v).toLocaleString()}</span>` : '<span style="color:var(--muted)">0</span>');
+  const cell = (r, s) => {
+    const v = r.vals[s.key];
+    const num = v ? `<span style="background:${s.color};color:#fff;font-weight:600;padding:1px 8px;border-radius:6px">${Number(v).toLocaleString()}</span>` : '<span style="color:var(--muted)">0</span>';
+    const locs = (r.loc && r.loc[s.key]) || [];
+    const detail = locs.length ? `<div style="font-size:10px;color:var(--muted);margin-top:2px;line-height:1.3">${locs.map(l => `${esc(l.name)}: ${l.qty.toLocaleString()}`).join('<br>')}</div>` : '';
+    return num + detail;
+  };
   document.querySelector('#fgTable tbody').innerHTML = rows.length ? rows.map(r =>
     `<tr><td>${r.sku ? `<span class="tag src">${esc(r.sku)}</span>` : '—'}</td><td>${esc(r.name || '')}</td>${srcs.map(s =>
-      `<td style="text-align:center">${cell(r.vals[s.key], s.color)}</td>`).join('')}<td style="text-align:center;font-weight:700">${(r.total || 0).toLocaleString()}</td></tr>`
+      `<td style="text-align:center;vertical-align:top">${cell(r, s)}</td>`).join('')}<td style="text-align:center;font-weight:700;vertical-align:top">${(r.total || 0).toLocaleString()}</td></tr>`
   ).join('') : `<tr><td colspan="${srcs.length + 3}" class="empty">No matches</td></tr>`;
 }
 async function loadFulfillmentGrid() {

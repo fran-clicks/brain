@@ -1985,8 +1985,8 @@ app.post('/api/freight/delete', async (req, res) => {
 const GRID_PALETTE = ['#db2777', '#ea580c', '#7c3aed', '#0891b2', '#65a30d', '#9333ea', '#0d9488', '#c026d3', '#dc2626', '#ca8a04'];
 app.get('/api/fulfillment/grid', async (_req, res) => {
   const [sb, fl, man, srcOrd, skuOrd] = await Promise.all([
-    pool.query(`SELECT sku, name, fulfillable FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
-    pool.query(`SELECT sku, description, qty FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
+    pool.query(`SELECT sku, name, fulfillable, by_fc FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
+    pool.query(`SELECT sku, description, qty, by_wh FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
     pool.query(`SELECT sku, source, qty, description FROM manual_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
     pool.query(`SELECT source, ord FROM inv_source_ord`),
     pool.query(`SELECT sku, ord FROM inv_sku_ord`)
@@ -1994,9 +1994,15 @@ app.get('/api/fulfillment/grid', async (_req, res) => {
   const srcOrdMap = {}; srcOrd.rows.forEach(r => srcOrdMap[r.source] = r.ord);
   const skuOrdMap = {}; skuOrd.rows.forEach(r => skuOrdMap[r.sku] = r.ord);
   const bySku = {};
-  const ensure = s => (bySku[s] = bySku[s] || { sku: s, name: '', vals: {} });
-  sb.rows.forEach(r => { const x = ensure(r.sku); x.name = x.name || r.name || ''; x.vals.shipbob = r.fulfillable || 0; });
-  fl.rows.forEach(r => { const x = ensure(r.sku); x.name = x.name || r.description || ''; x.vals.floship = r.qty || 0; });
+  const ensure = s => (bySku[s] = bySku[s] || { sku: s, name: '', vals: {}, loc: {} });
+  sb.rows.forEach(r => {
+    const x = ensure(r.sku); x.name = x.name || r.name || ''; x.vals.shipbob = r.fulfillable || 0;
+    x.loc.shipbob = (r.by_fc || []).filter(f => (f.fulfillable_quantity ?? 0) > 0).map(f => ({ name: f.name, qty: f.fulfillable_quantity }));
+  });
+  fl.rows.forEach(r => {
+    const x = ensure(r.sku); x.name = x.name || r.description || ''; x.vals.floship = r.qty || 0;
+    x.loc.floship = (r.by_wh || []).filter(w => (w.qty ?? 0) > 0).map(w => ({ name: String(w.warehouse_name || '').replace('Floship ', ''), qty: w.qty }));
+  });
   const manualSources = {}; // key -> label
   man.rows.forEach(r => {
     const key = 'm_' + String(r.source).toLowerCase().replace(/[^a-z0-9]+/g, '_');
