@@ -570,11 +570,22 @@ footer{color:rgba(16,17,20,.45)}
 
 <!-- FULFILLMENT (3PL: ShipBob, Flowship, …) -->
 <div class="section" id="s-fulfillment">
-  <div class="grid kpis" id="fulKpis"></div>
+  <div class="grid kpis" id="sbKpis"></div>
   <div class="card" style="margin-top:14px">
-    <h2>🚚 Fulfillment <span style="font-weight:400;color:var(--muted);font-size:12px">· ShipBob, Flowship & other 3PLs</span></h2>
-    <div class="note" style="margin-top:0">Live inventory and shipment data pulled from your 3rd-party logistics providers. Nothing connected yet — an admin adds ShipBob / Flowship on the ＋ page once we have the API keys, and this fills in automatically.</div>
-    <div class="note" id="fulSetup" style="margin-top:12px;display:none"></div>
+    <h2>🚚 ShipBob inventory
+      <span class="updating-pill" id="sbUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
+      <span id="sbAdminBar" style="display:none;float:right">
+        <button class="btn" style="margin:0 0 0 6px;padding:5px 12px" onclick="sbSync()">🔄 Sync now</button>
+        <button class="btn" style="margin:0 0 0 6px;padding:5px 12px;background:#fff;border:1px solid var(--line);box-shadow:none" onclick="sbDebug()">🧪 Test API</button>
+      </span>
+    </h2>
+    <input class="search" id="sbSearch" placeholder="Search SKU or name…">
+    <table id="sbTable"><thead><tr><th>SKU</th><th>Name</th><th style="text-align:center">On hand</th><th style="text-align:center">Fulfillable</th><th style="text-align:center">Committed</th><th>By fulfillment center</th></tr></thead><tbody></tbody></table>
+    <div class="note" id="sbNote" style="margin-top:8px">Loading…</div>
+    <pre id="sbDebugOut" style="display:none;white-space:pre-wrap;font-size:11px;background:rgba(16,17,20,.04);border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px;max-height:360px;overflow:auto"></pre>
+  </div>
+  <div class="card">
+    <div class="note" style="margin-top:0">Other providers (Flowship HK, Pattern US, PPR, Amazon, Eternity…) will slot in here as their own columns to rebuild the full inventory grid. This ShipBob view is the first piece.</div>
   </div>
 </div>
 
@@ -770,8 +781,66 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (s === 'redo') loadRedo();
   if (s === 'home') loadOverview();
   if (s === 'kb') { loadKbs(); loadKbAudit(); }
+  if (s === 'fulfillment') loadFulfillment();
   if (s === 'conn') { loadConnectorTypes(); loadConnectors(); loadRequests(); loadMembers(); loadHealth(); }
 });
+
+// ---------- fulfillment (ShipBob) ----------
+let sbItems = [];
+function renderSbTable() {
+  const q = (document.getElementById('sbSearch').value || '').toLowerCase();
+  const rows = sbItems.filter(i => ((i.sku || '') + ' ' + (i.name || '')).toLowerCase().includes(q));
+  const num = v => v == null ? '<span style="color:var(--muted)">—</span>' : Number(v).toLocaleString();
+  document.querySelector('#sbTable tbody').innerHTML = rows.length ? rows.map(i => {
+    const fc = (i.by_fc || []).map(f => `${esc(f.name || f.fulfillment_center?.name || '?')}: ${f.fulfillable_quantity ?? f.onhand_quantity ?? '?'}`).join(' · ');
+    return `<tr><td>${i.sku ? `<span class="tag src">${esc(i.sku)}</span>` : '<span style="color:var(--muted)">—</span>'}</td>
+      <td>${esc(i.name || '')}</td>
+      <td style="text-align:center">${num(i.on_hand)}</td>
+      <td style="text-align:center;font-weight:600">${num(i.fulfillable)}</td>
+      <td style="text-align:center">${num(i.committed)}</td>
+      <td style="font-size:12px;color:var(--muted)">${esc(fc) || '—'}</td></tr>`;
+  }).join('') : '<tr><td colspan="6" class="empty">No matches</td></tr>';
+}
+async function loadFulfillment() {
+  const note = document.getElementById('sbNote');
+  document.getElementById('sbAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
+  document.getElementById('sbUpdating').classList.add('on');
+  try {
+    const s = await api('/api/shipbob/summary');
+    if (!s.configured) {
+      note.textContent = window.isAdmin
+        ? 'ShipBob is not connected — add it on the ＋ page (Personal Access Token), then hit Sync now.'
+        : 'ShipBob is not connected yet.';
+      document.getElementById('sbKpis').innerHTML = ''; sbItems = []; renderSbTable();
+      return;
+    }
+    const t = s.totals || {};
+    document.getElementById('sbKpis').innerHTML = [
+      {l:'SKUs', v: (t.items ?? 0).toLocaleString()},
+      {l:'On hand', v: (t.on_hand ?? 0).toLocaleString()},
+      {l:'Fulfillable', v: (t.fulfillable ?? 0).toLocaleString()},
+      {l:'Committed', v: (t.committed ?? 0).toLocaleString()}
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    sbItems = s.items || [];
+    renderSbTable();
+    note.textContent = s.sync
+      ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · ${sbItems.length} items${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''}`
+      : (window.isAdmin ? 'Connected — hit Sync now to pull inventory.' : 'Waiting for first sync.');
+  } catch (e) { note.textContent = '⚠️ ' + e.message; }
+  finally { document.getElementById('sbUpdating').classList.remove('on'); }
+}
+document.getElementById('sbSearch').oninput = renderSbTable;
+async function sbSync() {
+  document.getElementById('sbUpdating').classList.add('on');
+  try { await api('/api/shipbob/sync', {method:'POST', body:'{}'}); loadFulfillment(); }
+  catch (e) { document.getElementById('sbNote').textContent = '⚠️ ' + e.message; document.getElementById('sbUpdating').classList.remove('on'); }
+}
+async function sbDebug() {
+  const out = document.getElementById('sbDebugOut');
+  out.style.display = 'block'; out.textContent = 'Calling ShipBob…';
+  try { const r = await api('/api/shipbob/debug'); out.textContent = JSON.stringify(r, null, 2); }
+  catch (e) { out.textContent = '⚠️ ' + e.message; }
+}
 
 // ---------- overview ----------
 let curDays = 7, curCustom = null, homeChart; // curCustom = {from, to} when a custom range is active

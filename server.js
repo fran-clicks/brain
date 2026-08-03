@@ -264,6 +264,9 @@ async function initDb() {
       id SERIAL PRIMARY KEY, po_number TEXT NOT NULL, destination TEXT DEFAULT '',
       notes TEXT DEFAULT '', created_by TEXT DEFAULT '', include_invoice BOOLEAN DEFAULT false,
       items JSONB DEFAULT '[]', created_at TIMESTAMPTZ DEFAULT now());
+    CREATE TABLE IF NOT EXISTS shipbob_inventory (
+      inventory_id BIGINT PRIMARY KEY, sku TEXT DEFAULT '', name TEXT DEFAULT '',
+      on_hand INT, fulfillable INT, committed INT, by_fc JSONB DEFAULT '[]', updated_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS orders_cache (
       shopify_id BIGINT PRIMARY KEY, order_number TEXT DEFAULT '',
       created_at TIMESTAMPTZ, cancelled_at TIMESTAMPTZ,
@@ -374,6 +377,13 @@ const CONNECTOR_TYPES = {
       { key: 'store_domain', label: 'Store subdomain, e.g. "clicks-tech" for clicks-tech.myshopify.com', secret: false },
       { key: 'client_id', label: 'App Client ID (dev.shopify.com → your app → Settings)', secret: false },
       { key: 'client_secret', label: 'App Client Secret (same page — rotate it first if it was ever shared in chat/email)', secret: true }
+    ]
+  },
+  shipbob: {
+    label: 'ShipBob (3PL fulfillment)',
+    fields: [
+      { key: 'token', label: 'Personal Access Token (ShipBob → Settings → API tokens)', secret: true },
+      { key: 'channel_id', label: 'Channel ID (optional — leave blank to auto-detect)', secret: false, optional: true }
     ]
   }
 };
@@ -495,6 +505,9 @@ app.post('/api/connectors', async (req, res) => {
     } else if (type === 'redo') {
       const t = await redoRequest(config, `/stores/${config.store_id}/returns`, { 'X-Page-Size': '1' });
       meta = { returns_visible: (t.data.returns || []).length >= 0 ? 'ok' : 'none' };
+    } else if (type === 'shipbob') {
+      const chans = await shipbobRequest(config, '/1.0/channel');
+      meta = { channels: Array.isArray(chans) ? chans.length : 'ok' };
     } else if (type === 'klaviyo') {
       const m = await klaviyoRequest(config, '/api/metrics/');
       meta = { metrics_visible: (m.data || []).length };
@@ -522,6 +535,7 @@ app.post('/api/connectors', async (req, res) => {
   if (type === 'uk_stock') syncUkStock().catch(e => console.error('initial stock sync:', e.message));
   if (type === 'klaviyo') syncKlaviyo().catch(e => console.error('initial klaviyo sync:', e.message));
   if (type === 'redo') syncRedo(20).catch(e => console.error('initial redo sync:', e.message));
+  if (type === 'shipbob') syncShipbob().catch(e => console.error('initial shipbob sync:', e.message));
   res.status(201).json(rows[0]);
 });
 
@@ -1667,6 +1681,94 @@ app.get('/api/stock/export', async (req, res) => {
   res.set('Content-Type', 'text/csv');
   res.set('Content-Disposition', `attachment; filename="uk-stock-${new Date().toISOString().slice(0,10)}.csv"`);
   res.send(csv);
+});
+
+// ---------- ShipBob (3PL fulfillment inventory) ----------
+async function shipbobRequest(cfg, path) {
+  const headers = { Authorization: `Bearer ${cfg.token}`, Accept: 'application/json' };
+  if (cfg.channel_id) headers['shipbob_channel_id'] = String(cfg.channel_id);
+  const r = await fetch(`https://api.shipbob.com${path}`, { headers });
+  const text = await r.text();
+  let body; try { body = JSON.parse(text); } catch { body = text; }
+  if (!r.ok) throw new Error(`ShipBob ${path} → ${r.status}: ${typeof body === 'string' ? body.slice(0, 200) : JSON.stringify(body).slice(0, 200)}`);
+  return body;
+}
+// pull all pages of a 1.0 list endpoint (array responses, ?Page&Limit)
+async function shipbobList(cfg, base, limit = 250, maxPages = 40) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const sep = base.includes('?') ? '&' : '?';
+    const rows = await shipbobRequest(cfg, `${base}${sep}Page=${page}&Limit=${limit}`);
+    const arr = Array.isArray(rows) ? rows : (rows.data || rows.items || []);
+    out.push(...arr);
+    if (arr.length < limit) break;
+  }
+  return out;
+}
+let shipbobSyncRunning = false;
+async function syncShipbob() {
+  if (shipbobSyncRunning) return { skipped: true };
+  const conn = await getConnector('shipbob');
+  if (!conn) return { configured: false };
+  const cfg = conn.config;
+  shipbobSyncRunning = true;
+  let upserts = 0, lastError = null;
+  try {
+    // map inventory_id → sku via products (products carry the SKU; inventory carries quantities)
+    const products = await shipbobList(cfg, '/1.0/product');
+    const skuByInv = {};
+    for (const p of products) {
+      const sku = p.sku || p.reference_id || '';
+      const invs = p.fulfillable_inventory_items || p.inventory_items || [];
+      for (const iv of invs) if (iv?.id != null) skuByInv[iv.id] = sku;
+    }
+    const inventory = await shipbobList(cfg, '/1.0/inventory');
+    for (const it of inventory) {
+      const onHand = it.total_onhand_quantity ?? it.total_on_hand_quantity ?? null;
+      const fulfillable = it.total_fulfillable_quantity ?? null;
+      const committed = it.total_committed_quantity ?? null;
+      const byFc = it.fulfillable_quantity_by_fulfillment_center || [];
+      await pool.query(
+        `INSERT INTO shipbob_inventory (inventory_id, sku, name, on_hand, fulfillable, committed, by_fc, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+         ON CONFLICT (inventory_id) DO UPDATE SET sku=$2, name=$3, on_hand=$4, fulfillable=$5, committed=$6, by_fc=$7, updated_at=now()`,
+        [it.id, skuByInv[it.id] || it.sku || '', (it.name || '').slice(0, 300), onHand, fulfillable, committed, JSON.stringify(byFc)]);
+      upserts++;
+    }
+  } catch (e) { lastError = String(e.message); console.error('shipbob sync:', lastError); }
+  finally {
+    await pool.query(`INSERT INTO sync_state (k, v) VALUES ('shipbob', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
+      [JSON.stringify({ last_run: new Date().toISOString(), upserts, last_error: lastError })]).catch(() => {});
+    shipbobSyncRunning = false;
+  }
+  return { upserts, error: lastError };
+}
+// raw API peek so we can see the real response shape before trusting the parser (admin only)
+app.get('/api/shipbob/debug', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('shipbob');
+  if (!conn) return res.status(400).json({ error: 'ShipBob not connected — add it on the ＋ page first.' });
+  const out = {};
+  for (const [k, path] of [['channels', '/1.0/channel'], ['inventory_sample', '/1.0/inventory?Page=1&Limit=2'], ['product_sample', '/1.0/product?Page=1&Limit=2']]) {
+    try { out[k] = await shipbobRequest(conn.config, path); }
+    catch (e) { out[k] = { error: e.message }; }
+  }
+  res.json(out);
+});
+app.get('/api/shipbob/summary', async (_req, res) => {
+  const conn = await getConnector('shipbob');
+  const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='shipbob'`)).rows[0]?.v || null;
+  const items = (await pool.query(
+    `SELECT inventory_id, sku, name, on_hand, fulfillable, committed, by_fc FROM shipbob_inventory ORDER BY sku, name`)).rows;
+  const totals = (await pool.query(
+    `SELECT count(*)::int items, coalesce(sum(on_hand),0)::int on_hand, coalesce(sum(fulfillable),0)::int fulfillable,
+            coalesce(sum(committed),0)::int committed FROM shipbob_inventory`)).rows[0];
+  res.json({ configured: !!conn, items, totals, sync: ss });
+});
+app.post('/api/shipbob/sync', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  try { res.json(await syncShipbob()); }
+  catch (e) { res.status(502).json({ error: e.message }); }
 });
 
 // ---------- Shopify (orders sync, same pattern as Gorgias) ----------
