@@ -152,6 +152,16 @@ footer{color:rgba(16,17,20,.45)}
 .updating-pill.on{display:inline-flex}
 .updating-pill .spin{width:16px;height:16px;border-width:3px}
 .src-badge{display:inline-block;color:#fff;font-size:11px;font-weight:700;padding:2px 9px;border-radius:6px;margin-right:8px;vertical-align:middle;letter-spacing:.02em}
+.stepper{display:flex;align-items:flex-start;margin:12px 0 6px;overflow-x:auto;padding-bottom:4px}
+.fstep{position:relative;flex:1 0 96px;text-align:center;font-size:11px;color:var(--muted);line-height:1.3}
+.fstep .dot{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 6px;font-weight:700;font-size:12px;border:2px solid #d1d5db;background:#fff;color:#9ca3af;position:relative;z-index:1}
+.fstep::before,.fstep::after{content:"";position:absolute;top:12px;height:3px;background:#d1d5db}
+.fstep::before{left:0;width:50%}.fstep::after{right:0;width:50%}
+.fstep:first-child::before{display:none}.fstep:last-child::after{display:none}
+.fstep.done .dot{background:#2563eb;border-color:#2563eb;color:#fff}
+.fstep.cur .dot{border-color:#2563eb;color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.18)}
+.fstep.fillL::before{background:#2563eb}.fstep.fillR::after{background:#2563eb}
+.fstep.clk{cursor:pointer}.fstep.clk:hover .dot{border-color:#2563eb;color:#2563eb}
 .synchead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 .synchead .note{margin:0}
 .synchead .right{display:flex;align-items:center;gap:12px}
@@ -639,18 +649,13 @@ footer{color:rgba(16,17,20,.45)}
 <!-- FREIGHT TRACKER (manual bulk shipments factory → warehouse) -->
 <div class="section" id="s-freight">
   <div class="synchead">
-    <div style="color:var(--muted);font-size:12px">Manual tracker for bulk shipments moving from factories to warehouses — status, ETA and notes for the whole team.</div>
+    <div style="color:var(--muted);font-size:12px">Track bulk shipments factory → warehouse. <span class="updating-pill" id="frUpdating"><div class="spin"></div>Updating…</span></div>
     <button class="btn" id="frAddBtn" onclick="openFreight()" style="display:none;margin:0;padding:6px 14px">＋ Add shipment</button>
   </div>
   <div class="grid kpis" id="frKpis"></div>
-  <div class="card" style="margin-top:14px">
-    <h2>🚢 Shipments
-      <span class="updating-pill" id="frUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
-    </h2>
-    <input class="search" id="frSearch" placeholder="Search reference, product, warehouse…">
-    <table id="frTable"><thead><tr><th>Reference</th><th>Product</th><th style="text-align:center">Units</th><th>From → To</th><th>Carrier</th><th>Status</th><th>ETA</th><th>Notes</th><th></th></tr></thead><tbody></tbody></table>
-    <div class="note" id="frNote" style="margin-top:8px">Loading…</div>
-  </div>
+  <input class="search" id="frSearch" placeholder="Search name, country, SKU…" style="margin-top:14px">
+  <div id="frList"></div>
+  <div class="note" id="frNote" style="margin-top:8px">Loading…</div>
 </div>
 
 <!-- inventory sheet import modal (admins) -->
@@ -673,24 +678,43 @@ footer{color:rgba(16,17,20,.45)}
 
 <!-- freight add/edit modal (admins) -->
 <div id="freightModal" style="display:none;position:fixed;inset:0;z-index:70;background:rgba(16,17,20,.45);align-items:center;justify-content:center" onclick="if(event.target===this)closeFreight()">
-  <div class="card" style="width:min(520px,94vw);margin:0;max-height:92vh;overflow:auto">
+  <div class="card" style="width:min(620px,94vw);margin:0;max-height:92vh;overflow:auto">
     <h2 id="freightModalTitle">Add shipment</h2>
     <input type="hidden" id="frId">
+    <label>Name / reference</label><input id="frName" placeholder="e.g. PO-2026-014 — Power Keyboard">
     <div class="grid two">
-      <div><label>Reference / PO</label><input id="frRef" placeholder="e.g. PO-2026-014"></div>
-      <div><label>Units</label><input type="number" id="frUnits" min="0" placeholder="e.g. 5000"></div>
-    </div>
-    <label>Product / contents</label><input id="frDesc" placeholder="e.g. Power Keyboard — Onyx">
-    <div class="grid two">
-      <div><label>From (factory / origin)</label><input id="frOrigin" placeholder="e.g. Shenzhen, CN"></div>
-      <div><label>To (warehouse)</label><input id="frDest" placeholder="e.g. Floship HK — Yuen Long 3"></div>
+      <div><label>From country</label><input id="frFrom" placeholder="e.g. China"></div>
+      <div><label>To country</label><input id="frTo" placeholder="e.g. United Kingdom"></div>
     </div>
     <div class="grid two">
       <div><label>Carrier / forwarder</label><input id="frCarrier" placeholder="e.g. DHL, sea freight"></div>
       <div><label>ETA</label><input type="date" lang="en-GB" id="frEta"></div>
     </div>
-    <label>Status</label><select id="frStatus"></select>
-    <label>Notes</label><textarea id="frNotes" rows="2" placeholder="Anything the team should know"></textarea>
+
+    <label style="margin-top:14px">Contents (SKU + quantity)</label>
+    <div id="frItems"></div>
+    <button class="btn" type="button" onclick="frAddItem()" style="margin:6px 0 0;padding:5px 12px;font-size:12px;background:#fff;border:1px solid var(--line);box-shadow:none">＋ Add SKU</button>
+
+    <label style="margin-top:14px">Progress stages</label>
+    <div class="note" style="margin:-2px 0 6px">Tick the stages this shipment will go through. Click a stage on the card afterwards to mark it as the current step.</div>
+    <div id="frStages"></div>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <input id="frCustomStage" placeholder="Add a custom stage…" style="flex:1;margin:0">
+      <button class="btn" type="button" onclick="frAddStage()" style="margin:0;padding:8px 12px;background:#fff;border:1px solid var(--line);box-shadow:none">Add</button>
+    </div>
+
+    <label style="margin-top:14px">Documents</label>
+    <div id="frDocs" class="note" style="margin:-2px 0 6px"></div>
+    <div class="grid two" style="gap:8px">
+      <div><label style="font-weight:600;color:var(--ink)">Packing list</label><input type="file" id="frDocPacking"></div>
+      <div><label style="font-weight:600;color:var(--ink)">Invoice</label><input type="file" id="frDocInvoice"></div>
+    </div>
+    <div class="grid two" style="gap:8px">
+      <div><label style="font-weight:600;color:var(--ink)">Entry document</label><input type="file" id="frDocEntry"></div>
+      <div><label style="font-weight:600;color:var(--ink)">Other</label><input type="file" id="frDocOther"></div>
+    </div>
+
+    <label style="margin-top:14px">Notes</label><textarea id="frNotes" rows="2" placeholder="Anything the team should know"></textarea>
     <div class="err" id="frErr"></div>
     <div style="display:flex;gap:8px;margin-top:12px">
       <button class="btn" onclick="saveFreight()">Save</button>
@@ -1081,69 +1105,172 @@ async function flSync() {
   catch (e) { document.getElementById('flNote').textContent = '⚠️ ' + e.message; document.getElementById('flUpdating').classList.remove('on'); }
 }
 // ---------- freight tracker ----------
-let frShipments = [], frStatuses = [];
-const FR_COLORS = { 'Packed at factory':'#6b7280','Booked':'#0891b2','In transit':'#2563eb','At port':'#7c3aed','Customs clearance':'#b45309','Delivered to warehouse':'#059669','Cleared':'#16a34a' };
-function renderFrTable() {
+let frShipments = [], frDefaultStages = [], frStageDraft = [];
+function frFlag(country) {
+  const s = (country || '').trim().toUpperCase();
+  const map = { 'CHINA':'🇨🇳','CN':'🇨🇳','UK':'🇬🇧','UNITED KINGDOM':'🇬🇧','GB':'🇬🇧','USA':'🇺🇸','US':'🇺🇸','UNITED STATES':'🇺🇸',
+    'HONG KONG':'🇭🇰','HK':'🇭🇰','GERMANY':'🇩🇪','DE':'🇩🇪','NETHERLANDS':'🇳🇱','NL':'🇳🇱','FRANCE':'🇫🇷','CANADA':'🇨🇦','AUSTRALIA':'🇦🇺','VIETNAM':'🇻🇳','JAPAN':'🇯🇵' };
+  return map[s] || '';
+}
+function stepperHtml(s, clickable) {
+  const stages = Array.isArray(s.stages) ? s.stages : [];
+  if (!stages.length) return '<div class="note" style="margin:8px 0">No stages set for this shipment.</div>';
+  return `<div class="stepper">` + stages.map((st, i) => {
+    const n = i + 1, done = n < s.step, cur = n === s.step;
+    const cls = ['fstep', done ? 'done' : '', cur ? 'cur' : '', n <= s.step && i > 0 ? 'fillL' : '', n < s.step ? 'fillR' : '', clickable ? 'clk' : ''].filter(Boolean).join(' ');
+    const label = (done || cur) ? `step ${n}` : '';
+    const inner = done ? '✓' : n;
+    const onclick = clickable ? ` onclick="setStep(${s.id}, ${cur ? 0 : n})"` : '';
+    return `<div class="${cls}"${onclick} title="${esc(st)}"><div class="dot">${inner}</div>${esc(st)}${label ? `<div style="color:#2563eb;font-weight:700;margin-top:2px">${label}</div>` : ''}</div>`;
+  }).join('') + `</div>`;
+}
+function renderFreight() {
   const q = (document.getElementById('frSearch').value || '').toLowerCase();
-  const rows = frShipments.filter(s => ((s.reference || '') + ' ' + (s.description || '') + ' ' + (s.destination || '') + ' ' + (s.origin || '')).toLowerCase().includes(q));
   const admin = window.isAdmin;
-  document.querySelector('#frTable tbody').innerHTML = rows.length ? rows.map(s => {
-    const c = FR_COLORS[s.status] || '#6b7280';
-    const badge = `<span style="display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:6px;background:${c}1a;color:${c};border:1px solid ${c}55">${esc(s.status)}</span>`;
+  const rows = frShipments.filter(s => {
+    const hay = [s.name, s.from_country, s.to_country, s.carrier, ...(s.items || []).map(i => i.sku)].join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+  document.getElementById('frList').innerHTML = rows.length ? rows.map(s => {
     const eta = s.eta ? new Date(s.eta + 'T00:00:00').toLocaleDateString(undefined, { day:'numeric', month:'short', year:'numeric' }) : '—';
-    const late = s.eta && s.status !== 'Cleared' && new Date(s.eta + 'T00:00:00') < new Date() ? ' ⚠️' : '';
-    const actions = admin ? `<div style="display:flex;gap:4px;justify-content:flex-end">
-      <button class="btn" style="margin:0;padding:2px 9px;font-size:13px" onclick="editFreight(${s.id})">✎</button>
-      <button class="btn" style="margin:0;padding:2px 9px;font-size:13px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="deleteFreight(${s.id})">✕</button></div>` : '';
-    return `<tr><td><b>${esc(s.reference || '—')}</b></td><td>${esc(s.description || '')}</td>
-      <td style="text-align:center">${s.units != null ? s.units.toLocaleString() : '—'}</td>
-      <td style="font-size:12px">${esc(s.origin || '?')} → ${esc(s.destination || '?')}</td>
-      <td>${esc(s.carrier || '—')}</td><td>${badge}</td><td>${eta}${late}</td>
-      <td style="font-size:12px;color:var(--muted)">${esc(s.notes || '')}</td><td>${actions}</td></tr>`;
-  }).join('') : `<tr><td colspan="9" class="empty">${admin ? 'No shipments yet — click ＋ Add shipment.' : 'No shipments tracked yet.'}</td></tr>`;
+    const done = s.step >= (s.stages || []).length && (s.stages || []).length > 0;
+    const late = s.eta && !done && new Date(s.eta + 'T00:00:00') < new Date();
+    const route = `${frFlag(s.from_country)} ${esc(s.from_country || '?')} → ${frFlag(s.to_country)} ${esc(s.to_country || '?')}`;
+    const items = (s.items || []).length
+      ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">` + s.items.map(i =>
+          `<span style="font-size:12px;background:#f3f4f6;border:1px solid var(--line);border-radius:6px;padding:2px 8px"><b>${esc(i.sku)}</b> ×${(i.qty||0).toLocaleString()}</span>`).join('') + `</div>`
+      : '';
+    const docs = (s.docs || []).length
+      ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">` + s.docs.map(d =>
+          `<a href="/api/freight/doc/${d.id}" target="_blank" style="font-size:12px;text-decoration:none;background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;border-radius:6px;padding:2px 8px">📎 ${esc(d.label)}</a>`).join('') + `</div>`
+      : '';
+    const actions = admin ? `<div style="display:flex;gap:4px">
+      <button class="btn" style="margin:0;padding:3px 10px;font-size:13px" onclick="editFreight(${s.id})">✎ Edit</button>
+      <button class="btn" style="margin:0;padding:3px 10px;font-size:13px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="deleteFreight(${s.id})">✕</button></div>` : '';
+    return `<div class="card" style="margin-top:14px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+        <div>
+          <div style="font-weight:800;font-size:15px">${esc(s.name || 'Untitled shipment')}</div>
+          <div style="font-size:13px;color:var(--muted);margin-top:2px">${route}${s.carrier ? ' · ' + esc(s.carrier) : ''}</div>
+          <div style="font-size:12px;color:${late ? 'var(--red)' : 'var(--muted)'};margin-top:2px">ETA ${eta}${late ? ' ⚠️ overdue' : ''}${done ? ' · ✅ delivered' : ''}</div>
+        </div>
+        ${actions}
+      </div>
+      ${stepperHtml(s, admin)}
+      ${items}${docs}
+      ${s.notes ? `<div class="note" style="margin-top:8px">${esc(s.notes)}</div>` : ''}
+    </div>`;
+  }).join('') : `<div class="card" style="margin-top:14px"><div class="empty">${admin ? 'No shipments yet — click ＋ Add shipment.' : 'No shipments tracked yet.'}</div></div>`;
 }
 async function loadFreight() {
   document.getElementById('frAddBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
   document.getElementById('frUpdating').classList.add('on');
   try {
     const r = await api('/api/freight');
-    frStatuses = r.statuses || []; frShipments = r.shipments || [];
-    const active = frShipments.filter(s => s.status !== 'Cleared');
-    const units = active.reduce((n, s) => n + (s.units || 0), 0);
+    frDefaultStages = r.default_stages || []; frShipments = r.shipments || [];
+    const active = frShipments.filter(s => !((s.stages || []).length && s.step >= s.stages.length));
+    const units = frShipments.reduce((n, s) => n + (s.items || []).reduce((m, i) => m + (i.qty || 0), 0), 0);
     const soon = active.filter(s => s.eta && (new Date(s.eta + 'T00:00:00') - new Date()) / 864e5 <= 14).length;
     document.getElementById('frKpis').innerHTML = [
       {l:'Active shipments', v: active.length},
       {l:'Units in transit', v: units.toLocaleString()},
       {l:'Arriving ≤14 days', v: soon},
-      {l:'Cleared', v: frShipments.filter(s => s.status === 'Cleared').length}
+      {l:'Delivered', v: frShipments.length - active.length}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
-    renderFrTable();
+    renderFreight();
     document.getElementById('frNote').textContent = `${frShipments.length} shipment${frShipments.length === 1 ? '' : 's'}`;
   } catch (e) { document.getElementById('frNote').textContent = '⚠️ ' + e.message; }
   finally { document.getElementById('frUpdating').classList.remove('on'); }
 }
-document.getElementById('frSearch').oninput = renderFrTable;
+document.getElementById('frSearch').oninput = renderFreight;
+
+async function setStep(id, n) {
+  if (!window.isAdmin) return;
+  try { await api('/api/freight/step', {method:'POST', body: JSON.stringify({ id, step: n })}); loadFreight(); }
+  catch (e) { document.getElementById('frNote').textContent = '⚠️ ' + e.message; }
+}
+
+// ---- builder modal ----
+function frItemRow(sku, qty) {
+  const div = document.createElement('div');
+  div.className = 'frItemRow';
+  div.style.cssText = 'display:flex;gap:8px;margin-bottom:6px';
+  div.innerHTML = `<input class="frItemSku" placeholder="SKU" value="${esc(sku||'')}" style="flex:2;margin:0">
+    <input class="frItemQty" type="number" min="0" placeholder="Qty" value="${qty!=null?qty:''}" style="flex:1;margin:0">
+    <button class="btn" type="button" onclick="this.parentElement.remove()" style="margin:0;padding:0 12px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none">✕</button>`;
+  return div;
+}
+function frAddItem(sku, qty) { document.getElementById('frItems').appendChild(frItemRow(sku, qty)); }
+function frRenderStages() {
+  document.getElementById('frStages').innerHTML = frStageDraft.map((st, i) =>
+    `<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink);font-weight:500;margin:4px 0">
+      <input type="checkbox" checked onchange="frToggleStage(${i})" style="width:auto;margin:0"> ${esc(st)}
+    </label>`).join('') || '<div class="note">No stages selected. Tick defaults below or add a custom one.</div>';
+  // available defaults not yet added
+  const avail = frDefaultStages.filter(d => !frStageDraft.includes(d));
+  if (avail.length) document.getElementById('frStages').innerHTML +=
+    `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">` + avail.map(d =>
+      `<button class="btn" type="button" onclick="frAddDefault('${esc(d).replace(/'/g,"\\'")}')" style="margin:0;padding:3px 10px;font-size:12px;background:#fff;border:1px dashed var(--line);box-shadow:none;color:var(--muted)">＋ ${esc(d)}</button>`).join('') + `</div>`;
+}
+function frToggleStage(i) { frStageDraft.splice(i, 1); frRenderStages(); }
+function frAddDefault(st) { if (!frStageDraft.includes(st)) frStageDraft.push(st); frRenderStages(); }
+function frAddStage() {
+  const el = document.getElementById('frCustomStage');
+  const v = el.value.trim(); if (!v) return;
+  if (!frStageDraft.includes(v)) frStageDraft.push(v);
+  el.value = ''; frRenderStages();
+}
 function openFreight(sh) {
   const el = id => document.getElementById(id);
-  el('frStatus').innerHTML = frStatuses.map(s => `<option>${esc(s)}</option>`).join('');
   el('freightModalTitle').textContent = sh ? 'Edit shipment' : 'Add shipment';
   el('frId').value = sh ? sh.id : '';
-  el('frRef').value = sh?.reference || ''; el('frUnits').value = sh?.units ?? ''; el('frDesc').value = sh?.description || '';
-  el('frOrigin').value = sh?.origin || ''; el('frDest').value = sh?.destination || ''; el('frCarrier').value = sh?.carrier || '';
-  el('frEta').value = sh?.eta || ''; el('frStatus').value = sh?.status || frStatuses[0] || ''; el('frNotes').value = sh?.notes || '';
+  el('frName').value = sh?.name || ''; el('frFrom').value = sh?.from_country || ''; el('frTo').value = sh?.to_country || '';
+  el('frCarrier').value = sh?.carrier || ''; el('frEta').value = sh?.eta || ''; el('frNotes').value = sh?.notes || '';
+  el('frItems').innerHTML = '';
+  const items = (sh?.items || []);
+  if (items.length) items.forEach(i => frAddItem(i.sku, i.qty)); else frAddItem();
+  frStageDraft = (sh?.stages && sh.stages.length) ? [...sh.stages] : [...frDefaultStages];
+  frRenderStages();
+  ['frDocPacking','frDocInvoice','frDocEntry','frDocOther'].forEach(id => el(id).value = '');
+  el('frDocs').innerHTML = sh && (sh.docs || []).length
+    ? 'Existing: ' + sh.docs.map(d => `<a href="/api/freight/doc/${d.id}" target="_blank">${esc(d.label)}</a>`).join(', ')
+    : 'No documents uploaded yet.';
   el('frErr').textContent = '';
   el('freightModal').style.display = 'flex';
 }
 function editFreight(id) { const s = frShipments.find(x => x.id === id); if (s) openFreight(s); }
 function closeFreight() { document.getElementById('freightModal').style.display = 'none'; }
+function readFileB64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.onerror = reject; r.readAsDataURL(file);
+  });
+}
 async function saveFreight() {
   const el = id => document.getElementById(id);
   el('frErr').textContent = '';
   try {
-    await api('/api/freight', {method:'POST', body: JSON.stringify({
-      id: el('frId').value || undefined, reference: el('frRef').value.trim(), description: el('frDesc').value.trim(),
-      units: el('frUnits').value, origin: el('frOrigin').value.trim(), destination: el('frDest').value.trim(),
-      carrier: el('frCarrier').value.trim(), status: el('frStatus').value, eta: el('frEta').value, notes: el('frNotes').value.trim() })});
+    const items = [...document.querySelectorAll('#frItems .frItemRow')].map(row => ({
+      sku: row.querySelector('.frItemSku').value.trim(),
+      qty: parseInt(row.querySelector('.frItemQty').value) || 0
+    })).filter(i => i.sku);
+    const cur = el('frId').value ? frShipments.find(x => x.id == el('frId').value) : null;
+    const prevStep = cur ? Math.min(cur.step, frStageDraft.length) : 0;
+    const r = await api('/api/freight', {method:'POST', body: JSON.stringify({
+      id: el('frId').value || undefined, name: el('frName').value.trim(),
+      from_country: el('frFrom').value.trim(), to_country: el('frTo').value.trim(),
+      carrier: el('frCarrier').value.trim(), eta: el('frEta').value, notes: el('frNotes').value.trim(),
+      items, stages: frStageDraft, step: prevStep })});
+    const sid = r.id;
+    const uploads = [['Packing list','frDocPacking'],['Invoice','frDocInvoice'],['Entry document','frDocEntry'],['Other','frDocOther']];
+    for (const [label, inputId] of uploads) {
+      const f = el(inputId).files[0];
+      if (f) {
+        const data = await readFileB64(f);
+        await api('/api/freight/doc', {method:'POST', body: JSON.stringify({ shipment_id: sid, label, filename: f.name, mime: f.type, data })});
+      }
+    }
     closeFreight(); loadFreight();
   } catch (e) { el('frErr').textContent = e.message; }
 }

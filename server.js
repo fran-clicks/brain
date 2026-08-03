@@ -281,6 +281,15 @@ async function initDb() {
       units INT, origin TEXT DEFAULT '', destination TEXT DEFAULT '', carrier TEXT DEFAULT '',
       status TEXT DEFAULT 'Packed at factory', eta DATE, notes TEXT DEFAULT '',
       created_by TEXT DEFAULT '', created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
+    ALTER TABLE freight_shipments ADD COLUMN IF NOT EXISTS name TEXT DEFAULT '';
+    ALTER TABLE freight_shipments ADD COLUMN IF NOT EXISTS from_country TEXT DEFAULT '';
+    ALTER TABLE freight_shipments ADD COLUMN IF NOT EXISTS to_country TEXT DEFAULT '';
+    ALTER TABLE freight_shipments ADD COLUMN IF NOT EXISTS items JSONB DEFAULT '[]';
+    ALTER TABLE freight_shipments ADD COLUMN IF NOT EXISTS stages JSONB DEFAULT '[]';
+    ALTER TABLE freight_shipments ADD COLUMN IF NOT EXISTS step INT DEFAULT 0;
+    CREATE TABLE IF NOT EXISTS freight_docs (
+      id SERIAL PRIMARY KEY, shipment_id INT, label TEXT DEFAULT '', filename TEXT DEFAULT '',
+      mime TEXT DEFAULT '', data TEXT, uploaded_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS orders_cache (
       shopify_id BIGINT PRIMARY KEY, order_number TEXT DEFAULT '',
       created_at TIMESTAMPTZ, cancelled_at TIMESTAMPTZ,
@@ -1944,40 +1953,79 @@ app.post('/api/floship/sync', async (req, res) => {
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 
-// ---------- Freight tracker (manual bulk shipments factory → warehouse) ----------
-const FREIGHT_STATUSES = ['Packed at factory', 'Booked', 'In transit', 'At port', 'Customs clearance', 'Delivered to warehouse', 'Cleared'];
+// ---------- Freight tracker (shipment builder: fields, items, documents, configurable stage stepper) ----------
+const FREIGHT_STAGES = ['Shipment booked', 'Picked up / dropped off', 'En route to destination country',
+  'Arrived at destination country', 'Customs clearance', 'En route to final warehouse', 'Arrived at warehouse'];
 app.get('/api/freight', async (_req, res) => {
   const rows = (await pool.query(
-    `SELECT id, reference, description, units, origin, destination, carrier, status,
-       to_char(eta,'YYYY-MM-DD') eta, notes, created_by, updated_at
-     FROM freight_shipments ORDER BY (status='Cleared'), eta ASC NULLS LAST, id DESC`)).rows;
-  res.json({ statuses: FREIGHT_STATUSES, shipments: rows });
+    `SELECT id, name, reference, from_country, to_country, carrier, to_char(eta,'YYYY-MM-DD') eta,
+       notes, items, stages, step, created_by, updated_at
+     FROM freight_shipments ORDER BY eta ASC NULLS LAST, id DESC`)).rows;
+  const docs = (await pool.query(`SELECT id, shipment_id, label, filename, mime FROM freight_docs ORDER BY id`)).rows;
+  const byShip = {}; docs.forEach(d => (byShip[d.shipment_id] = byShip[d.shipment_id] || []).push(d));
+  rows.forEach(r => { r.docs = byShip[r.id] || []; });
+  res.json({ default_stages: FREIGHT_STAGES, shipments: rows });
 });
 app.post('/api/freight', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const b = req.body || {};
-  const status = FREIGHT_STATUSES.includes(b.status) ? b.status : 'Packed at factory';
-  const units = Number.isFinite(parseInt(b.units)) ? parseInt(b.units) : null;
   const eta = b.eta ? String(b.eta).slice(0, 10) : null;
-  const fields = [String(b.reference || '').slice(0, 120), String(b.description || '').slice(0, 300), units,
-    String(b.origin || '').slice(0, 160), String(b.destination || '').slice(0, 160), String(b.carrier || '').slice(0, 120),
-    status, eta, String(b.notes || '').slice(0, 800)];
+  const items = Array.isArray(b.items) ? b.items.map(i => ({ sku: String(i.sku || '').slice(0, 60), qty: parseInt(i.qty) || 0 })).filter(i => i.sku) : [];
+  const stages = Array.isArray(b.stages) ? b.stages.map(s => String(s).slice(0, 80)).filter(Boolean) : [];
+  const step = Math.max(0, Math.min(parseInt(b.step) || 0, stages.length));
+  const f = [String(b.name || '').slice(0, 160), String(b.from_country || '').slice(0, 80), String(b.to_country || '').slice(0, 80),
+    String(b.carrier || '').slice(0, 120), eta, String(b.notes || '').slice(0, 1000),
+    JSON.stringify(items), JSON.stringify(stages), step];
   if (b.id) {
     const r = await pool.query(
-      `UPDATE freight_shipments SET reference=$1, description=$2, units=$3, origin=$4, destination=$5, carrier=$6,
-         status=$7, eta=$8, notes=$9, updated_at=now() WHERE id=$10 RETURNING id`, [...fields, parseInt(b.id)]);
+      `UPDATE freight_shipments SET name=$1, from_country=$2, to_country=$3, carrier=$4, eta=$5, notes=$6,
+         items=$7, stages=$8, step=$9, updated_at=now() WHERE id=$10 RETURNING id`, [...f, parseInt(b.id)]);
     if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
     return res.json({ ok: true, id: r.rows[0].id });
   }
   const r = await pool.query(
-    `INSERT INTO freight_shipments (reference, description, units, origin, destination, carrier, status, eta, notes, created_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [...fields, readSession(req) || '']);
+    `INSERT INTO freight_shipments (name, from_country, to_country, carrier, eta, notes, items, stages, step, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [...f, readSession(req) || '']);
   res.json({ ok: true, id: r.rows[0].id });
+});
+// quick stage advance (click a step on the progress bar)
+app.post('/api/freight/step', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const r = await pool.query(`UPDATE freight_shipments SET step=$2, updated_at=now() WHERE id=$1 RETURNING id`,
+    [parseInt(req.body?.id), Math.max(0, parseInt(req.body?.step) || 0)]);
+  if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
+  res.json({ ok: true });
 });
 app.post('/api/freight/delete', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
-  const r = await pool.query('DELETE FROM freight_shipments WHERE id=$1', [parseInt(req.body?.id)]);
+  const id = parseInt(req.body?.id);
+  await pool.query('DELETE FROM freight_docs WHERE shipment_id=$1', [id]);
+  const r = await pool.query('DELETE FROM freight_shipments WHERE id=$1', [id]);
   if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
+  res.json({ ok: true });
+});
+// documents: upload (base64), download, delete
+app.post('/api/freight/doc', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const b = req.body || {};
+  const sid = parseInt(b.shipment_id);
+  if (!sid || !b.data) return res.status(400).json({ error: 'shipment_id and file required' });
+  const r = await pool.query(
+    `INSERT INTO freight_docs (shipment_id, label, filename, mime, data) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+    [sid, String(b.label || 'Document').slice(0, 80), String(b.filename || 'file').slice(0, 200), String(b.mime || 'application/octet-stream').slice(0, 100), String(b.data || '')]);
+  res.json({ ok: true, id: r.rows[0].id });
+});
+app.get('/api/freight/doc/:id', async (req, res) => {
+  if (!readSession(req)) return res.status(403).send('sign in');
+  const d = (await pool.query('SELECT filename, mime, data FROM freight_docs WHERE id=$1', [parseInt(req.params.id)])).rows[0];
+  if (!d) return res.status(404).send('not found');
+  res.set('Content-Type', d.mime || 'application/octet-stream');
+  res.set('Content-Disposition', `inline; filename="${(d.filename || 'file').replace(/"/g, '')}"`);
+  res.send(Buffer.from(d.data || '', 'base64'));
+});
+app.post('/api/freight/doc/delete', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  await pool.query('DELETE FROM freight_docs WHERE id=$1', [parseInt(req.body?.id)]);
   res.json({ ok: true });
 });
 
