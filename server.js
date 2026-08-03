@@ -1934,6 +1934,24 @@ app.post('/api/floship/sync', async (req, res) => {
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 
+// combined inventory grid: one row per SKU, available-to-fulfill from every source + per-location breakdown
+app.get('/api/fulfillment/grid', async (_req, res) => {
+  const rows = (await pool.query(`
+    SELECT coalesce(sb.sku, fl.sku) sku,
+      coalesce(nullif(sb.name,''), fl.description) name,
+      coalesce(sb.fulfillable,0) sb_avail, sb.on_hand sb_onhand, sb.committed sb_committed, sb.by_fc,
+      coalesce(fl.qty,0) fl_avail, fl.on_hand fl_onhand, fl.by_wh
+    FROM shipbob_stock sb FULL OUTER JOIN floship_stock fl ON fl.sku = sb.sku
+    ORDER BY (coalesce(sb.fulfillable,0)+coalesce(fl.qty,0)) DESC, coalesce(sb.sku, fl.sku)`)).rows;
+  const totals = rows.reduce((a, r) => { a.shipbob += r.sb_avail || 0; a.floship += r.fl_avail || 0; a.skus++; return a; },
+    { skus: 0, shipbob: 0, floship: 0 });
+  totals.total = totals.shipbob + totals.floship;
+  res.json({
+    sources: { shipbob: !!(await getConnector('shipbob')), floship: !!(await getConnector('floship')) },
+    totals, rows
+  });
+});
+
 // ---------- Shopify (orders sync, same pattern as Gorgias) ----------
 const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2026-01';
 

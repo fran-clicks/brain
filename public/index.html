@@ -573,7 +573,21 @@ footer{color:rgba(16,17,20,.45)}
 <div class="section" id="s-fulfillment">
   <div class="card" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
     <b>🚚 Fulfillment across providers</b>
-    <span style="color:var(--muted);font-size:12px">Each 3PL is its own source — the coloured badge tells them apart. Next step is merging these into one per-SKU grid (like the planner's Inventory Count).</span>
+    <span style="color:var(--muted);font-size:12px">"Available" = units you can ship now (on hand − committed). Each source is colour-coded: <span class="src-badge" style="background:#059669">ShipBob</span><span class="src-badge" style="background:#2563eb">Floship</span></span>
+  </div>
+
+  <!-- Combined grid -->
+  <div class="grid kpis" id="fgKpis" style="margin-top:14px"></div>
+  <div class="card" style="margin-top:14px">
+    <h2>📊 Combined inventory <span style="font-weight:400;color:var(--muted);font-size:12px">· available per SKU across all sources</span>
+      <span class="updating-pill" id="fgUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
+    </h2>
+    <input class="search" id="fgSearch" placeholder="Search SKU or description…">
+    <table id="fgTable"><thead><tr><th>SKU</th><th>Description</th>
+      <th style="text-align:center"><span class="src-badge" style="background:#059669">ShipBob</span></th>
+      <th style="text-align:center"><span class="src-badge" style="background:#2563eb">Floship</span></th>
+      <th style="text-align:center">Total</th><th>By location</th></tr></thead><tbody></tbody></table>
+    <div class="note" id="fgNote" style="margin-top:8px"></div>
   </div>
 
   <!-- ShipBob -->
@@ -829,7 +843,45 @@ function renderSbTable() {
       <td style="font-size:12px;color:var(--muted)">${esc(fc) || '—'}</td></tr>`;
   }).join('') : '<tr><td colspan="6" class="empty">No matches</td></tr>';
 }
+// ---- combined grid ----
+let fgRows = [];
+function renderFgTable() {
+  const q = (document.getElementById('fgSearch').value || '').toLowerCase();
+  const rows = fgRows.filter(r => ((r.sku || '') + ' ' + (r.name || '')).toLowerCase().includes(q));
+  const cell = (v, bg) => (v ? `<span style="background:${bg};color:#fff;font-weight:600;padding:1px 8px;border-radius:6px">${Number(v).toLocaleString()}</span>` : '<span style="color:var(--muted)">0</span>');
+  document.querySelector('#fgTable tbody').innerHTML = rows.length ? rows.map(r => {
+    const total = (r.sb_avail || 0) + (r.fl_avail || 0);
+    const locs = [
+      ...(r.by_fc || []).filter(f => (f.fulfillable_quantity ?? 0) > 0).map(f => ({ c: '#059669', n: f.name, q: f.fulfillable_quantity })),
+      ...(r.by_wh || []).filter(w => (w.qty ?? 0) > 0).map(w => ({ c: '#2563eb', n: (w.warehouse_name || '').replace('Floship ', ''), q: w.qty }))
+    ];
+    const chips = locs.map(l => `<span style="display:inline-block;font-size:11px;padding:1px 7px;border-radius:6px;margin:1px 3px 1px 0;background:${l.c}1a;color:${l.c};border:1px solid ${l.c}55">${esc(l.n)}: ${l.q.toLocaleString()}</span>`).join('') || '—';
+    return `<tr><td>${r.sku ? `<span class="tag src">${esc(r.sku)}</span>` : '—'}</td><td>${esc(r.name || '')}</td>
+      <td style="text-align:center">${cell(r.sb_avail, '#059669')}</td>
+      <td style="text-align:center">${cell(r.fl_avail, '#2563eb')}</td>
+      <td style="text-align:center;font-weight:700">${total.toLocaleString()}</td>
+      <td>${chips}</td></tr>`;
+  }).join('') : '<tr><td colspan="6" class="empty">No matches</td></tr>';
+}
+async function loadFulfillmentGrid() {
+  document.getElementById('fgUpdating').classList.add('on');
+  try {
+    const g = await api('/api/fulfillment/grid');
+    document.getElementById('fgKpis').innerHTML = [
+      {l:'SKUs', v: (g.totals.skus ?? 0).toLocaleString()},
+      {l:'ShipBob available', v: (g.totals.shipbob ?? 0).toLocaleString()},
+      {l:'Floship available', v: (g.totals.floship ?? 0).toLocaleString()},
+      {l:'Total available', v: (g.totals.total ?? 0).toLocaleString()}
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    fgRows = g.rows || [];
+    renderFgTable();
+    const on = Object.entries(g.sources).filter(([, v]) => v).map(([k]) => k);
+    document.getElementById('fgNote').textContent = on.length ? `Merging: ${on.join(' + ')}. Green = ShipBob, blue = Floship.` : 'No fulfillment sources connected yet.';
+  } catch (e) { document.getElementById('fgNote').textContent = '⚠️ ' + e.message; }
+  finally { document.getElementById('fgUpdating').classList.remove('on'); }
+}
 async function loadFulfillment() {
+  loadFulfillmentGrid();
   const note = document.getElementById('sbNote');
   document.getElementById('sbAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
   document.getElementById('sbUpdating').classList.add('on');
@@ -902,9 +954,10 @@ async function loadFloship() {
   finally { document.getElementById('flUpdating').classList.remove('on'); }
 }
 document.getElementById('flSearch').oninput = renderFlTable;
+document.getElementById('fgSearch').oninput = renderFgTable;
 async function flSync() {
   document.getElementById('flUpdating').classList.add('on');
-  try { await api('/api/floship/sync', {method:'POST', body:'{}'}); loadFloship(); }
+  try { await api('/api/floship/sync', {method:'POST', body:'{}'}); loadFloship(); loadFulfillmentGrid(); }
   catch (e) { document.getElementById('flNote').textContent = '⚠️ ' + e.message; document.getElementById('flUpdating').classList.remove('on'); }
 }
 async function sbSync() {
