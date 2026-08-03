@@ -151,6 +151,7 @@ footer{color:rgba(16,17,20,.45)}
 .updating-pill{display:none;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--muted)}
 .updating-pill.on{display:inline-flex}
 .updating-pill .spin{width:16px;height:16px;border-width:3px}
+.src-badge{display:inline-block;color:#fff;font-size:11px;font-weight:700;padding:2px 9px;border-radius:6px;margin-right:8px;vertical-align:middle;letter-spacing:.02em}
 .synchead{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 .synchead .note{margin:0}
 .synchead .right{display:flex;align-items:center;gap:12px}
@@ -568,11 +569,17 @@ footer{color:rgba(16,17,20,.45)}
   </div>
 </div>
 
-<!-- FULFILLMENT (3PL: ShipBob, Flowship, …) -->
+<!-- FULFILLMENT (3PL: ShipBob, Floship, …) -->
 <div class="section" id="s-fulfillment">
-  <div class="grid kpis" id="sbKpis"></div>
+  <div class="card" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <b>🚚 Fulfillment across providers</b>
+    <span style="color:var(--muted);font-size:12px">Each 3PL is its own source — the coloured badge tells them apart. Next step is merging these into one per-SKU grid (like the planner's Inventory Count).</span>
+  </div>
+
+  <!-- ShipBob -->
+  <div class="grid kpis" id="sbKpis" style="margin-top:14px"></div>
   <div class="card" style="margin-top:14px">
-    <h2>🚚 ShipBob inventory
+    <h2><span class="src-badge" style="background:#059669">ShipBob</span>Inventory <span style="font-weight:400;color:var(--muted);font-size:12px">· US</span>
       <span class="updating-pill" id="sbUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
       <span id="sbAdminBar" style="display:none;float:right">
         <button class="btn" style="margin:0 0 0 6px;padding:5px 12px" onclick="sbSync()">🔄 Sync now</button>
@@ -584,8 +591,16 @@ footer{color:rgba(16,17,20,.45)}
     <div class="note" id="sbNote" style="margin-top:8px">Loading…</div>
     <pre id="sbDebugOut" style="display:none;white-space:pre-wrap;font-size:11px;background:rgba(16,17,20,.04);border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px;max-height:360px;overflow:auto"></pre>
   </div>
+
+  <!-- Floship -->
   <div class="card">
-    <div class="note" style="margin-top:0">Other providers (Flowship HK, Pattern US, PPR, Amazon, Eternity…) will slot in here as their own columns to rebuild the full inventory grid. This ShipBob view is the first piece.</div>
+    <h2><span class="src-badge" style="background:#2563eb">Floship</span>Inventory <span style="font-weight:400;color:var(--muted);font-size:12px">· HK</span>
+      <span id="flAdminBar" style="display:none;float:right">
+        <button class="btn" style="margin:0 0 0 6px;padding:5px 12px;background:#fff;border:1px solid var(--line);box-shadow:none" onclick="flDebug()">🧪 Test API</button>
+      </span>
+    </h2>
+    <div class="note" id="flNote" style="margin-top:0">Not connected yet — an admin adds Floship on the ＋ page (endpoint URL + token), then hit Test API to see what it returns so we can wire the table.</div>
+    <pre id="flDebugOut" style="display:none;white-space:pre-wrap;font-size:11px;background:rgba(16,17,20,.04);border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:10px;max-height:360px;overflow:auto"></pre>
   </div>
 </div>
 
@@ -804,6 +819,7 @@ function renderSbTable() {
 async function loadFulfillment() {
   const note = document.getElementById('sbNote');
   document.getElementById('sbAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
+  document.getElementById('flAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
   document.getElementById('sbUpdating').classList.add('on');
   try {
     const s = await api('/api/shipbob/summary');
@@ -839,6 +855,12 @@ async function sbDebug() {
   const out = document.getElementById('sbDebugOut');
   out.style.display = 'block'; out.textContent = 'Calling ShipBob…';
   try { const r = await api('/api/shipbob/debug'); out.textContent = JSON.stringify(r, null, 2); }
+  catch (e) { out.textContent = '⚠️ ' + e.message; }
+}
+async function flDebug() {
+  const out = document.getElementById('flDebugOut');
+  out.style.display = 'block'; out.textContent = 'Probing Floship (trying auth styles)…';
+  try { const r = await api('/api/floship/debug'); out.textContent = JSON.stringify(r, null, 2); }
   catch (e) { out.textContent = '⚠️ ' + e.message; }
 }
 

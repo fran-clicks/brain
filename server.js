@@ -386,6 +386,13 @@ const CONNECTOR_TYPES = {
       { key: 'token', label: 'Personal Access Token (ShipBob → Settings → API tokens)', secret: true },
       { key: 'channel_id', label: 'Channel ID (optional — leave blank to auto-detect)', secret: false, optional: true }
     ]
+  },
+  floship: {
+    label: 'Floship (3PL fulfillment · HK)',
+    fields: [
+      { key: 'base_url', label: 'Inventory/stock API URL Floship gave you (full endpoint)', secret: false },
+      { key: 'token', label: 'API token / key', secret: true }
+    ]
   }
 };
 
@@ -509,6 +516,10 @@ app.post('/api/connectors', async (req, res) => {
     } else if (type === 'shipbob') {
       const chans = await shipbobRequest(config, '/1.0/channel');
       meta = { channels: Array.isArray(chans) ? chans.length : 'ok' };
+    } else if (type === 'floship') {
+      const p = await floshipProbe(config.base_url, config.token);
+      if (!p.ok) throw new Error(`no auth style worked (last: ${p.auth || '?'} → ${p.status || p.error})`);
+      meta = { endpoint: String(config.base_url).replace(/^https?:\/\//, '').split('/')[0], auth: p.auth };
     } else if (type === 'klaviyo') {
       const m = await klaviyoRequest(config, '/api/metrics/');
       meta = { metrics_visible: (m.data || []).length };
@@ -1778,6 +1789,36 @@ app.post('/api/shipbob/sync', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   try { res.json(await syncShipbob()); }
   catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// ---------- Floship (3PL, shape unknown until we probe the live API) ----------
+// try common auth styles and report which one works + the raw body, so we can finalize the parser
+async function floshipProbe(baseUrl, token) {
+  const attempts = [
+    ['Bearer', { Authorization: `Bearer ${token}` }],
+    ['Token', { Authorization: `Token ${token}` }],
+    ['Token token=', { Authorization: `Token token=${token}` }],
+    ['raw Authorization', { Authorization: token }],
+    ['X-API-Key', { 'X-API-Key': token }],
+    ['api-token', { 'api-token': token }]
+  ];
+  let last = null;
+  for (const [desc, hdrs] of attempts) {
+    try {
+      const r = await fetch(baseUrl, { headers: { ...hdrs, Accept: 'application/json' } });
+      const text = await r.text();
+      let body; try { body = JSON.parse(text); } catch { body = text; }
+      if (r.ok) return { ok: true, auth: desc, status: r.status, body };
+      last = { ok: false, auth: desc, status: r.status, body: typeof body === 'string' ? body.slice(0, 300) : body };
+    } catch (e) { last = { ok: false, auth: desc, error: e.message }; }
+  }
+  return last || { ok: false, error: 'no attempts' };
+}
+app.get('/api/floship/debug', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('floship');
+  if (!conn) return res.status(400).json({ error: 'Floship not connected — add it on the ＋ page first.' });
+  res.json(await floshipProbe(conn.config.base_url, conn.config.token));
 });
 
 // ---------- Shopify (orders sync, same pattern as Gorgias) ----------
