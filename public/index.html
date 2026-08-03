@@ -235,7 +235,7 @@ footer{color:rgba(16,17,20,.45)}
     </div>
     <div id="impResult" style="display:none">
       <div class="grid kpis" id="impKpis"></div>
-      <div class="chart-wrap" style="height:200px;margin-top:12px"><canvas id="impChart"></canvas></div>
+      <div class="chart-wrap" style="height:260px;margin-top:12px"><canvas id="impChart"></canvas></div>
       <div class="note" id="impNote" style="margin-top:8px"></div>
     </div>
   </div>
@@ -958,12 +958,12 @@ function itemDetailHtml(ev) {
     ${ev.klaviyo_id ? `<br><a href="#" onclick="closeEvtPop();document.querySelector('nav button[data-s=klaviyo]').click();return false">open in Klaviyo tab →</a>` : ''}`;
 }
 function closeEvtPop() { document.getElementById('evtPop').style.display = 'none'; }
-function bindEventHover(canvas) {
+function bindEventHover(canvas, getChart) {
   if (canvas.$evtBound) return;
   canvas.$evtBound = true;
   const tip = document.getElementById('evtTip');
   const findHit = (e) => {
-    const pins = homeChart?.$pins || [];
+    const pins = (getChart ? getChart() : homeChart)?.$pins || [];
     const r = canvas.getBoundingClientRect();
     const mx = e.clientX - r.left, my = e.clientY - r.top;
     return pins.find(p => Math.abs(mx - p.x) < 13 && Math.abs(my - p.py) < 13);
@@ -1086,7 +1086,7 @@ async function loadOverview() {
         borderDash:[7,4], pointStyle:'rectRot', pointRadius:4.5, pointBorderColor:'#7c3aed', pointHoverRadius:8, pointHoverBorderColor:'#7c3aed'});
     }
     const homeCanvas = document.getElementById('homeChart');
-    bindEventHover(homeCanvas);
+    bindEventHover(homeCanvas, () => homeChart);
     const markers = [
       ...s.events.map(e => ({ ...e, kind: 'event' })),
       ...(s.campaigns || []).map(c => ({
@@ -1222,39 +1222,24 @@ async function runImpact() {
     if (impChart) impChart.destroy();
     const labels = r.series.map(p => p.d);
     const evIdx = labels.indexOf(r.date);
-    // map each day → the events on it (icon + names), including the selected one, for markers + tooltips
-    const dayEvents = {};
-    const push = (d, kind, label) => { (dayEvents[d] = dayEvents[d] || []).push({ icon: kind === 'campaign' ? '✉️' : '📌', label }); };
-    (r.confounders || []).forEach(c => push(c.d, c.kind, c.label));
-    push(r.date, selId.startsWith('kv') ? 'campaign' : 'event', selLabel); // the selected event itself
-    const iconPlugin = {
-      id: 'impIcons',
-      afterDatasetsDraw(chart) {
-        const { ctx, scales: { x }, chartArea } = chart;
-        ctx.save(); ctx.font = '13px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-        labels.forEach((lab, i) => {
-          const evs = dayEvents[lab];
-          if (!evs || !evs.length) return;
-          const icons = [...new Set(evs.map(e => e.icon))].join('');
-          ctx.fillText(icons, x.getPixelForValue(i), chartArea.top - 16);
-        });
-        ctx.restore();
-      }
-    };
+    // same event markers as the clicks graph (yellow pins + envelope/pin icons, hover + click popover)
+    const seen = new Set(); const impMarkers = [];
+    const addMarker = (kind, title, d) => { const k = kind + '|' + title + '|' + d; if (seen.has(k)) return; seen.add(k);
+      impMarkers.push({ kind, title, event_date: d, added_by: kind === 'campaign' ? 'Klaviyo' : 'team event' }); };
+    (r.confounders || []).forEach(c => addMarker(c.kind, c.label, c.d));
+    addMarker(selId.startsWith('kv') ? 'campaign' : 'event', selLabel, r.date); // the selected event
+    const impStack = (impMarkers.some(m => m.kind === 'event') ? 1 : 0) + (impMarkers.some(m => m.kind === 'campaign') ? 1 : 0);
     impChart = new Chart(document.getElementById('impChart'), {
       type: 'bar',
       data: { labels, datasets: [{ label: r.label, data: r.series.map(p => p.v),
         backgroundColor: labels.map((l, i) => i >= evIdx ? '#ffc800' : 'rgba(16,17,20,.22)') }] },
-      plugins: [iconPlugin],
       options: { responsive: true, maintainAspectRatio: false,
-        layout: { padding: { top: 20 } },
-        plugins: { legend: { display: false },
-          tooltip: { callbacks: {
-            title: items => items[0].label + (labels[items[0].dataIndex] === r.date ? ' · event day' : ''),
-            afterBody: items => (dayEvents[items[0].label] || []).map(e => `${e.icon} ${e.label}`)
-          } } },
+        layout: { padding: { top: impStack ? 20 + impStack * 26 : 8 } },
+        plugins: { legend: { display: false }, eventMarkers: { events: impMarkers },
+          tooltip: { callbacks: { title: items => items[0].label + (labels[items[0].dataIndex] === r.date ? ' · event day' : '') } } },
         scales: { y: { beginAtZero: true, ticks: { precision: 0 } }, x: { ticks: { maxRotation: 0, autoSkipPadding: 12 }, grid: { display: false } } } }
     });
+    bindEventHover(document.getElementById('impChart'), () => impChart);
     const others = (r.confounders || []).filter(c => !(c.label === selLabel && c.d === r.date))
       .sort((a, b) => a.d < b.d ? -1 : 1);
     document.getElementById('impNote').innerHTML = others.length
