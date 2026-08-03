@@ -418,16 +418,10 @@ footer{color:rgba(16,17,20,.45)}
 
 <!-- UK STOCK -->
 <div class="section" id="s-stock">
-  <div class="card synchead">
-    <div class="note" id="stockNote">Loading stock…</div>
-    <div class="right">
-      <span class="updating-pill" id="stockUpdating"><div class="spin"></div>Updating…</span>
-      <button class="btn" id="stockSyncBtn" onclick="stockSync()" style="display:none">↻ Re-import from clicks_ruk</button>
-    </div>
-  </div>
   <div class="grid kpis" id="stockKpis"></div>
   <div class="card" style="margin-top:14px">
     <h2>📦 Stock levels
+      <span class="updating-pill" id="stockUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
       <span id="stockAdminBar" style="display:none;float:right">
         <button class="btn" style="margin:0 0 0 6px;padding:5px 12px" onclick="openStockModal()">＋ Add product</button>
         <button class="btn" style="margin:0 0 0 6px;padding:5px 12px" onclick="openScan()">📷 Scan</button>
@@ -436,6 +430,7 @@ footer{color:rgba(16,17,20,.45)}
     </h2>
     <input class="search" id="stockSearch" placeholder="Search SKU, UPC or description…">
     <table id="stockTable"><thead><tr><th>UPC</th><th>SKU</th><th>Description</th><th style="text-align:center">Brand new</th><th style="text-align:center">Non-pristine</th><th style="text-align:center">Damaged</th><th style="text-align:center">Founders</th><th style="text-align:center">Total</th><th></th></tr></thead><tbody></tbody></table>
+    <div class="note" id="stockNote" style="margin-top:8px"></div>
   </div>
   <div id="stockAdminCards" style="display:none">
     <div class="card">
@@ -1698,11 +1693,10 @@ async function loadStock() {
     const s = await api('/api/stock');
     // clicks-brain now owns UK stock, so show admin controls to admins
     document.getElementById('stockAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
-    document.getElementById('stockSyncBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
     document.getElementById('stockAdminCards').style.display = window.isAdmin ? 'block' : 'none';
     if (!s.configured && !(s.items && s.items.length)) {
       note.textContent = window.isAdmin
-        ? 'No stock yet — use ＋ Add product or 📷 Scan to start, or re-import from clicks_ruk.'
+        ? 'No stock yet — use ＋ Add product or 📷 Scan to start.'
         : 'No stock data yet.';
       return;
     }
@@ -1724,23 +1718,11 @@ async function loadStock() {
       `<tr><td>${esc(new Date(h.taken_at).toLocaleString())}</td><td><span class="tag src">${esc(h.sku)}</span></td>
        <td>${esc(h.name || '')}</td><td><b>${h.qty ?? '?'}</b></td></tr>`).join('')
       : '<tr><td colspan="4" class="empty">No changes recorded yet — history builds as levels move</td></tr>';
-    const allZero = stockItems.length && stockItems.every(i => !i.qty);
-    note.textContent = (s.sync
-      ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · refreshes hourly${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''} · low stock highlighted`
-      : '')
-      + (allZero && s.sample_raw ? ` · ⚠️ all quantities read as 0 — raw item from your API: ${JSON.stringify(s.sample_raw).slice(0, 300)}` : '');
+    note.textContent = `${stockItems.length} products · colour: red <10, amber ≤25, green >25`;
   } catch (e) { note.textContent = '⚠️ ' + e.message; }
   finally { document.getElementById('stockUpdating').classList.remove('on'); }
 }
 document.getElementById('stockSearch').oninput = renderStockTable;
-async function stockSync() {
-  if (!confirm('Re-import stock from clicks_ruk? This overwrites any edits made here with the clicks_ruk data.')) return;
-  const b = document.getElementById('stockSyncBtn');
-  b.disabled = true; b.textContent = '⏳ Importing…';
-  try { await api('/api/stock/sync', {method:'POST', body:'{}'}); loadStock(); }
-  catch (e) { document.getElementById('stockNote').textContent = '⚠️ ' + e.message; }
-  finally { b.disabled = false; b.textContent = '↻ Re-import from clicks_ruk'; }
-}
 // redo returns tab
 // shared product-name label: catalog name + only the variant bits it doesn't already say.
 // UK-stock names often already encode model+colour (e.g. "16 Pro - Onyx"), so we only append

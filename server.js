@@ -1568,6 +1568,7 @@ app.post('/api/stock/item/delete', async (req, res) => {
 });
 // look up a single item by UPC (for the scanner)
 app.get('/api/stock/by-upc', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const upc = String(req.query.upc || '').trim();
   if (!upc) return res.status(400).json({ error: 'upc required' });
   const row = (await pool.query('SELECT sku, name, upc, brand_new, non_pristine, damaged, founders, qty FROM uk_stock WHERE upc=$1 LIMIT 1', [upc])).rows[0] || null;
@@ -1656,8 +1657,9 @@ ${type === 'invoice' ? '<p class="muted" style="margin-top:20px">This commercial
 </body></html>`);
 });
 
-// CSV export of all stock
-app.get('/api/stock/export', async (_req, res) => {
+// CSV export of all stock (admins only)
+app.get('/api/stock/export', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).send('admins only');
   const rows = (await pool.query('SELECT upc, sku, name, brand_new, non_pristine, damaged, founders, qty FROM uk_stock ORDER BY sku')).rows;
   const esc = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const head = ['UPC', 'SKU', 'Description', 'Brand New', 'Non-Pristine', 'Damaged', 'Founders', 'Total'];
