@@ -2230,6 +2230,7 @@ app.get('/api/gorgias/stats', async (req, res) => {
         '%@shopify%', '%@gorgias%', '%@redo%', '%@getredo%', '%support@%', '%billing@%', '%invoices@%',
         '%receipts@%', '%team@%', '%hello@%', '%info@%', '%accounts@%', '%postmaster@%', '%bounce%',
         '%service@paypal%', '%@paypal.%', '%@gmass.co', '%get@aiadssolutions.com', '%@aiadssolutions.com',
+        '%@mg.postscriptapp.com', '%@postscriptapp.com', '%edm.feedback@tiktok.com', '%@tiktok.com',
         '%notify@%', '%@mail.%', '%@e.%', '%@email.%'];
       const notLike = EXCLUDE.map((_, i) => `customer_email NOT ILIKE $${i + 1}`).join(' AND ');
       const rc = await pool.query(
