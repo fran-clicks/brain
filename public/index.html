@@ -171,6 +171,8 @@ footer{color:rgba(16,17,20,.45)}
   <button data-s="sales">🛒 Shopify</button>
   <button data-s="redo">↩️ Returns</button>
   <button data-s="stock">📦 UK Stock</button>
+  <button data-s="fulfillment">🚚 Fulfillment</button>
+  <button data-s="ops">🗂️ Operations</button>
   <button data-s="kb">💡 Knowledge Bases</button>
   <button data-s="conn" title="Connectors" style="font-size:16px;padding:8px 16px;font-weight:800">＋</button>
 </nav>
@@ -563,6 +565,24 @@ footer{color:rgba(16,17,20,.45)}
   <div class="card">
     <h2>Recent returns</h2>
     <table id="rdRecent"><thead><tr><th>Order</th><th>Type</th><th>Status</th><th>Date</th><th>Items · reason</th><th>Refund</th><th>Tags</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+
+<!-- FULFILLMENT (3PL: ShipBob, Flowship, …) -->
+<div class="section" id="s-fulfillment">
+  <div class="grid kpis" id="fulKpis"></div>
+  <div class="card" style="margin-top:14px">
+    <h2>🚚 Fulfillment <span style="font-weight:400;color:var(--muted);font-size:12px">· ShipBob, Flowship & other 3PLs</span></h2>
+    <div class="note" style="margin-top:0">Live inventory and shipment data pulled from your 3rd-party logistics providers. Nothing connected yet — an admin adds ShipBob / Flowship on the ＋ page once we have the API keys, and this fills in automatically.</div>
+    <div class="note" id="fulSetup" style="margin-top:12px;display:none"></div>
+  </div>
+</div>
+
+<!-- OPERATIONS (manual imports + trackers for KP) -->
+<div class="section" id="s-ops">
+  <div class="card">
+    <h2>🗂️ Operations <span style="font-weight:400;color:var(--muted);font-size:12px">· imports & manual trackers</span></h2>
+    <div class="note" style="margin-top:0">Home for data imported from spreadsheets (stock snapshots, samples, bulk shipments) and the manual trackers we build for them. Admins import CSVs here; others get view/role-scoped access. Being built out — tell me which sheet to model first.</div>
   </div>
 </div>
 
