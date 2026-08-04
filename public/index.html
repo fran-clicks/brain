@@ -696,7 +696,7 @@ footer{color:rgba(16,17,20,.45)}
     <button class="btn" type="button" onclick="frAddItem()" style="margin:6px 0 0;padding:5px 12px;font-size:12px;background:#fff;border:1px solid var(--line);box-shadow:none">＋ Add SKU</button>
 
     <label style="margin-top:14px">Progress stages</label>
-    <div class="note" style="margin:-2px 0 6px">Tick the stages this shipment will go through. Click a stage on the card afterwards to mark it as the current step.</div>
+    <div class="note" style="margin:-2px 0 6px">Add the stages this shipment goes through and use ↑ ↓ to set their order (1, 2, 3…). On the shipment card, click a stage to mark it as the current step.</div>
     <div id="frStages"></div>
     <div style="display:flex;gap:6px;margin-top:6px">
       <input id="frCustomStage" placeholder="Add a custom stage…" style="flex:1;margin:0">
@@ -1202,15 +1202,27 @@ function frItemRow(sku, qty) {
 }
 function frAddItem(sku, qty) { document.getElementById('frItems').appendChild(frItemRow(sku, qty)); }
 function frRenderStages() {
-  document.getElementById('frStages').innerHTML = frStageDraft.map((st, i) =>
-    `<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink);font-weight:500;margin:4px 0">
-      <input type="checkbox" checked onchange="frToggleStage(${i})" style="width:auto;margin:0"> ${esc(st)}
-    </label>`).join('') || '<div class="note">No stages selected. Tick defaults below or add a custom one.</div>';
-  // available defaults not yet added
+  const last = frStageDraft.length - 1;
+  const list = frStageDraft.map((st, i) =>
+    `<div style="display:flex;align-items:center;gap:8px;margin:4px 0;font-size:13px">
+      <span style="display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:#2563eb;color:#fff;font-weight:700;font-size:12px;flex:0 0 auto">${i + 1}</span>
+      <span style="flex:1;font-weight:500">${esc(st)}</span>
+      <button class="btn" type="button" title="Move up" onclick="frMoveStage(${i},-1)" ${i === 0 ? 'disabled' : ''} style="margin:0;padding:2px 9px;background:#fff;border:1px solid var(--line);box-shadow:none${i === 0 ? ';opacity:.3' : ''}">↑</button>
+      <button class="btn" type="button" title="Move down" onclick="frMoveStage(${i},1)" ${i === last ? 'disabled' : ''} style="margin:0;padding:2px 9px;background:#fff;border:1px solid var(--line);box-shadow:none${i === last ? ';opacity:.3' : ''}">↓</button>
+      <button class="btn" type="button" title="Remove" onclick="frToggleStage(${i})" style="margin:0;padding:2px 9px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none">✕</button>
+    </div>`).join('') || '<div class="note">No stages yet. Add defaults below or a custom one.</div>';
   const avail = frDefaultStages.filter(d => !frStageDraft.includes(d));
-  if (avail.length) document.getElementById('frStages').innerHTML +=
-    `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px">` + avail.map(d =>
-      `<button class="btn" type="button" onclick="frAddDefault('${esc(d).replace(/'/g,"\\'")}')" style="margin:0;padding:3px 10px;font-size:12px;background:#fff;border:1px dashed var(--line);box-shadow:none;color:var(--muted)">＋ ${esc(d)}</button>`).join('') + `</div>`;
+  const availHtml = avail.length
+    ? `<div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">` + avail.map(d =>
+        `<button class="btn" type="button" onclick="frAddDefault('${esc(d).replace(/'/g, "\\'")}')" style="margin:0;padding:3px 10px;font-size:12px;background:#fff;border:1px dashed var(--line);box-shadow:none;color:var(--muted)">＋ ${esc(d)}</button>`).join('') + `</div>`
+    : '';
+  document.getElementById('frStages').innerHTML = list + availHtml;
+}
+function frMoveStage(i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= frStageDraft.length) return;
+  [frStageDraft[i], frStageDraft[j]] = [frStageDraft[j], frStageDraft[i]];
+  frRenderStages();
 }
 function frToggleStage(i) { frStageDraft.splice(i, 1); frRenderStages(); }
 function frAddDefault(st) { if (!frStageDraft.includes(st)) frStageDraft.push(st); frRenderStages(); }
