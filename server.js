@@ -2555,25 +2555,37 @@ app.get('/api/shopify/fulfillments', async (req, res) => {
     const adminBase = shopifyAdminOrderBase(conn?.config?.store_domain);
     const backfillDone = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v?.backfill_done ?? null;
 
+    // optional filters shared with the Shopify card (product / country / tag)
+    const { product, country, tag } = req.query;
+    const addFilters = (p, cond) => {
+      if (country) { p.push(country); cond.push(`country = $${p.length}`); }
+      if (tag) { p.push(tag); cond.push(`order_tags ? $${p.length}`); }
+      if (product) { p.push(product); cond.push(`EXISTS (SELECT 1 FROM jsonb_array_elements(items) it WHERE it->>'title' = $${p.length})`); }
+    };
+
     if (req.query.date) {
       const day = String(req.query.date).slice(0, 10);
+      const p = [day], cond = [`fulfilled_at >= $1::date`, `fulfilled_at < ($1::date + interval '1 day')`];
+      addFilters(p, cond);
       const orders = (await pool.query(
         `SELECT shopify_id, order_number, created_at, fulfilled_at, country, total_price, currency, fulfillment_status, items,
            floor(extract(epoch from (fulfilled_at - created_at))/86400)::int days_to_fulfill
          FROM orders_cache
-         WHERE fulfilled_at >= $1::date AND fulfilled_at < ($1::date + interval '1 day')
-         ORDER BY fulfilled_at ASC LIMIT 500`, [day])).rows;
+         WHERE ${cond.join(' AND ')}
+         ORDER BY fulfilled_at ASC LIMIT 500`, p)).rows;
       return res.json({ date: day, admin_base: adminBase, backfill_done: backfillDone, count: orders.length, orders });
     }
 
     const days = Math.min(Math.max(parseInt(req.query.days) || 30, 1), 366);
     const start = new Date(Date.now() - days * 864e5).toISOString();
+    const p = [start], cond = [`fulfilled_at >= $1`, `cancelled_at IS NULL`];
+    addFilters(p, cond);
     const byDay = (await pool.query(
       `SELECT to_char(fulfilled_at::date,'YYYY-MM-DD') d, count(*)::int orders,
          coalesce(sum((SELECT sum(coalesce((it->>'qty')::int,0)) FROM jsonb_array_elements(items) it)),0)::int units
        FROM orders_cache
-       WHERE fulfilled_at >= $1 AND cancelled_at IS NULL
-       GROUP BY 1 ORDER BY 1 DESC`, [start])).rows;
+       WHERE ${cond.join(' AND ')}
+       GROUP BY 1 ORDER BY 1 DESC`, p)).rows;
     res.json({ days, admin_base: adminBase, backfill_done: backfillDone, by_day: byDay });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

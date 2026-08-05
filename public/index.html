@@ -2174,12 +2174,21 @@ async function loadShopify() {
       ? `Synced from Shopify · last run ${new Date(s.sync.last_run).toLocaleString()} · ${s.sync.cached ?? '?'} orders cached`
         + (s.sync.backfill_done ? '' : ' · ⏳ history backfill in progress') + (s.sync.last_error ? ` · ⚠️ ${s.sync.last_error}` : '')
       : '';
-    if (!fulLoaded) { fulLoaded = true; loadFulfilledByDay(); }
+    loadFulfilledByDay(); // re-run so the fulfilled-by-day card reflects the current product/country/tag filters
   } catch (e) { note.textContent = 'Shopify error: ' + e.message; }
   finally { document.getElementById('shopUpdating').classList.remove('on'); }
 }
 // ---- fulfilled-by-day (real fulfillment date) ----
 let fulDays = 14, fulLoaded = false;
+// current product/country/tag filters from the Shopify filter bar, as query params
+function shopFilterParams() {
+  const qs = new URLSearchParams();
+  ['shProduct','shCountry','shTag'].forEach((id, i) => {
+    const v = document.getElementById(id)?.value;
+    if (v) qs.set(['product','country','tag'][i], v);
+  });
+  return qs;
+}
 document.querySelectorAll('#fulPeriods button').forEach(b => b.onclick = () => {
   if (+b.dataset.d === fulDays) return; // already showing this window
   document.querySelectorAll('#fulPeriods button').forEach(x => x.classList.remove('active'));
@@ -2196,7 +2205,8 @@ async function loadFulfilledByDay() {
   const to = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   range.textContent = `Showing last ${fulDays} days · ${from} → ${to}`;
   try {
-    const r = await api('/api/shopify/fulfillments?days=' + fulDays);
+    const qs = shopFilterParams(); qs.set('days', fulDays);
+    const r = await api('/api/shopify/fulfillments?' + qs.toString());
     const total = (r.by_day || []).reduce((s, d) => s + d.orders, 0);
     range.textContent = `Showing last ${fulDays} days · ${from} → ${to} · ${total.toLocaleString()} orders across ${(r.by_day || []).length} day(s)`;
     tb.innerHTML = (r.by_day || []).length ? r.by_day.map(d =>
@@ -2212,7 +2222,8 @@ async function showFulfilledDay(day) {
   const pill = document.getElementById('fulUpdating'); pill.classList.add('on');
   const note = document.getElementById('fulDayNote');
   try {
-    const r = await api('/api/shopify/fulfillments?date=' + encodeURIComponent(day));
+    const qs = shopFilterParams(); qs.set('date', day);
+    const r = await api('/api/shopify/fulfillments?' + qs.toString());
     const base = r.admin_base;
     document.getElementById('fulDayDetail').style.display = 'block';
     document.getElementById('fulDayTitle').textContent = `Orders fulfilled on ${day}`;
