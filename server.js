@@ -3202,6 +3202,11 @@ async function notifyFreight(action, sh, extra) {
       blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `All stages: ${slackEsc(stages)}` }] });
     }
     if (sh.notes && action !== 'deleted') blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `📝 ${slackEsc(sh.notes)}` }] });
+    const appUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || 'https://clicks-brain.onrender.com').replace(/\/$/, '');
+    if (action !== 'deleted') blocks.push({ type: 'actions', elements: [
+      { type: 'button', text: { type: 'plain_text', text: '🚢 Open Freight Tracker', emoji: true }, url: `${appUrl}/#freight` }
+    ] });
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `<${appUrl}/#freight|View in Clicks Brain>` }] });
     blocks.push({ type: 'divider' });
 
     // plain-text fallback (shown in notifications / clients that don't render blocks)

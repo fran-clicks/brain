@@ -917,7 +917,16 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (s === 'fulfillment') loadFulfillment();
   if (s === 'freight') loadFreight();
   if (s === 'conn') { loadConnectorTypes(); loadConnectors(); loadRequests(); loadMembers(); loadHealth(); }
+  try { history.replaceState(null, '', '#' + s); } catch (e) {}
 });
+// deep-link support: open a tab directly via #freight etc (used by Slack links)
+function openTabFromHash() {
+  const s = (location.hash || '').replace('#', '');
+  if (!s) return;
+  const btn = document.querySelector(`nav button[data-s="${s}"]`);
+  if (btn) btn.click();
+}
+window.addEventListener('hashchange', openTabFromHash);
 
 // ---------- fulfillment (ShipBob) ----------
 let sbItems = [];
@@ -3052,6 +3061,7 @@ api('/api/auth/me').then(m => {
 // when you switch to it (see the nav handler), so we don't hammer the DB with ~13 concurrent
 // queries on first paint. prefetch of other periods is deferred so it doesn't compete with the first render.
 loadOverview().then(() => setTimeout(prefetchPeriods, 4000)); loadEvents(); loadImpactEvents();
+openTabFromHash(); // honour a #freight (etc) deep-link on first load, e.g. from a Slack message
 </script>
 </body>
 </html>
