@@ -2503,7 +2503,6 @@ async function loadRedo() {
     note.textContent = s.sync
       ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · ${s.sync.cached ?? '?'} returns cached`
         + (s.sync.backfill_done ? '' : ' · ⏳ history backfill in progress') + (s.sync.last_error ? ` · ⚠️ ${s.sync.last_error}` : '')
-        + ' · 🌱 = green return (no shipment needed)'
       : '';
   } catch (e) { note.textContent = '⚠️ ' + e.message; }
   finally { document.getElementById('rdUpdating').classList.remove('on'); }
@@ -2585,10 +2584,9 @@ async function loadKlaviyo() {
        <td>${f.click_rate != null ? Math.round(f.click_rate*100) + '%' : '—'}</td>
        <td>${f.revenue != null ? money(Math.round(+f.revenue), ccy) : '—'}</td></tr>`).join('')
       : '<tr><td colspan="7" class="empty">No flow data yet — hit Sync now (flows need a sync to populate)</td></tr>';
-    note.textContent = (s.sync
-      ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''} · refreshes hourly${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''} · sends appear as ✉️ on the Overview chart`
-      : '')
-      + ' · ticket counts = Gorgias tickets whose subject contains the email subject, within 21 days of the send ("—" until the subject is synced)';
+    note.textContent = s.sync
+      ? `Synced ${s.sync.last_run ? new Date(s.sync.last_run).toLocaleString() : ''}${s.sync.last_error ? ' · ⚠️ ' + s.sync.last_error : ''}`
+      : '';
   } catch (e) { note.textContent = '⚠️ ' + e.message; }
   finally { document.getElementById('kvUpdating').classList.remove('on'); }
 }
