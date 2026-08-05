@@ -1985,7 +1985,7 @@ app.post('/api/freight', async (req, res) => {
     if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
     res.json({ ok: true, id: r.rows[0].id });
     if (notify) notifyFreight('edited', { name: b.name, from_country: b.from_country, to_country: b.to_country,
-      carrier: b.carrier, eta, notes: b.notes, items, stages });
+      carrier: b.carrier, eta, notes: b.notes, items, stages, step });
     return;
   }
   const r = await pool.query(
@@ -1993,15 +1993,22 @@ app.post('/api/freight', async (req, res) => {
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [...f, readSession(req) || '']);
   res.json({ ok: true, id: r.rows[0].id });
   if (notify) notifyFreight('created', { name: b.name, from_country: b.from_country, to_country: b.to_country,
-    carrier: b.carrier, eta, notes: b.notes, items, stages }); // best-effort Slack post, after responding
+    carrier: b.carrier, eta, notes: b.notes, items, stages, step }); // best-effort Slack post, after responding
 });
-// quick stage advance (click a step on the progress bar)
+// quick stage advance (click a step on the progress bar) — posts a "moved from X → Y" Slack update
 app.post('/api/freight/step', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
-  const r = await pool.query(`UPDATE freight_shipments SET step=$2, updated_at=now() WHERE id=$1 RETURNING id`,
-    [parseInt(req.body?.id), Math.max(0, parseInt(req.body?.step) || 0)]);
-  if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
+  const id = parseInt(req.body?.id);
+  const newStep = Math.max(0, parseInt(req.body?.step) || 0);
+  const row = (await pool.query(
+    `SELECT name, from_country, to_country, carrier, to_char(eta,'YYYY-MM-DD') eta, notes, items, stages, step FROM freight_shipments WHERE id=$1`, [id])).rows[0];
+  if (!row) return res.status(404).json({ error: 'shipment not found' });
+  await pool.query(`UPDATE freight_shipments SET step=$2, updated_at=now() WHERE id=$1`, [id, newStep]);
   res.json({ ok: true });
+  const fromStage = freightCurrentStage(row);
+  const toStage = freightCurrentStage({ ...row, step: newStep });
+  if (req.body?.notify !== false && fromStage !== toStage)
+    notifyFreight('stage', { ...row, step: newStep }, { fromStage, toStage });
 });
 // mark a shipment complete (all stages done) — posts a Slack "completed" alert
 app.post('/api/freight/complete', async (req, res) => {
@@ -3147,9 +3154,19 @@ const FREIGHT_HEADERS = {
   created: '🚢 New freight shipment',
   edited: '✏️ Freight shipment updated',
   deleted: '🗑️ Freight shipment deleted',
-  completed: '✅ Freight shipment completed'
+  completed: '✅ Freight shipment completed',
+  stage: '🔄 Freight stage updated'
 };
-async function notifyFreight(action, sh) {
+// name of the stage a shipment is currently sitting on, based on its step counter
+function freightCurrentStage(sh) {
+  const stages = Array.isArray(sh.stages) ? sh.stages : [];
+  const step = parseInt(sh.step) || 0;
+  if (!stages.length) return 'No stages set';
+  if (step <= 0) return 'Not started';
+  if (step > stages.length) return '✅ All stages complete';
+  return stages[step - 1];
+}
+async function notifyFreight(action, sh, extra) {
   try {
     const conn = await getConnector('slack');
     if (!conn?.config?.bot_token) return;
@@ -3159,6 +3176,7 @@ async function notifyFreight(action, sh) {
     const stages = (sh.stages || []).length ? (sh.stages || []).join('  →  ') : 'none set';
     const eta = sh.eta ? new Date(sh.eta + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
     const header = FREIGHT_HEADERS[action] || '🚢 Freight update';
+    const current = action === 'completed' ? '✅ All stages complete' : freightCurrentStage(sh);
 
     const blocks = [
       { type: 'header', text: { type: 'plain_text', text: header, emoji: true } },
@@ -3170,12 +3188,21 @@ async function notifyFreight(action, sh) {
         { type: 'mrkdwn', text: `*Contents*\n${slackEsc(items)}` }
       ] }
     ];
-    if (action !== 'deleted') blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Stages*\n${slackEsc(stages)}` } });
+    if (action !== 'deleted') {
+      // stage move: show where it came from and where it went; otherwise show the current stage
+      if (action === 'stage' && extra && extra.fromStage != null) {
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Stage moved*\n${slackEsc(extra.fromStage)}  →  *${slackEsc(extra.toStage)}*` } });
+      } else {
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Current stage*\n*${slackEsc(current)}*` } });
+      }
+      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `All stages: ${slackEsc(stages)}` }] });
+    }
     if (sh.notes && action !== 'deleted') blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `📝 ${slackEsc(sh.notes)}` }] });
     blocks.push({ type: 'divider' });
 
     // plain-text fallback (shown in notifications / clients that don't render blocks)
-    const fallback = `${header} — ${name} · ${sh.from_country || '?'} → ${sh.to_country || '?'} · ETA ${eta}`;
+    const stageText = action === 'stage' && extra ? `${extra.fromStage} → ${extra.toStage}` : current;
+    const fallback = `${header} — ${name} · ${sh.from_country || '?'} → ${sh.to_country || '?'} · Stage: ${stageText}`;
     await slackPost(conn.config.bot_token, channel, fallback, undefined, blocks);
   } catch (e) { console.error('freight slack notify failed:', e.message); }
 }
