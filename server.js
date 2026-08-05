@@ -191,6 +191,11 @@ const pool = new Pool({
 });
 
 async function initDb() {
+  // serialize schema setup across instances: overlapping deploys were deadlocking on the DDL.
+  // An advisory lock makes the second booting instance wait, then its IF-NOT-EXISTS statements no-op.
+  const lockClient = await pool.connect();
+  try {
+    await lockClient.query('SELECT pg_advisory_lock(728341)');
   await pool.query(`
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY, name TEXT NOT NULL, sku TEXT DEFAULT '', specs TEXT DEFAULT '',
@@ -326,6 +331,10 @@ async function initDb() {
   }
   await pool.query(`INSERT INTO users (email, role) VALUES ('kevin@clicks.tech', 'member')
                     ON CONFLICT (email) DO NOTHING`);
+  } finally {
+    await lockClient.query('SELECT pg_advisory_unlock(728341)').catch(() => {});
+    lockClient.release();
+  }
 }
 
 async function isAdminReq(req) {
@@ -2105,6 +2114,51 @@ app.get('/api/fulfillment/grid', async (_req, res) => {
   const totals = { total: 0 }; sources.forEach(s => totals[s.key] = 0);
   rows.forEach(x => { sources.forEach(s => totals[s.key] += x.vals[s.key] || 0); totals.total += x.total; });
   res.json({ sources, rows, totals, connected: { shipbob: !!(await getConnector('shipbob')), floship: !!(await getConnector('floship')), manual: man.rows.length > 0 } });
+});
+
+// stock forecast: current Global Inventory total per SKU, drawn down by recent Shopify sales velocity.
+// projected stock at 7/14/30/90 days = current − (avg daily units sold over the chosen window × horizon)
+app.get('/api/forecast', async (req, res) => {
+  const win = Math.max(1, Math.min(parseInt(req.query.window) || 14, 90));
+  const [sb, fl, man, sales] = await Promise.all([
+    pool.query(`SELECT sku, name, fulfillable FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
+    pool.query(`SELECT sku, description, qty FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
+    pool.query(`SELECT sku, qty, description FROM manual_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
+    pool.query(
+      `SELECT it->>'sku' sku, sum(coalesce((it->>'qty')::int, 0))::int units
+       FROM orders_cache, LATERAL jsonb_array_elements(items) it
+       WHERE cancelled_at IS NULL AND created_at >= now() - ($1 * interval '1 day')
+       GROUP BY 1`, [win])
+  ]);
+  const stock = {}, rawName = {};
+  const add = (s, q, n) => { if (!s) return; stock[s] = (stock[s] || 0) + (q || 0); if (n && !rawName[s]) rawName[s] = n; };
+  sb.rows.forEach(r => add(r.sku, r.fulfillable, r.name));
+  fl.rows.forEach(r => add(r.sku, r.qty, r.description));
+  man.rows.forEach(r => add(r.sku, r.qty, r.description));
+  const sold = {}; sales.rows.forEach(r => { if (r.sku) sold[r.sku] = (sold[r.sku] || 0) + (r.units || 0); });
+
+  const skus = Object.keys(stock);
+  const nameMap = {};
+  if (skus.length) {
+    const nm = (await pool.query(
+      `SELECT sku, coalesce(us.name, pi.title) nm, nullif(pi.variant_title, '') variant FROM unnest($1::text[]) sku
+       LEFT JOIN product_images pi USING (sku) LEFT JOIN uk_stock us USING (sku)`, [skus])).rows;
+    nm.forEach(r => { if (r.nm) nameMap[r.sku] = r.variant ? `${r.nm} — ${r.variant}` : r.nm; });
+  }
+
+  const horizons = [7, 14, 30, 90];
+  const rows = skus.map(sku => {
+    const cur = stock[sku] || 0;
+    const rate = (sold[sku] || 0) / win; // units per day
+    const cover = rate > 0 ? cur / rate : null; // days until stockout
+    const proj = {}; horizons.forEach(h => proj[h] = Math.round(cur - rate * h));
+    return { sku, name: nameMap[sku] || rawName[sku] || sku, stock: cur, sold: sold[sku] || 0,
+      rate: Math.round(rate * 100) / 100, cover: cover == null ? null : Math.round(cover * 10) / 10, proj };
+  });
+  // soonest stockout first; SKUs with no sales (no depletion) sink to the bottom
+  rows.sort((a, b) => (a.cover == null ? Infinity : a.cover) - (b.cover == null ? Infinity : b.cover)
+    || b.sold - a.sold || a.sku.localeCompare(b.sku));
+  res.json({ window: win, horizons, rows, hasSales: sales.rows.length > 0 });
 });
 
 // import a spreadsheet (CSV): rows = products, columns = inventory sources. ShipBob/Floship columns are ignored (API is source of truth).

@@ -601,6 +601,27 @@ footer{color:rgba(16,17,20,.45)}
     <div class="note" id="fgNote" style="margin-top:8px"></div>
   </div>
 
+  <!-- Stock forecast -->
+  <div class="card" style="margin-top:14px">
+    <h2>🔮 Stock forecast <span style="font-weight:400;color:var(--muted);font-size:12px">· projected stock from recent sales</span>
+      <span class="updating-pill" id="fcUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
+    </h2>
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:4px">
+      <div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)">
+        Sales window:
+        <span class="periods" id="fcWindow">
+          <button data-w="7">7d</button>
+          <button data-w="14" class="active">14d</button>
+          <button data-w="30">30d</button>
+        </span>
+      </div>
+      <input class="search" id="fcSearch" placeholder="Search SKU or product…" style="flex:1;min-width:180px;margin:0">
+    </div>
+    <div class="note" style="margin:2px 0 6px">Daily sales rate is averaged over the chosen window and drawn against the combined stock total. 🔴 = runs out inside 14 days · 🟠 = inside 30 days. Click a row for its depletion chart.</div>
+    <div style="overflow-x:auto"><table id="fcTable"><thead id="fcHead"></thead><tbody></tbody></table></div>
+    <div class="note" id="fcNote" style="margin-top:8px"></div>
+  </div>
+
   <!-- ShipBob (collapsible detail) -->
   <div class="card" style="margin-top:14px">
     <h2 style="cursor:pointer" onclick="toggleSrc('sb')"><span id="sbChev" style="display:inline-block;width:14px;color:var(--muted)">▶</span> <span class="src-badge" style="background:#059669">ShipBob</span>Inventory <span style="font-weight:400;color:var(--muted);font-size:12px">· US</span>
@@ -729,6 +750,18 @@ footer{color:rgba(16,17,20,.45)}
     <div style="display:flex;gap:8px;margin-top:12px">
       <button class="btn" onclick="saveFreight()">Save</button>
       <button class="btn" style="background:#fff;border:1px solid var(--line);box-shadow:none" onclick="closeFreight()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- FORECAST depletion chart -->
+<div id="fcModal" style="display:none;position:fixed;inset:0;z-index:70;background:rgba(16,17,20,.45);align-items:center;justify-content:center" onclick="if(event.target===this)document.getElementById('fcModal').style.display='none'">
+  <div class="card" style="width:min(620px,94vw);margin:0">
+    <h2 id="fcChartTitle" style="font-size:16px">Depletion forecast</h2>
+    <div id="fcChartSub" class="note" style="margin:-4px 0 10px"></div>
+    <canvas id="fcChart" height="240"></canvas>
+    <div style="display:flex;justify-content:flex-end;margin-top:12px">
+      <button class="btn" style="background:#fff;border:1px solid var(--line);box-shadow:none" onclick="document.getElementById('fcModal').style.display='none'">Close</button>
     </div>
   </div>
 </div>
@@ -1041,8 +1074,79 @@ async function syncAllFulfillment() {
   try { await Promise.allSettled([api('/api/shipbob/sync', {method:'POST', body:'{}'}), api('/api/floship/sync', {method:'POST', body:'{}'})]); }
   finally { b.disabled = false; b.textContent = '🔄 Sync all'; loadFulfillment(); }
 }
+// ---------- stock forecast ----------
+let fcRows = [], fcWindow = 14, fcHorizons = [7, 14, 30, 90];
+function fcFlag(cover) {
+  if (cover == null) return '';
+  if (cover <= 14) return '🔴';
+  if (cover <= 30) return '🟠';
+  return '';
+}
+function renderForecast() {
+  const q = (document.getElementById('fcSearch').value || '').toLowerCase();
+  const rows = fcRows.filter(r => (r.sku + ' ' + r.name).toLowerCase().includes(q));
+  document.getElementById('fcHead').innerHTML = `<tr>
+    <th>SKU / product</th>
+    <th style="text-align:right">In stock</th>
+    <th style="text-align:right">Sold (${fcWindow}d)</th>
+    <th style="text-align:right">Units/day</th>
+    <th style="text-align:right">Days left</th>
+    ${fcHorizons.map(h => `<th style="text-align:right">+${h}d</th>`).join('')}</tr>`;
+  const cell = v => `<td style="text-align:right">${v < 0 ? `<span style="color:var(--red)">${v.toLocaleString()}</span>` : v.toLocaleString()}</td>`;
+  document.querySelector('#fcTable tbody').innerHTML = rows.length ? rows.map(r => {
+    const flag = fcFlag(r.cover);
+    const cover = r.cover == null ? '<span style="color:var(--muted)">no sales</span>'
+      : `${flag ? flag + ' ' : ''}${r.cover.toLocaleString()}d`;
+    return `<tr style="cursor:pointer" onclick="openForecastChart('${esc(r.sku).replace(/'/g, "\\'")}')">
+      <td><b>${esc(r.sku)}</b>${r.name && r.name !== r.sku ? `<div style="font-size:12px;color:var(--muted)">${esc(r.name)}</div>` : ''}</td>
+      <td style="text-align:right">${r.stock.toLocaleString()}</td>
+      <td style="text-align:right">${r.sold.toLocaleString()}</td>
+      <td style="text-align:right">${r.rate.toLocaleString()}</td>
+      <td style="text-align:right;font-weight:600">${cover}</td>
+      ${fcHorizons.map(h => cell(r.proj[h])).join('')}</tr>`;
+  }).join('') : `<tr><td colspan="${5 + fcHorizons.length}" class="empty">No SKUs to forecast yet.</td></tr>`;
+}
+async function loadForecast() {
+  document.getElementById('fcUpdating').classList.add('on');
+  try {
+    const r = await api('/api/forecast?window=' + fcWindow);
+    fcRows = r.rows || []; fcHorizons = r.horizons || fcHorizons;
+    renderForecast();
+    const atRisk = fcRows.filter(x => x.cover != null && x.cover <= 30).length;
+    document.getElementById('fcNote').textContent = r.hasSales
+      ? `${fcRows.length} SKUs · ${atRisk} running low within 30 days`
+      : 'No Shopify sales cached yet — sync Shopify to enable the forecast.';
+  } catch (e) { document.getElementById('fcNote').textContent = '⚠️ ' + e.message; }
+  finally { document.getElementById('fcUpdating').classList.remove('on'); }
+}
+document.getElementById('fcSearch').oninput = renderForecast;
+document.querySelectorAll('#fcWindow button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#fcWindow button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active'); fcWindow = parseInt(b.dataset.w); loadForecast();
+});
+let fcChartObj = null;
+function openForecastChart(sku) {
+  const r = fcRows.find(x => x.sku === sku);
+  if (!r) return;
+  document.getElementById('fcChartTitle').textContent = r.sku + (r.name && r.name !== r.sku ? ' — ' + r.name : '');
+  const runsOut = r.cover != null ? `runs out in ~${r.cover} days at ${r.rate}/day` : 'no recent sales — not depleting';
+  document.getElementById('fcChartSub').textContent = `${r.stock.toLocaleString()} in stock · ${runsOut}`;
+  const maxDay = r.cover != null ? Math.min(120, Math.ceil(r.cover) + 10) : 90;
+  const labels = [], data = [];
+  for (let d = 0; d <= maxDay; d++) { labels.push(d + 'd'); data.push(Math.round(r.stock - r.rate * d)); }
+  document.getElementById('fcModal').style.display = 'flex';
+  if (fcChartObj) fcChartObj.destroy();
+  fcChartObj = new Chart(document.getElementById('fcChart'), {
+    type: 'line',
+    data: { labels, datasets: [{ label: 'Projected stock', data, borderColor: '#2563eb', backgroundColor: 'rgba(37,99,235,.08)',
+      fill: true, tension: .1, pointRadius: 0 }] },
+    options: { responsive: true, plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: false, grid: { color: 'rgba(16,17,20,.06)' } }, x: { grid: { display: false } } } }
+  });
+}
 async function loadFulfillment() {
   loadFulfillmentGrid();
+  loadForecast();
   const note = document.getElementById('sbNote');
   document.getElementById('fulSyncAllBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
   document.getElementById('fulImportBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
