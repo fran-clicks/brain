@@ -19,6 +19,8 @@ services:
         sync: false
       - key: RESET_CODE
         sync: false
+      - key: REPORT_TOKEN
+        sync: false
 
 databases:
   - name: clicks-brain-db

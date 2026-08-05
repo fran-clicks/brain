@@ -16,7 +16,8 @@ app.use(express.json({ limit: '8mb', verify: (req, _res, buf) => { req.rawBody =
 // ---------- session auth (per-user login) ----------
 // Exempt: Slack (signs its own requests), health checks, the login page and auth endpoints.
 const AUTH_EXEMPT = (p) =>
-  p.startsWith('/api/slack/') || p === '/api/health' || p === '/login.html' || p.startsWith('/api/auth/');
+  p.startsWith('/api/slack/') || p === '/api/health' || p === '/login.html' || p.startsWith('/api/auth/')
+  || p === '/api/report/daily'; // does its own token check so an external cron can trigger it
 
 const sessionSign = (s) => crypto.createHmac('sha256', KEY).update('session:' + s).digest('base64url');
 const makeSession = (email) => {
@@ -39,9 +40,10 @@ const setSessionCookie = (res, email) =>
   res.set('Set-Cookie', `cb_session=${makeSession(email)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${7 * 86400}`);
 
 app.use((req, res, next) => {
-  if (AUTH_EXEMPT(req.path)) return next();
   const email = readSession(req);
-  if (email) { req.userEmail = email; return next(); }
+  if (email) req.userEmail = email; // populate identity even on exempt paths (e.g. admin hitting the report endpoint)
+  if (AUTH_EXEMPT(req.path)) return next();
+  if (email) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'not signed in' });
   res.redirect('/login.html');
 });
@@ -2118,8 +2120,7 @@ app.get('/api/fulfillment/grid', async (_req, res) => {
 
 // stock forecast: current Global Inventory total per SKU, drawn down by recent Shopify sales velocity.
 // projected stock at 7/14/30/90 days = current − (avg daily units sold over the chosen window × horizon)
-app.get('/api/forecast', async (req, res) => {
-  const win = Math.max(1, Math.min(parseInt(req.query.window) || 14, 90));
+async function forecastRows(win) {
   const [sb, fl, man, sales] = await Promise.all([
     pool.query(`SELECT sku, name, fulfillable FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request')`),
     pool.query(`SELECT sku, description, qty FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request')`),
@@ -2158,7 +2159,11 @@ app.get('/api/forecast', async (req, res) => {
   // soonest stockout first; SKUs with no sales (no depletion) sink to the bottom
   rows.sort((a, b) => (a.cover == null ? Infinity : a.cover) - (b.cover == null ? Infinity : b.cover)
     || b.sold - a.sold || a.sku.localeCompare(b.sku));
-  res.json({ window: win, horizons, rows, hasSales: sales.rows.length > 0 });
+  return { window: win, horizons, rows, hasSales: sales.rows.length > 0 };
+}
+app.get('/api/forecast', async (req, res) => {
+  const win = Math.max(1, Math.min(parseInt(req.query.window) || 14, 90));
+  res.json(await forecastRows(win));
 });
 
 // import a spreadsheet (CSV): rows = products, columns = inventory sources. ShipBob/Floship columns are ignored (API is source of truth).
@@ -3274,6 +3279,120 @@ async function notifyFreight(action, sh, extra) {
     await slackPost(conn.config.bot_token, channel, fallback, undefined, blocks);
   } catch (e) { console.error('freight slack notify failed:', e.message); }
 }
+
+// ---------- daily report (Slack, 18:00 Europe/London) ----------
+const REPORT_TZ = 'Europe/London';
+function londonNow() {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: REPORT_TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+    .formatToParts(new Date()).map(x => [x.type, x.value]));
+  return { date: `${p.year}-${p.month}-${p.day}`, hour: parseInt(p.hour), minute: parseInt(p.minute) };
+}
+async function refreshForReport() {
+  const jobs = [];
+  try { if (await getConnector('shopify')) jobs.push(syncShopify(8)); } catch {}
+  try { if (await getGorgiasConfig()) jobs.push(refreshOpenTickets()); } catch {}
+  try { if (await getConnector('redo')) jobs.push(syncRedo(6)); } catch {}
+  try { if (await getConnector('klaviyo')) jobs.push(syncKlaviyo()); } catch {}
+  await Promise.allSettled(jobs);
+}
+async function buildDailyReport() {
+  await refreshForReport();
+  const sym = c => c === 'GBP' ? '£' : c === 'EUR' ? '€' : c === 'USD' ? '$' : '';
+  const money = (n, c) => `${sym(c)}${Math.round(n || 0).toLocaleString()}`;
+  const delta = (a, b) => b > 0 ? `${a >= b ? '▲' : '▼'}${Math.round(Math.abs(a - b) / b * 100)}%` : (a > 0 ? '▲ new' : '–');
+  const DAY = `(created_at AT TIME ZONE 'Europe/London')::date`, TODAY = `(now() AT TIME ZONE 'Europe/London')::date`;
+
+  const s = (await pool.query(`
+    SELECT count(*) FILTER (WHERE d=t) o0, count(*) FILTER (WHERE d=t-1) o1, count(*) FILTER (WHERE d=t-7) o7,
+      coalesce(sum(total_price) FILTER (WHERE d=t),0)::numeric r0,
+      coalesce(sum(total_price) FILTER (WHERE d=t-1),0)::numeric r1,
+      coalesce(sum(total_price) FILTER (WHERE d=t-7),0)::numeric r7, max(currency) cur
+    FROM (SELECT total_price, currency, ${DAY} d, ${TODAY} t FROM orders_cache
+          WHERE cancelled_at IS NULL AND created_at >= now() - interval '9 days') x`)).rows[0] || {};
+  const units0 = (await pool.query(`SELECT coalesce(sum((it->>'qty')::int),0)::int u
+    FROM orders_cache, LATERAL jsonb_array_elements(items) it
+    WHERE cancelled_at IS NULL AND ${DAY} = ${TODAY}`)).rows[0]?.u || 0;
+  const fdt = (await pool.query(`SELECT count(*)::int c FROM orders_cache
+    WHERE (fulfilled_at AT TIME ZONE 'Europe/London')::date = ${TODAY}`)).rows[0]?.c || 0;
+  const cur = s.cur || 'USD';
+
+  const g = (await pool.query(`SELECT
+      count(*) FILTER (WHERE (created_datetime AT TIME ZONE 'Europe/London')::date = ${TODAY} AND coalesce(spam,false)=false) new_today,
+      count(*) FILTER (WHERE status='open') open_now,
+      count(*) FILTER (WHERE status='open' AND messages_count>=10) difficult
+    FROM tickets_cache`)).rows[0] || {};
+  const ret = (await pool.query(`SELECT
+      count(*) FILTER (WHERE ${DAY} = ${TODAY}) today,
+      count(*) FILTER (WHERE created_at >= now()-interval '7 days') last7 FROM returns_cache`)).rows[0] || {};
+  const kv = (await pool.query(`SELECT count(*) sent, coalesce(sum(revenue),0)::numeric rev FROM campaigns_cache
+    WHERE (send_time AT TIME ZONE 'Europe/London')::date = ${TODAY}`)).rows[0] || {};
+
+  const fc = await forecastRows(14);
+  const risk14 = fc.rows.filter(r => r.cover != null && r.cover <= 14);
+  const risk30 = fc.rows.filter(r => r.cover != null && r.cover > 14 && r.cover <= 30);
+  const zero = fc.rows.filter(r => r.stock <= 0);
+  const topRisk = risk14.slice(0, 5).map(r => `• *${slackEsc(r.sku)}* — ${r.stock} left, ~${r.cover}d (${r.rate}/day)`).join('\n') || '_none in the next 14 days_';
+
+  const fr = (await pool.query(`SELECT name, to_char(eta,'DD Mon') eta,
+      (eta < ${TODAY}) overdue, (eta BETWEEN ${TODAY} AND ${TODAY} + 7) soon,
+      (jsonb_array_length(coalesce(stages,'[]'::jsonb)) > 0 AND step >= jsonb_array_length(coalesce(stages,'[]'::jsonb))) done
+    FROM freight_shipments WHERE eta IS NOT NULL`)).rows;
+  const frSoon = fr.filter(x => x.soon && !x.done), frOverdue = fr.filter(x => x.overdue && !x.done);
+  const freightLine = [
+    frSoon.length ? `📦 Arriving ≤7d: ${frSoon.map(x => `${slackEsc(x.name)} (${x.eta})`).join(', ')}` : '',
+    frOverdue.length ? `⚠️ Overdue: ${frOverdue.map(x => `${slackEsc(x.name)} (${x.eta})`).join(', ')}` : ''
+  ].filter(Boolean).join('\n') || '_no shipments arriving in the next 7 days_';
+
+  const today = new Date().toLocaleDateString('en-GB', { timeZone: REPORT_TZ, weekday: 'long', day: 'numeric', month: 'long' });
+  const appUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || 'https://clicks-brain.onrender.com').replace(/\/$/, '');
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: `📊 Daily report — ${today}`, emoji: true } },
+    { type: 'section', fields: [
+      { type: 'mrkdwn', text: `*🛒 Orders today*\n${s.o0 || 0}  _(${delta(+s.o0, +s.o1)} vs yday · ${delta(+s.o0, +s.o7)} vs last wk)_` },
+      { type: 'mrkdwn', text: `*💷 Revenue today*\n${money(+s.r0, cur)}  _(${delta(+s.r0, +s.r7)} vs last wk)_` },
+      { type: 'mrkdwn', text: `*📦 Units today*\n${units0.toLocaleString()}` },
+      { type: 'mrkdwn', text: `*✅ Fulfilled today*\n${fdt.toLocaleString()}` }
+    ] },
+    { type: 'section', fields: [
+      { type: 'mrkdwn', text: `*🎧 New tickets*\n${g.new_today || 0}` },
+      { type: 'mrkdwn', text: `*📨 Open now*\n${g.open_now || 0}  _(${g.difficult || 0} difficult)_` },
+      { type: 'mrkdwn', text: `*↩️ Returns today*\n${ret.today || 0}  _(7d: ${ret.last7 || 0})_` },
+      { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
+    ] },
+    { type: 'section', text: { type: 'mrkdwn', text: `*📉 Stock low (≤14d): ${risk14.length}*  ·  ≤30d: ${risk30.length}  ·  out of stock: ${zero.length}\n${topRisk}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*🚢 Freight*\n${freightLine}` } },
+    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '📊 Open dashboard', emoji: true }, url: appUrl + '/' }] },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: `Data refreshed just before posting · ${new Date().toLocaleString('en-GB', { timeZone: REPORT_TZ })}` }] }
+  ];
+  const fallback = `Daily report ${today}: ${s.o0 || 0} orders, ${money(+s.r0, cur)}, ${g.open_now || 0} open tickets, ${risk14.length} SKUs low on stock.`;
+  return { blocks, fallback };
+}
+async function postDailyReport() {
+  const conn = await getConnector('slack');
+  if (!conn?.config?.bot_token) throw new Error('Slack bot not connected');
+  const channel = (conn.config.alert_channel || '#clicksbrain').trim();
+  const { blocks, fallback } = await buildDailyReport();
+  await slackPost(conn.config.bot_token, channel, fallback, undefined, blocks);
+}
+app.post('/api/report/daily', async (req, res) => {
+  const token = req.query.token || req.body?.token;
+  const ok = (process.env.REPORT_TOKEN && token === process.env.REPORT_TOKEN) || (await isAdminReq(req));
+  if (!ok) return res.status(403).json({ error: 'forbidden' });
+  try { await postDailyReport(); res.json({ ok: true }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+// in-app scheduler: post once when the Europe/London clock reaches 18:00 (reliable on an always-on plan)
+let lastReportDay = null;
+setInterval(async () => {
+  try {
+    const { date, hour, minute } = londonNow();
+    if (hour === 18 && minute < 5 && lastReportDay !== date) {
+      lastReportDay = date;
+      if (await getConnector('slack')) await postDailyReport();
+    }
+  } catch (e) { console.error('daily report scheduler:', e.message); }
+}, 60 * 1000);
 
 const seenSlackEvents = new Set();
 app.post('/api/slack/events', async (req, res) => {
