@@ -153,7 +153,7 @@ footer{color:rgba(16,17,20,.45)}
 .updating-pill .spin{width:16px;height:16px;border-width:3px}
 .src-badge{display:inline-block;color:#fff;font-size:11px;font-weight:700;padding:2px 9px;border-radius:6px;margin-right:8px;vertical-align:middle;letter-spacing:.02em}
 .stepper{display:flex;align-items:flex-start;margin:12px 0 6px;overflow-x:auto;padding-bottom:4px}
-.fstep{position:relative;flex:1 0 96px;text-align:center;font-size:11px;color:var(--muted);line-height:1.3}
+.fstep{position:relative;flex:1 0 100px;text-align:center;font-size:12px;font-weight:500;color:var(--muted);line-height:1.35}
 .fstep .dot{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 6px;font-weight:700;font-size:12px;border:2px solid #d1d5db;background:#fff;color:#9ca3af;position:relative;z-index:1}
 .fstep::before,.fstep::after{content:"";position:absolute;top:12px;height:3px;background:#d1d5db}
 .fstep::before{left:0;width:50%}.fstep::after{right:0;width:50%}
@@ -649,8 +649,11 @@ footer{color:rgba(16,17,20,.45)}
 <!-- FREIGHT TRACKER (manual bulk shipments factory → warehouse) -->
 <div class="section" id="s-freight">
   <div class="synchead">
-    <div style="color:var(--muted);font-size:12px">Track bulk shipments factory → warehouse. <span class="updating-pill" id="frUpdating"><div class="spin"></div>Updating…</span></div>
-    <button class="btn" id="frAddBtn" onclick="openFreight()" style="display:none;margin:0;padding:6px 14px">＋ Add shipment</button>
+    <div>
+      <div style="font-size:22px;font-weight:800;letter-spacing:-.01em">🚢 Freight Tracker</div>
+      <div style="color:var(--muted);font-size:13px;margin-top:2px">Follow bulk shipments from the factory to the warehouse — each shipment shows where it is right now. <span class="updating-pill" id="frUpdating"><div class="spin"></div>Updating…</span></div>
+    </div>
+    <button class="btn" id="frAddBtn" onclick="openFreight()" style="display:none;margin:0;padding:8px 16px;font-size:14px">＋ Add shipment</button>
   </div>
   <div class="grid kpis" id="frKpis"></div>
   <input class="search" id="frSearch" placeholder="Search name, country, SKU…" style="margin-top:14px">
@@ -1136,32 +1139,45 @@ function renderFreight() {
     const done = s.step >= (s.stages || []).length && (s.stages || []).length > 0;
     const late = s.eta && !done && new Date(s.eta + 'T00:00:00') < new Date();
     const route = `${frFlag(s.from_country)} ${esc(s.from_country || '?')} → ${frFlag(s.to_country)} ${esc(s.to_country || '?')}`;
+    const lbl = t => `<span style="font-size:12px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--muted)">${t}</span>`;
     const items = (s.items || []).length
-      ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">` + s.items.map(i =>
-          `<span style="font-size:12px;background:#f3f4f6;border:1px solid var(--line);border-radius:6px;padding:2px 8px"><b>${esc(i.sku)}</b> ×${(i.qty||0).toLocaleString()}</span>`).join('') + `</div>`
+      ? `<div style="margin-top:12px">${lbl('Contents')}<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px">` + s.items.map(i =>
+          `<span style="font-size:13px;background:#f3f4f6;border:1px solid var(--line);border-radius:7px;padding:3px 10px"><b>${esc(i.sku)}</b> &nbsp;×${(i.qty||0).toLocaleString()}</span>`).join('') + `</div></div>`
       : '';
     const docs = (s.docs || []).length
-      ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">` + s.docs.map(d =>
-          `<a href="/api/freight/doc/${d.id}" target="_blank" style="font-size:12px;text-decoration:none;background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;border-radius:6px;padding:2px 8px">📎 ${esc(d.label)}</a>`).join('') + `</div>`
+      ? `<div style="margin-top:12px">${lbl('Documents')}<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:5px">` + s.docs.map(d =>
+          `<a href="/api/freight/doc/${d.id}" target="_blank" style="font-size:13px;font-weight:600;text-decoration:none;background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;border-radius:7px;padding:3px 10px">📎 ${esc(d.label)}</a>`).join('') + `</div></div>`
       : '';
-    const actions = admin ? `<div style="display:flex;gap:4px">
-      <button class="btn" style="margin:0;padding:3px 10px;font-size:13px" onclick="editFreight(${s.id})">✎ Edit</button>
-      ${done ? '' : `<button class="btn" style="margin:0;padding:3px 10px;font-size:13px;background:#059669;border-color:#059669;color:#fff" onclick="completeFreight(${s.id})">✓ Complete</button>`}
-      <button class="btn" style="margin:0;padding:3px 10px;font-size:13px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="deleteFreight(${s.id})">✕</button></div>` : '';
-    return `<div class="card" style="margin-top:14px">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
-        <div>
-          <div style="font-weight:800;font-size:15px">${esc(s.name || 'Untitled shipment')}</div>
-          <div style="font-size:13px;color:var(--muted);margin-top:2px">${route}${s.carrier ? ' · ' + esc(s.carrier) : ''}</div>
-          <div style="font-size:12px;color:${late ? 'var(--red)' : 'var(--muted)'};margin-top:2px">ETA ${eta}${late ? ' ⚠️ overdue' : ''}${done ? ' · ✅ delivered' : ''}</div>
+    const status = done
+      ? `<span style="font-size:12px;font-weight:700;padding:3px 11px;border-radius:999px;background:#ecfdf5;color:#059669;border:1px solid #a7f3d0">✅ Delivered</span>`
+      : late
+        ? `<span style="font-size:12px;font-weight:700;padding:3px 11px;border-radius:999px;background:#fef2f2;color:var(--red);border:1px solid #fecaca">⚠️ Overdue</span>`
+        : `<span style="font-size:12px;font-weight:700;padding:3px 11px;border-radius:999px;background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">🚚 In transit</span>`;
+    const actions = admin ? `<div style="display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn" style="margin:0;padding:5px 12px;font-size:13px" onclick="editFreight(${s.id})">✎ Edit</button>
+      ${done ? '' : `<button class="btn" style="margin:0;padding:5px 12px;font-size:13px;background:#059669;border-color:#059669;color:#fff" onclick="completeFreight(${s.id})">✓ Complete</button>`}
+      <button class="btn" style="margin:0;padding:5px 12px;font-size:13px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="deleteFreight(${s.id})">✕</button></div>` : '';
+    return `<div class="card" style="margin-top:16px;padding:20px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">
+        <div style="min-width:0">
+          <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+            <span style="font-size:22px;line-height:1">🚢</span>
+            <span style="font-weight:800;font-size:19px;letter-spacing:-.01em">${esc(s.name || 'Untitled shipment')}</span>
+            ${status}
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:18px;margin-top:10px">
+            <div>${lbl('Route')}<div style="font-size:15px;font-weight:600;margin-top:2px">${route}</div></div>
+            ${s.carrier ? `<div>${lbl('Carrier')}<div style="font-size:15px;font-weight:600;margin-top:2px">${esc(s.carrier)}</div></div>` : ''}
+            <div>${lbl('ETA')}<div style="font-size:15px;font-weight:600;margin-top:2px;color:${late ? 'var(--red)' : 'var(--ink)'}">${eta}</div></div>
+          </div>
         </div>
         ${actions}
       </div>
       ${stepperHtml(s, admin)}
       ${items}${docs}
-      ${s.notes ? `<div class="note" style="margin-top:8px">${esc(s.notes)}</div>` : ''}
+      ${s.notes ? `<div style="margin-top:12px">${lbl('Notes')}<div style="font-size:14px;line-height:1.5;margin-top:3px">${esc(s.notes)}</div></div>` : ''}
     </div>`;
-  }).join('') : `<div class="card" style="margin-top:14px"><div class="empty">${admin ? 'No shipments yet — click ＋ Add shipment.' : 'No shipments tracked yet.'}</div></div>`;
+  }).join('') : `<div class="card" style="margin-top:16px"><div class="empty">${admin ? 'No shipments yet — click ＋ Add shipment.' : 'No shipments tracked yet.'}</div></div>`;
 }
 async function loadFreight() {
   document.getElementById('frAddBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
