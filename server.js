@@ -1970,6 +1970,7 @@ app.get('/api/freight', async (_req, res) => {
 app.post('/api/freight', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const b = req.body || {};
+  const notify = b.notify !== false; // default on; frontend can opt out to avoid Slack spam on repeated edits
   const eta = b.eta ? String(b.eta).slice(0, 10) : null;
   const items = Array.isArray(b.items) ? b.items.map(i => ({ sku: String(i.sku || '').slice(0, 60), qty: parseInt(i.qty) || 0 })).filter(i => i.sku) : [];
   const stages = Array.isArray(b.stages) ? b.stages.map(s => String(s).slice(0, 80)).filter(Boolean) : [];
@@ -1983,7 +1984,7 @@ app.post('/api/freight', async (req, res) => {
          items=$7, stages=$8, step=$9, updated_at=now() WHERE id=$10 RETURNING id`, [...f, parseInt(b.id)]);
     if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
     res.json({ ok: true, id: r.rows[0].id });
-    notifyFreight('edited', { name: b.name, from_country: b.from_country, to_country: b.to_country,
+    if (notify) notifyFreight('edited', { name: b.name, from_country: b.from_country, to_country: b.to_country,
       carrier: b.carrier, eta, notes: b.notes, items, stages });
     return;
   }
@@ -1991,7 +1992,7 @@ app.post('/api/freight', async (req, res) => {
     `INSERT INTO freight_shipments (name, from_country, to_country, carrier, eta, notes, items, stages, step, created_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [...f, readSession(req) || '']);
   res.json({ ok: true, id: r.rows[0].id });
-  notifyFreight('created', { name: b.name, from_country: b.from_country, to_country: b.to_country,
+  if (notify) notifyFreight('created', { name: b.name, from_country: b.from_country, to_country: b.to_country,
     carrier: b.carrier, eta, notes: b.notes, items, stages }); // best-effort Slack post, after responding
 });
 // quick stage advance (click a step on the progress bar)
@@ -2012,7 +2013,7 @@ app.post('/api/freight/complete', async (req, res) => {
   const n = (Array.isArray(row.stages) ? row.stages.length : 0) + 1; // step past the last stage = all done
   await pool.query(`UPDATE freight_shipments SET step=$2, updated_at=now() WHERE id=$1`, [id, n]);
   res.json({ ok: true });
-  notifyFreight('completed', row);
+  if (req.body?.notify !== false) notifyFreight('completed', row);
 });
 app.post('/api/freight/delete', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });

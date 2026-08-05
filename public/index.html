@@ -718,6 +718,10 @@ footer{color:rgba(16,17,20,.45)}
     </div>
 
     <label style="margin-top:14px">Notes</label><textarea id="frNotes" rows="2" placeholder="Anything the team should know"></textarea>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:14px;font-size:13px;color:var(--ink);font-weight:500;cursor:pointer">
+      <input type="checkbox" id="frNotify" checked style="width:auto;margin:0"> 📣 Post this update to the Slack channel
+    </label>
+    <div class="note" style="margin-top:3px">Untick if you're making several quick edits and don't want to notify the team each time.</div>
     <div class="err" id="frErr"></div>
     <div style="display:flex;gap:8px;margin-top:12px">
       <button class="btn" onclick="saveFreight()">Save</button>
@@ -1260,6 +1264,7 @@ function openFreight(sh) {
   if (items.length) items.forEach(i => frAddItem(i.sku, i.qty)); else frAddItem();
   frStageDraft = (sh?.stages && sh.stages.length) ? [...sh.stages] : [...frDefaultStages];
   frRenderStages();
+  el('frNotify').checked = true;
   ['frDocPacking','frDocInvoice','frDocEntry','frDocOther'].forEach(id => el(id).value = '');
   el('frDocs').innerHTML = sh && (sh.docs || []).length
     ? 'Existing: ' + sh.docs.map(d => `<a href="/api/freight/doc/${d.id}" target="_blank">${esc(d.label)}</a>`).join(', ')
@@ -1290,7 +1295,7 @@ async function saveFreight() {
       id: el('frId').value || undefined, name: el('frName').value.trim(),
       from_country: el('frFrom').value.trim(), to_country: el('frTo').value.trim(),
       carrier: el('frCarrier').value.trim(), eta: el('frEta').value, notes: el('frNotes').value.trim(),
-      items, stages: frStageDraft, step: prevStep })});
+      items, stages: frStageDraft, step: prevStep, notify: el('frNotify').checked })});
     const sid = r.id;
     const uploads = [['Packing list','frDocPacking'],['Invoice','frDocInvoice'],['Entry document','frDocEntry'],['Other','frDocOther']];
     for (const [label, inputId] of uploads) {
@@ -1304,8 +1309,9 @@ async function saveFreight() {
   } catch (e) { el('frErr').textContent = e.message; }
 }
 async function completeFreight(id) {
-  if (!confirm('Mark this shipment as completed? This fills all stages and posts to Slack.')) return;
-  try { await api('/api/freight/complete', {method:'POST', body: JSON.stringify({ id })}); loadFreight(); }
+  if (!confirm('Mark this shipment as completed? This fills all stages.')) return;
+  const notify = confirm('Post the completion to the Slack channel?\n\nOK = notify the team   ·   Cancel = complete quietly');
+  try { await api('/api/freight/complete', {method:'POST', body: JSON.stringify({ id, notify })}); loadFreight(); }
   catch (e) { document.getElementById('frNote').textContent = '⚠️ ' + e.message; }
 }
 async function deleteFreight(id) {
