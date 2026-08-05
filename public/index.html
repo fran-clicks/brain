@@ -583,9 +583,9 @@ footer{color:rgba(16,17,20,.45)}
 <!-- FULFILLMENT (3PL: ShipBob, Floship, …) -->
 <div class="section" id="s-fulfillment">
   <div class="synchead">
-    <div style="color:var(--muted);font-size:12px">Each column is a source. <span class="src-badge" style="background:#059669">ShipBob</span><span class="src-badge" style="background:#2563eb">Floship</span> are live from API; other columns come from imported sheets.</div>
+    <div></div>
     <div class="right">
-      <button class="btn" onclick="loadFulfillment()" style="margin:0 6px 0 0;padding:6px 14px;background:#fff;border:1px solid var(--line);box-shadow:none">↻ Refresh</button>
+      <button class="btn" onclick="loadFulfillment()" style="margin:0 6px 0 0;padding:6px 14px">↻ Refresh</button>
       <button class="btn" id="fulImportBtn" onclick="openImport()" style="display:none;margin:0 6px 0 0;padding:6px 14px;background:#fff;border:1px solid var(--line);box-shadow:none">📥 Import sheet</button>
       <button class="btn" id="fulSyncAllBtn" onclick="syncAllFulfillment()" style="display:none;margin:0;padding:6px 14px">🔄 Sync all</button>
     </div>
@@ -629,7 +629,6 @@ footer{color:rgba(16,17,20,.45)}
       <span class="updating-pill" id="sbUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
       <span id="sbAdminBar" style="display:none;float:right" onclick="event.stopPropagation()">
         <button class="btn" style="margin:0 0 0 6px;padding:5px 12px" onclick="sbSync()">🔄 Sync now</button>
-        <button class="btn" style="margin:0 0 0 6px;padding:5px 12px;background:#fff;border:1px solid var(--line);box-shadow:none" onclick="sbDebug()">🧪 Test API</button>
       </span>
     </h2>
     <div id="sbBody" style="display:none">
@@ -647,7 +646,6 @@ footer{color:rgba(16,17,20,.45)}
       <span class="updating-pill" id="flUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
       <span id="flAdminBar" style="display:none;float:right" onclick="event.stopPropagation()">
         <button class="btn" style="margin:0 0 0 6px;padding:5px 12px" onclick="flSync()">🔄 Sync now</button>
-        <button class="btn" style="margin:0 0 0 6px;padding:5px 12px;background:#fff;border:1px solid var(--line);box-shadow:none" onclick="flDebug()">🧪 Test API</button>
       </span>
     </h2>
     <div id="flBody" style="display:none">
@@ -1109,6 +1107,8 @@ function renderForecast() {
 }
 async function loadForecast() {
   document.getElementById('fcUpdating').classList.add('on');
+  document.getElementById('fcNote').textContent = 'Loading…';
+  document.getElementById('fcTable').style.opacity = '.4';
   try {
     const r = await api('/api/forecast?window=' + fcWindow);
     fcRows = r.rows || []; fcHorizons = r.horizons || fcHorizons;
@@ -1118,7 +1118,7 @@ async function loadForecast() {
       ? `${fcRows.length} SKUs · ${atRisk} running low within 30 days`
       : 'No Shopify sales cached yet — sync Shopify to enable the forecast.';
   } catch (e) { document.getElementById('fcNote').textContent = '⚠️ ' + e.message; }
-  finally { document.getElementById('fcUpdating').classList.remove('on'); }
+  finally { document.getElementById('fcUpdating').classList.remove('on'); document.getElementById('fcTable').style.opacity = '1'; }
 }
 document.getElementById('fcSearch').oninput = renderForecast;
 document.querySelectorAll('#fcWindow button').forEach(b => b.onclick = () => {
