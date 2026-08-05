@@ -3203,7 +3203,7 @@ async function notifyFreight(action, sh, extra) {
       const list = (sh.stages || []);
       const step = action === 'completed' ? list.length + 1 : (parseInt(sh.step) || 0);
       const stageList = list.length
-        ? list.map((s, i) => (i + 1 === step) ? `*${slackEsc(s)}*` : slackEsc(s)).join('  →  ')
+        ? list.map((s, i) => (i + 1 === step) ? `📍*${slackEsc(s)}*` : slackEsc(s)).join('  →  ')
         : 'none set';
       blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `All stages: ${stageList}` }] });
     }
