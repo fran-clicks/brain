@@ -371,7 +371,8 @@ const CONNECTOR_TYPES = {
     label: 'Slack bot (@clicksbot)',
     fields: [
       { key: 'bot_token', label: 'Bot User OAuth Token, starts with xoxb- (api.slack.com/apps → your app → OAuth & Permissions)', secret: true },
-      { key: 'signing_secret', label: 'Signing Secret (api.slack.com/apps → your app → Basic Information)', secret: true }
+      { key: 'signing_secret', label: 'Signing Secret (api.slack.com/apps → your app → Basic Information)', secret: true },
+      { key: 'alert_channel', label: 'Alerts channel for freight/updates, e.g. #clicksbrain (invite @clicksbot to it first)', secret: false, optional: true }
     ]
   },
   redo: {
@@ -1987,6 +1988,8 @@ app.post('/api/freight', async (req, res) => {
     `INSERT INTO freight_shipments (name, from_country, to_country, carrier, eta, notes, items, stages, step, created_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [...f, readSession(req) || '']);
   res.json({ ok: true, id: r.rows[0].id });
+  notifyFreightCreated({ name: b.name, from_country: b.from_country, to_country: b.to_country,
+    carrier: b.carrier, eta, notes: b.notes, items, stages }); // best-effort Slack post, after responding
 });
 // quick stage advance (click a step on the progress bar)
 app.post('/api/freight/step', async (req, res) => {
@@ -3118,6 +3121,27 @@ async function slackPost(token, channel, text, thread_ts) {
     body: JSON.stringify({ channel, text, thread_ts })
   })).json();
   if (!r.ok) console.error('slack post failed:', r.error);
+}
+// post a freight shipment summary to the configured alerts channel (best-effort, never blocks the request)
+async function notifyFreightCreated(sh) {
+  try {
+    const conn = await getConnector('slack');
+    if (!conn?.config?.bot_token) return;
+    const channel = (conn.config.alert_channel || '#clicksbrain').trim();
+    const items = (sh.items || []).map(i => `${i.sku} ×${i.qty}`).join(', ') || '—';
+    const stages = (sh.stages || []).length ? (sh.stages || []).join(' → ') : 'none set';
+    const eta = sh.eta ? new Date(sh.eta + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
+    const lines = [
+      `🚢 *New freight shipment created*`,
+      `*${sh.name || 'Untitled shipment'}*`,
+      `Route: ${sh.from_country || '?'} → ${sh.to_country || '?'}${sh.carrier ? ` · ${sh.carrier}` : ''}`,
+      `ETA: ${eta}`,
+      `Contents: ${items}`,
+      `Stages: ${stages}`,
+      sh.notes ? `Notes: ${sh.notes}` : ''
+    ].filter(Boolean);
+    await slackPost(conn.config.bot_token, channel, lines.join('\n'));
+  } catch (e) { console.error('freight slack notify failed:', e.message); }
 }
 
 const seenSlackEvents = new Set();
