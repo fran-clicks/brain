@@ -3206,7 +3206,6 @@ async function notifyFreight(action, sh, extra) {
     if (action !== 'deleted') blocks.push({ type: 'actions', elements: [
       { type: 'button', text: { type: 'plain_text', text: '🚢 Open Freight Tracker', emoji: true }, url: `${appUrl}/#freight` }
     ] });
-    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `<${appUrl}/#freight|View in Clicks Brain>` }] });
     blocks.push({ type: 'divider' });
 
     // plain-text fallback (shown in notifications / clients that don't render blocks)
