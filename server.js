@@ -1995,20 +1995,23 @@ app.post('/api/freight', async (req, res) => {
   if (notify) notifyFreight('created', { name: b.name, from_country: b.from_country, to_country: b.to_country,
     carrier: b.carrier, eta, notes: b.notes, items, stages, step }); // best-effort Slack post, after responding
 });
-// quick stage advance (click a step on the progress bar) — posts a "moved from X → Y" Slack update
+// quick stage advance (click a step on the progress bar) — does NOT post to Slack (use the Post button for that)
 app.post('/api/freight/step', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
-  const id = parseInt(req.body?.id);
-  const newStep = Math.max(0, parseInt(req.body?.step) || 0);
-  const row = (await pool.query(
-    `SELECT name, from_country, to_country, carrier, to_char(eta,'YYYY-MM-DD') eta, notes, items, stages, step FROM freight_shipments WHERE id=$1`, [id])).rows[0];
-  if (!row) return res.status(404).json({ error: 'shipment not found' });
-  await pool.query(`UPDATE freight_shipments SET step=$2, updated_at=now() WHERE id=$1`, [id, newStep]);
+  const r = await pool.query(`UPDATE freight_shipments SET step=$2, updated_at=now() WHERE id=$1 RETURNING id`,
+    [parseInt(req.body?.id), Math.max(0, parseInt(req.body?.step) || 0)]);
+  if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
   res.json({ ok: true });
-  const fromStage = freightCurrentStage(row);
-  const toStage = freightCurrentStage({ ...row, step: newStep });
-  if (req.body?.notify !== false && fromStage !== toStage)
-    notifyFreight('stage', { ...row, step: newStep }, { fromStage, toStage });
+});
+// manual "Post to Slack" button — announces the shipment's current stage/status
+app.post('/api/freight/announce', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const row = (await pool.query(
+    `SELECT name, from_country, to_country, carrier, to_char(eta,'YYYY-MM-DD') eta, notes, items, stages, step FROM freight_shipments WHERE id=$1`,
+    [parseInt(req.body?.id)])).rows[0];
+  if (!row) return res.status(404).json({ error: 'shipment not found' });
+  res.json({ ok: true });
+  notifyFreight('update', row);
 });
 // mark a shipment complete (all stages done) — posts a Slack "completed" alert
 app.post('/api/freight/complete', async (req, res) => {
@@ -3155,7 +3158,8 @@ const FREIGHT_HEADERS = {
   edited: '✏️ Freight shipment updated',
   deleted: '🗑️ Freight shipment deleted',
   completed: '✅ Freight shipment completed',
-  stage: '🔄 Freight stage updated'
+  stage: '🔄 Freight stage updated',
+  update: '📣 Freight status update'
 };
 // name of the stage a shipment is currently sitting on, based on its step counter
 function freightCurrentStage(sh) {

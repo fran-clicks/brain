@@ -1159,6 +1159,7 @@ function renderFreight() {
         : `<span style="font-size:12px;font-weight:700;padding:3px 11px;border-radius:999px;background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe">🚚 In transit</span>`;
     const actions = admin ? `<div style="display:flex;gap:6px;flex-wrap:wrap">
       <button class="btn" style="margin:0;padding:5px 12px;font-size:13px" onclick="editFreight(${s.id})">✎ Edit</button>
+      <button class="btn" style="margin:0;padding:5px 12px;font-size:13px;background:#fff;color:#2563eb;border:1px solid #bfdbfe;box-shadow:none" onclick="postFreight(${s.id})">📣 Post to Slack</button>
       ${done ? '' : `<button class="btn" style="margin:0;padding:5px 12px;font-size:13px;background:#059669;border-color:#059669;color:#fff" onclick="completeFreight(${s.id})">✓ Complete</button>`}
       <button class="btn" style="margin:0;padding:5px 12px;font-size:13px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="deleteFreight(${s.id})">✕</button></div>` : '';
     return `<div class="card" style="margin-top:16px;padding:20px">
@@ -1307,6 +1308,11 @@ async function saveFreight() {
     }
     closeFreight(); loadFreight();
   } catch (e) { el('frErr').textContent = e.message; }
+}
+async function postFreight(id) {
+  try { await api('/api/freight/announce', {method:'POST', body: JSON.stringify({ id })});
+    document.getElementById('frNote').textContent = '📣 Posted the current status to Slack.'; }
+  catch (e) { document.getElementById('frNote').textContent = '⚠️ ' + e.message; }
 }
 async function completeFreight(id) {
   if (!confirm('Mark this shipment as completed? This fills all stages.')) return;
