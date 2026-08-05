@@ -3331,7 +3331,7 @@ async function buildDailyReport() {
   // 90-day forecast: only SKUs projected to fall below 0 within the next 90 days (soonest first)
   const fc = await forecastRows(90);
   const belowZero = fc.rows.filter(r => r.proj[90] < 0);
-  const fcList = belowZero.slice(0, 10).map(r => `• *${slackEsc(r.sku)}*${r.name && r.name !== r.sku ? ` ${slackEsc(r.name)}` : ''} — out in ~${r.cover}d · *${r.proj[90].toLocaleString()}* by day 90`).join('\n')
+  const fcList = belowZero.slice(0, 10).map(r => `• *${slackEsc(r.sku)}*${r.name && r.name !== r.sku ? ` ${slackEsc(r.name)}` : ''}\n    runs out in ~${r.cover}d → short *${Math.abs(r.proj[90]).toLocaleString()} units* by day 90`).join('\n')
     + (belowZero.length > 10 ? `\n…and ${belowZero.length - 10} more` : '');
   const fcText = belowZero.length ? fcList : '_none forecast to run out in the next 90 days_';
 
