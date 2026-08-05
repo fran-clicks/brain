@@ -3328,6 +3328,13 @@ async function buildDailyReport() {
   const kv = (await pool.query(`SELECT count(*) sent, coalesce(sum(revenue),0)::numeric rev FROM campaigns_cache
     WHERE (send_time AT TIME ZONE 'Europe/London')::date = ${TODAY}`)).rows[0] || {};
 
+  // 90-day forecast: only SKUs projected to fall below 0 within the next 90 days (soonest first)
+  const fc = await forecastRows(90);
+  const belowZero = fc.rows.filter(r => r.proj[90] < 0);
+  const fcList = belowZero.slice(0, 15).map(r => `• *${slackEsc(r.sku)}* — ${r.stock} left, ~${r.cover}d`).join('\n')
+    + (belowZero.length > 15 ? `\n…and ${belowZero.length - 15} more` : '');
+  const fcText = belowZero.length ? fcList : '_no products forecast to run out in the next 90 days_';
+
   const fr = (await pool.query(`SELECT name, to_char(eta,'DD Mon') eta,
       (eta < ${TODAY}) overdue, (eta BETWEEN ${TODAY} AND ${TODAY} + 7) soon,
       (jsonb_array_length(coalesce(stages,'[]'::jsonb)) > 0 AND step >= jsonb_array_length(coalesce(stages,'[]'::jsonb))) done
@@ -3354,9 +3361,12 @@ async function buildDailyReport() {
     { type: 'section', fields: [
       { type: 'mrkdwn', text: `*🎧 New tickets*\n${g.new_today || 0}` },
       { type: 'mrkdwn', text: `*🔴 Difficult (open, 10+ msgs)*\n${g.difficult || 0}` },
-      { type: 'mrkdwn', text: `*↩️ Returns today*\n${ret.today || 0}  _(7d: ${ret.last7 || 0})_` },
       { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
     ] },
+    { type: 'divider' },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: '*📦 Inventory & returns*' }] },
+    { type: 'section', text: { type: 'mrkdwn', text: `*↩️ Returns today:* ${ret.today || 0}  _(7d: ${ret.last7 || 0})_` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*📉 Forecast to run out within 90 days (${belowZero.length}):*\n${fcText}` } },
     { type: 'divider' },
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🚢 Freight*' }] },
     { type: 'section', text: { type: 'mrkdwn', text: freightLine } },
