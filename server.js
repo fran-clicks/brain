@@ -3193,15 +3193,19 @@ async function notifyFreight(action, sh, extra) {
       ] }
     ];
     if (action !== 'deleted') {
-      // one stage list; the current stage is bold (Slack mrkdwn has no underline)
+      // stage move: show where it came from and where it went; otherwise show the current stage
+      if (action === 'stage' && extra && extra.fromStage != null) {
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Stage moved*\n${slackEsc(extra.fromStage)}  →  *${slackEsc(extra.toStage)}*` } });
+      } else {
+        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Current stage*\n*${slackEsc(current)}*` } });
+      }
+      // all-stages list with the current stage bolded
       const list = (sh.stages || []);
       const step = action === 'completed' ? list.length + 1 : (parseInt(sh.step) || 0);
       const stageList = list.length
         ? list.map((s, i) => (i + 1 === step) ? `*${slackEsc(s)}*` : slackEsc(s)).join('  →  ')
         : 'none set';
-      if (action === 'stage' && extra && extra.fromStage != null)
-        blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Stage moved*\n${slackEsc(extra.fromStage)}  →  *${slackEsc(extra.toStage)}*` } });
-      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Stages*  _(current in bold)_\n${stageList}` } });
+      blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `All stages: ${stageList}` }] });
     }
     if (sh.notes && action !== 'deleted') blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `📝 ${slackEsc(sh.notes)}` }] });
     const appUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || 'https://clicks-brain.onrender.com').replace(/\/$/, '');
