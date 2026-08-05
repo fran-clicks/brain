@@ -214,8 +214,14 @@ app.get('/api/auth/me', async (req, res) => {
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL && !process.env.DATABASE_URL.includes('localhost')
-    ? { rejectUnauthorized: false } : false
+    ? { rejectUnauthorized: false } : false,
+  max: 8,                       // stay under the free-tier connection cap even with two instances during a deploy
+  idleTimeoutMillis: 30000,     // recycle idle connections
+  connectionTimeoutMillis: 10000, // fail fast if the pool can't hand out a connection instead of hanging forever
+  statement_timeout: 20000,     // kill any single query that runs longer than 20s so it can't block the pool
+  query_timeout: 20000
 });
+pool.on('error', (e) => console.error('pg pool error:', e.message)); // don't let an idle-client error crash the process
 
 async function initDb() {
   // serialize schema setup across instances: overlapping deploys were deadlocking on the DDL.
