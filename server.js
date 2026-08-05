@@ -2127,7 +2127,7 @@ app.get('/api/forecast', async (req, res) => {
     pool.query(
       `SELECT it->>'sku' sku, sum(coalesce((it->>'qty')::int, 0))::int units
        FROM orders_cache, LATERAL jsonb_array_elements(items) it
-       WHERE cancelled_at IS NULL AND created_at >= now() - ($1 * interval '1 day')
+       WHERE cancelled_at IS NULL AND created_at >= now() - make_interval(days => $1::int)
        GROUP BY 1`, [win])
   ]);
   const stock = {}, rawName = {};

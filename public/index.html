@@ -585,6 +585,7 @@ footer{color:rgba(16,17,20,.45)}
   <div class="synchead">
     <div style="color:var(--muted);font-size:12px">Each column is a source. <span class="src-badge" style="background:#059669">ShipBob</span><span class="src-badge" style="background:#2563eb">Floship</span> are live from API; other columns come from imported sheets.</div>
     <div class="right">
+      <button class="btn" onclick="loadFulfillment()" style="margin:0 6px 0 0;padding:6px 14px;background:#fff;border:1px solid var(--line);box-shadow:none">↻ Refresh</button>
       <button class="btn" id="fulImportBtn" onclick="openImport()" style="display:none;margin:0 6px 0 0;padding:6px 14px;background:#fff;border:1px solid var(--line);box-shadow:none">📥 Import sheet</button>
       <button class="btn" id="fulSyncAllBtn" onclick="syncAllFulfillment()" style="display:none;margin:0;padding:6px 14px">🔄 Sync all</button>
     </div>
