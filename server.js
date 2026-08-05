@@ -3132,38 +3132,50 @@ function slackSigValid(cfg, req) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-async function slackPost(token, channel, text, thread_ts) {
+async function slackPost(token, channel, text, thread_ts, blocks) {
   const r = await (await fetch('https://slack.com/api/chat.postMessage', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ channel, text, thread_ts })
+    body: JSON.stringify({ channel, text, thread_ts, ...(blocks ? { blocks } : {}) })
   })).json();
   if (!r.ok) console.error('slack post failed:', r.error);
 }
+const slackEsc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 // post a freight shipment update to the configured alerts channel (best-effort, never blocks the request)
 const FREIGHT_HEADERS = {
-  created: '🚢 *New freight shipment created*',
-  edited: '✏️ *Freight shipment updated*',
-  deleted: '🗑️ *Freight shipment deleted*',
-  completed: '✅ *Freight shipment completed*'
+  created: '🚢 New freight shipment',
+  edited: '✏️ Freight shipment updated',
+  deleted: '🗑️ Freight shipment deleted',
+  completed: '✅ Freight shipment completed'
 };
 async function notifyFreight(action, sh) {
   try {
     const conn = await getConnector('slack');
     if (!conn?.config?.bot_token) return;
     const channel = (conn.config.alert_channel || '#clicksbrain').trim();
+    const name = sh.name || 'Untitled shipment';
     const items = (sh.items || []).map(i => `${i.sku} ×${i.qty}`).join(', ') || '—';
+    const stages = (sh.stages || []).length ? (sh.stages || []).join('  →  ') : 'none set';
     const eta = sh.eta ? new Date(sh.eta + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
-    const lines = [
-      FREIGHT_HEADERS[action] || '🚢 *Freight update*',
-      `*${sh.name || 'Untitled shipment'}*`,
-      `Route: ${sh.from_country || '?'} → ${sh.to_country || '?'}${sh.carrier ? ` · ${sh.carrier}` : ''}`,
-      `ETA: ${eta}`,
-      `Contents: ${items}`
+    const header = FREIGHT_HEADERS[action] || '🚢 Freight update';
+
+    const blocks = [
+      { type: 'header', text: { type: 'plain_text', text: header, emoji: true } },
+      { type: 'section', text: { type: 'mrkdwn', text: `*${slackEsc(name)}*` } },
+      { type: 'section', fields: [
+        { type: 'mrkdwn', text: `*Route*\n${slackEsc(sh.from_country || '?')}  →  ${slackEsc(sh.to_country || '?')}` },
+        { type: 'mrkdwn', text: `*ETA*\n${eta}` },
+        { type: 'mrkdwn', text: `*Carrier*\n${slackEsc(sh.carrier || '—')}` },
+        { type: 'mrkdwn', text: `*Contents*\n${slackEsc(items)}` }
+      ] }
     ];
-    if (action !== 'deleted') lines.push(`Stages: ${(sh.stages || []).length ? (sh.stages || []).join(' → ') : 'none set'}`);
-    if (sh.notes && action !== 'deleted') lines.push(`Notes: ${sh.notes}`);
-    await slackPost(conn.config.bot_token, channel, lines.filter(Boolean).join('\n'));
+    if (action !== 'deleted') blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*Stages*\n${slackEsc(stages)}` } });
+    if (sh.notes && action !== 'deleted') blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `📝 ${slackEsc(sh.notes)}` }] });
+    blocks.push({ type: 'divider' });
+
+    // plain-text fallback (shown in notifications / clients that don't render blocks)
+    const fallback = `${header} — ${name} · ${sh.from_country || '?'} → ${sh.to_country || '?'} · ETA ${eta}`;
+    await slackPost(conn.config.bot_token, channel, fallback, undefined, blocks);
   } catch (e) { console.error('freight slack notify failed:', e.message); }
 }
 
