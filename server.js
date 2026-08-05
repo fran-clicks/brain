@@ -56,11 +56,33 @@ app.use(express.static(path.join(__dirname, 'public'), {
 const ALLOWED_USERS = ['fran@clicks.tech', 'kp@clicks.tech'];
 const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 64).toString('hex');
 
+// ---------- login rate limiting (per-IP, in-memory) ----------
+// Blocks brute-force: after LOGIN_MAX failed auth attempts within the window, that IP is refused
+// until the window elapses. A successful sign-in clears the counter.
+const LOGIN_WINDOW_MS = 15 * 60 * 1000, LOGIN_MAX = 10;
+const loginAttempts = new Map(); // ip -> { fails, resetAt }
+const loginIp = (req) => (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+function loginBlocked(req) {
+  const e = loginAttempts.get(loginIp(req));
+  return !!(e && Date.now() < e.resetAt && e.fails >= LOGIN_MAX);
+}
+function loginFail(req) {
+  const ip = loginIp(req), now = Date.now();
+  let e = loginAttempts.get(ip);
+  if (!e || now >= e.resetAt) e = { fails: 0, resetAt: now + LOGIN_WINDOW_MS };
+  e.fails++; loginAttempts.set(ip, e);
+}
+const loginReset = (req) => loginAttempts.delete(loginIp(req));
+const TOO_MANY = { error: 'Too many attempts. Please wait a few minutes and try again.' };
+// keep the map from growing unbounded
+setInterval(() => { const now = Date.now(); for (const [ip, e] of loginAttempts) if (now >= e.resetAt) loginAttempts.delete(ip); }, 10 * 60 * 1000);
+
 app.post('/api/auth/setup', async (req, res) => {
+  if (loginBlocked(req)) return res.status(429).json(TOO_MANY);
   const { email, password, invite_code } = req.body || {};
   const invite = process.env.ADMIN_PASSWORD || process.env.DASHBOARD_PASSWORD;
   if (!invite) return res.status(400).json({ error: 'No ADMIN_PASSWORD set on the server — set it in Render → Environment first.' });
-  if (invite_code !== invite) return res.status(403).json({ error: 'Wrong invite code.' });
+  if (invite_code !== invite) { loginFail(req); return res.status(403).json({ error: 'Wrong invite code.' }); }
   const em = String(email || '').toLowerCase().trim();
   const u = (await pool.query('SELECT * FROM users WHERE email=$1', [em])).rows[0];
   if (!u) return res.status(403).json({ error: 'This email is not on the member list.' });
@@ -75,10 +97,11 @@ app.post('/api/auth/setup', async (req, res) => {
 // Reset an EXISTING member's password. Gated by the same admin-held code as setup;
 // only works for an email already on the member list (never creates users).
 app.post('/api/auth/reset', async (req, res) => {
+  if (loginBlocked(req)) return res.status(429).json(TOO_MANY);
   const { email, password, invite_code } = req.body || {};
   const resetCode = process.env.RESET_CODE; // dedicated reset code, separate from the admin/invite code
   if (!resetCode) return res.status(400).json({ error: 'Password reset is disabled — an admin must set RESET_CODE in Render → Environment first.' });
-  if (invite_code !== resetCode) return res.status(403).json({ error: 'Wrong reset code (ask an admin).' });
+  if (invite_code !== resetCode) { loginFail(req); return res.status(403).json({ error: 'Wrong reset code (ask an admin).' }); }
   const em = String(email || '').toLowerCase().trim();
   const u = (await pool.query('SELECT * FROM users WHERE email=$1', [em])).rows[0];
   if (!u) return res.status(403).json({ error: 'This email is not on the member list.' });
@@ -90,12 +113,14 @@ app.post('/api/auth/reset', async (req, res) => {
 });
 
 app.post('/api/auth/login', async (req, res) => {
+  if (loginBlocked(req)) return res.status(429).json(TOO_MANY);
   const em = String(req.body?.email || '').toLowerCase().trim();
   const u = (await pool.query('SELECT * FROM users WHERE email=$1', [em])).rows[0];
-  if (!u?.pass_hash) return res.status(403).json({ error: u ? 'No password set yet — use First time? below.' : 'Unknown email.' });
+  if (!u?.pass_hash) { loginFail(req); return res.status(403).json({ error: u ? 'No password set yet — use First time? below.' : 'Unknown email.' }); }
   const [salt, hash] = u.pass_hash.split(':');
   const a = Buffer.from(hashPw(String(req.body?.password || ''), salt)), b = Buffer.from(hash);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(403).json({ error: 'Wrong password.' });
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) { loginFail(req); return res.status(403).json({ error: 'Wrong password.' }); }
+  loginReset(req);
   setSessionCookie(res, em);
   res.json({ ok: true, email: em });
 });
