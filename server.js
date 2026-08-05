@@ -3348,20 +3348,28 @@ async function buildDailyReport() {
   const appUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || 'https://clicks-brain.onrender.com').replace(/\/$/, '');
   const blocks = [
     { type: 'header', text: { type: 'plain_text', text: `📊 Daily report — ${today}`, emoji: true } },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: '*💰 Sales*' }] },
     { type: 'section', fields: [
       { type: 'mrkdwn', text: `*🛒 Orders today*\n${s.o0 || 0}  _(${delta(+s.o0, +s.o1)} vs yday · ${delta(+s.o0, +s.o7)} vs last wk)_` },
       { type: 'mrkdwn', text: `*💷 Revenue today*\n${money(+s.r0, cur)}  _(${delta(+s.r0, +s.r7)} vs last wk)_` },
       { type: 'mrkdwn', text: `*📦 Units today*\n${units0.toLocaleString()}` },
       { type: 'mrkdwn', text: `*✅ Fulfilled today*\n${fdt.toLocaleString()}` }
     ] },
+    { type: 'divider' },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: '*🎧 Support & marketing*' }] },
     { type: 'section', fields: [
       { type: 'mrkdwn', text: `*🎧 New tickets*\n${g.new_today || 0}` },
       { type: 'mrkdwn', text: `*📨 Open now*\n${g.open_now || 0}  _(${g.difficult || 0} difficult)_` },
       { type: 'mrkdwn', text: `*↩️ Returns today*\n${ret.today || 0}  _(7d: ${ret.last7 || 0})_` },
       { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
     ] },
-    { type: 'section', text: { type: 'mrkdwn', text: `*📉 Stock low (≤14d): ${risk14.length}*  ·  ≤30d: ${risk30.length}  ·  out of stock: ${zero.length}\n${topRisk}` } },
-    { type: 'section', text: { type: 'mrkdwn', text: `*🚢 Freight*\n${freightLine}` } },
+    { type: 'divider' },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: '*📉 Stock running low* — SKUs forecast to run out soon (units left · days of cover · sales/day)' }] },
+    { type: 'section', text: { type: 'mrkdwn', text: `≤14 days: *${risk14.length}*   ·   ≤30 days: ${risk30.length}   ·   out of stock: ${zero.length}\n${topRisk}` } },
+    { type: 'divider' },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: '*🚢 Freight*' }] },
+    { type: 'section', text: { type: 'mrkdwn', text: freightLine } },
+    { type: 'divider' },
     { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '📊 Open dashboard', emoji: true }, url: appUrl + '/' }] },
     { type: 'context', elements: [{ type: 'mrkdwn', text: `Data refreshed just before posting · ${new Date().toLocaleString('en-GB', { timeZone: REPORT_TZ })}` }] }
   ];
