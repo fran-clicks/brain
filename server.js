@@ -3331,9 +3331,9 @@ async function buildDailyReport() {
   // 90-day forecast: only SKUs projected to fall below 0 within the next 90 days (soonest first)
   const fc = await forecastRows(90);
   const belowZero = fc.rows.filter(r => r.proj[90] < 0);
-  const fcList = belowZero.slice(0, 15).map(r => `• *${slackEsc(r.sku)}* — ${r.stock} left, ~${r.cover}d`).join('\n')
-    + (belowZero.length > 15 ? `\n…and ${belowZero.length - 15} more` : '');
-  const fcText = belowZero.length ? fcList : '_no products forecast to run out in the next 90 days_';
+  const fcList = belowZero.slice(0, 10).map(r => `• *${slackEsc(r.sku)}* — out in ~${r.cover}d`).join('\n')
+    + (belowZero.length > 10 ? `\n…and ${belowZero.length - 10} more` : '');
+  const fcText = belowZero.length ? fcList : '_none forecast to run out in the next 90 days_';
 
   const fr = (await pool.query(`SELECT name, to_char(eta,'DD Mon') eta,
       (eta < ${TODAY}) overdue, (eta BETWEEN ${TODAY} AND ${TODAY} + 7) soon,
