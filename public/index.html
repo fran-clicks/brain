@@ -1325,8 +1325,15 @@ document.getElementById('frSearch').oninput = renderFreight;
 
 async function setStep(id, n) {
   if (!window.isAdmin) return;
-  try { await api('/api/freight/step', {method:'POST', body: JSON.stringify({ id, step: n })}); loadFreight(); }
-  catch (e) { document.getElementById('frNote').textContent = '⚠️ ' + e.message; }
+  const sh = frShipments.find(x => x.id === id);
+  const stageName = n <= 0 ? 'Not started' : (sh && sh.stages && sh.stages[n - 1]) || ('step ' + n);
+  if (!confirm(`Set the current stage to "${stageName}"?`)) return;
+  try {
+    await api('/api/freight/step', {method:'POST', body: JSON.stringify({ id, step: n })});
+    if (confirm('Post this stage update to the Slack channel?\n\nOK = notify the team   ·   Cancel = update quietly'))
+      await api('/api/freight/announce', {method:'POST', body: JSON.stringify({ id })});
+    loadFreight();
+  } catch (e) { document.getElementById('frNote').textContent = '⚠️ ' + e.message; }
 }
 
 // ---- builder modal ----
