@@ -1146,6 +1146,7 @@ function renderFreight() {
       : '';
     const actions = admin ? `<div style="display:flex;gap:4px">
       <button class="btn" style="margin:0;padding:3px 10px;font-size:13px" onclick="editFreight(${s.id})">✎ Edit</button>
+      ${done ? '' : `<button class="btn" style="margin:0;padding:3px 10px;font-size:13px;background:#059669;border-color:#059669;color:#fff" onclick="completeFreight(${s.id})">✓ Complete</button>`}
       <button class="btn" style="margin:0;padding:3px 10px;font-size:13px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="deleteFreight(${s.id})">✕</button></div>` : '';
     return `<div class="card" style="margin-top:14px">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
@@ -1285,6 +1286,11 @@ async function saveFreight() {
     }
     closeFreight(); loadFreight();
   } catch (e) { el('frErr').textContent = e.message; }
+}
+async function completeFreight(id) {
+  if (!confirm('Mark this shipment as completed? This fills all stages and posts to Slack.')) return;
+  try { await api('/api/freight/complete', {method:'POST', body: JSON.stringify({ id })}); loadFreight(); }
+  catch (e) { document.getElementById('frNote').textContent = '⚠️ ' + e.message; }
 }
 async function deleteFreight(id) {
   if (!confirm('Delete this shipment?')) return;

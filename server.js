@@ -1982,13 +1982,16 @@ app.post('/api/freight', async (req, res) => {
       `UPDATE freight_shipments SET name=$1, from_country=$2, to_country=$3, carrier=$4, eta=$5, notes=$6,
          items=$7, stages=$8, step=$9, updated_at=now() WHERE id=$10 RETURNING id`, [...f, parseInt(b.id)]);
     if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
-    return res.json({ ok: true, id: r.rows[0].id });
+    res.json({ ok: true, id: r.rows[0].id });
+    notifyFreight('edited', { name: b.name, from_country: b.from_country, to_country: b.to_country,
+      carrier: b.carrier, eta, notes: b.notes, items, stages });
+    return;
   }
   const r = await pool.query(
     `INSERT INTO freight_shipments (name, from_country, to_country, carrier, eta, notes, items, stages, step, created_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [...f, readSession(req) || '']);
   res.json({ ok: true, id: r.rows[0].id });
-  notifyFreightCreated({ name: b.name, from_country: b.from_country, to_country: b.to_country,
+  notifyFreight('created', { name: b.name, from_country: b.from_country, to_country: b.to_country,
     carrier: b.carrier, eta, notes: b.notes, items, stages }); // best-effort Slack post, after responding
 });
 // quick stage advance (click a step on the progress bar)
@@ -1999,13 +2002,28 @@ app.post('/api/freight/step', async (req, res) => {
   if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
   res.json({ ok: true });
 });
+// mark a shipment complete (all stages done) — posts a Slack "completed" alert
+app.post('/api/freight/complete', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const id = parseInt(req.body?.id);
+  const row = (await pool.query(
+    `SELECT name, from_country, to_country, carrier, to_char(eta,'YYYY-MM-DD') eta, notes, items, stages FROM freight_shipments WHERE id=$1`, [id])).rows[0];
+  if (!row) return res.status(404).json({ error: 'shipment not found' });
+  const n = (Array.isArray(row.stages) ? row.stages.length : 0) + 1; // step past the last stage = all done
+  await pool.query(`UPDATE freight_shipments SET step=$2, updated_at=now() WHERE id=$1`, [id, n]);
+  res.json({ ok: true });
+  notifyFreight('completed', row);
+});
 app.post('/api/freight/delete', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const id = parseInt(req.body?.id);
+  const row = (await pool.query(
+    `SELECT name, from_country, to_country, carrier, to_char(eta,'YYYY-MM-DD') eta, items FROM freight_shipments WHERE id=$1`, [id])).rows[0];
   await pool.query('DELETE FROM freight_docs WHERE shipment_id=$1', [id]);
   const r = await pool.query('DELETE FROM freight_shipments WHERE id=$1', [id]);
   if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
   res.json({ ok: true });
+  if (row) notifyFreight('deleted', row);
 });
 // documents: upload (base64), download, delete
 app.post('/api/freight/doc', async (req, res) => {
@@ -3122,25 +3140,30 @@ async function slackPost(token, channel, text, thread_ts) {
   })).json();
   if (!r.ok) console.error('slack post failed:', r.error);
 }
-// post a freight shipment summary to the configured alerts channel (best-effort, never blocks the request)
-async function notifyFreightCreated(sh) {
+// post a freight shipment update to the configured alerts channel (best-effort, never blocks the request)
+const FREIGHT_HEADERS = {
+  created: '🚢 *New freight shipment created*',
+  edited: '✏️ *Freight shipment updated*',
+  deleted: '🗑️ *Freight shipment deleted*',
+  completed: '✅ *Freight shipment completed*'
+};
+async function notifyFreight(action, sh) {
   try {
     const conn = await getConnector('slack');
     if (!conn?.config?.bot_token) return;
     const channel = (conn.config.alert_channel || '#clicksbrain').trim();
     const items = (sh.items || []).map(i => `${i.sku} ×${i.qty}`).join(', ') || '—';
-    const stages = (sh.stages || []).length ? (sh.stages || []).join(' → ') : 'none set';
     const eta = sh.eta ? new Date(sh.eta + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
     const lines = [
-      `🚢 *New freight shipment created*`,
+      FREIGHT_HEADERS[action] || '🚢 *Freight update*',
       `*${sh.name || 'Untitled shipment'}*`,
       `Route: ${sh.from_country || '?'} → ${sh.to_country || '?'}${sh.carrier ? ` · ${sh.carrier}` : ''}`,
       `ETA: ${eta}`,
-      `Contents: ${items}`,
-      `Stages: ${stages}`,
-      sh.notes ? `Notes: ${sh.notes}` : ''
-    ].filter(Boolean);
-    await slackPost(conn.config.bot_token, channel, lines.join('\n'));
+      `Contents: ${items}`
+    ];
+    if (action !== 'deleted') lines.push(`Stages: ${(sh.stages || []).length ? (sh.stages || []).join(' → ') : 'none set'}`);
+    if (sh.notes && action !== 'deleted') lines.push(`Notes: ${sh.notes}`);
+    await slackPost(conn.config.bot_token, channel, lines.filter(Boolean).join('\n'));
   } catch (e) { console.error('freight slack notify failed:', e.message); }
 }
 
