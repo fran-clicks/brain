@@ -615,9 +615,9 @@ footer{color:rgba(16,17,20,.45)}
       <div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)">
         Sales window:
         <span class="periods" id="fcWindow">
-          <button data-w="7">7d</button>
-          <button data-w="14" class="active">14d</button>
           <button data-w="30">30d</button>
+          <button data-w="60">60d</button>
+          <button data-w="90" class="active">90d</button>
         </span>
       </div>
       <input class="search" id="fcSearch" placeholder="Search SKU or product…" style="flex:1;min-width:180px;margin:0">
@@ -1078,7 +1078,7 @@ async function syncAllFulfillment() {
   finally { b.disabled = false; b.textContent = '🔄 Sync all'; loadFulfillment(); }
 }
 // ---------- stock forecast ----------
-let fcRows = [], fcWindow = 14, fcHorizons = [7, 14, 30, 90];
+let fcRows = [], fcWindow = 90, fcHorizons = [7, 14, 30, 90];
 function fcFlag(cover) {
   if (cover == null) return '';
   if (cover <= 14) return '🔴';

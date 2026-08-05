@@ -3328,12 +3328,6 @@ async function buildDailyReport() {
   const kv = (await pool.query(`SELECT count(*) sent, coalesce(sum(revenue),0)::numeric rev FROM campaigns_cache
     WHERE (send_time AT TIME ZONE 'Europe/London')::date = ${TODAY}`)).rows[0] || {};
 
-  const fc = await forecastRows(14);
-  const risk14 = fc.rows.filter(r => r.cover != null && r.cover <= 14);
-  const risk30 = fc.rows.filter(r => r.cover != null && r.cover > 14 && r.cover <= 30);
-  const zero = fc.rows.filter(r => r.stock <= 0);
-  const topRisk = risk14.slice(0, 5).map(r => `• *${slackEsc(r.sku)}* — ${r.stock} left, ~${r.cover}d (${r.rate}/day)`).join('\n') || '_none in the next 14 days_';
-
   const fr = (await pool.query(`SELECT name, to_char(eta,'DD Mon') eta,
       (eta < ${TODAY}) overdue, (eta BETWEEN ${TODAY} AND ${TODAY} + 7) soon,
       (jsonb_array_length(coalesce(stages,'[]'::jsonb)) > 0 AND step >= jsonb_array_length(coalesce(stages,'[]'::jsonb))) done
@@ -3359,13 +3353,10 @@ async function buildDailyReport() {
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🎧 Support & marketing*' }] },
     { type: 'section', fields: [
       { type: 'mrkdwn', text: `*🎧 New tickets*\n${g.new_today || 0}` },
-      { type: 'mrkdwn', text: `*📨 Open now*\n${g.open_now || 0}  _(${g.difficult || 0} difficult)_` },
+      { type: 'mrkdwn', text: `*🔴 Difficult (open, 10+ msgs)*\n${g.difficult || 0}` },
       { type: 'mrkdwn', text: `*↩️ Returns today*\n${ret.today || 0}  _(7d: ${ret.last7 || 0})_` },
       { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
     ] },
-    { type: 'divider' },
-    { type: 'context', elements: [{ type: 'mrkdwn', text: '*📉 Stock running low* — SKUs forecast to run out soon (units left · days of cover · sales/day)' }] },
-    { type: 'section', text: { type: 'mrkdwn', text: `≤14 days: *${risk14.length}*   ·   ≤30 days: ${risk30.length}   ·   out of stock: ${zero.length}\n${topRisk}` } },
     { type: 'divider' },
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🚢 Freight*' }] },
     { type: 'section', text: { type: 'mrkdwn', text: freightLine } },
@@ -3373,7 +3364,7 @@ async function buildDailyReport() {
     { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '📊 Open dashboard', emoji: true }, url: appUrl + '/' }] },
     { type: 'context', elements: [{ type: 'mrkdwn', text: `Data refreshed just before posting · ${new Date().toLocaleString('en-GB', { timeZone: REPORT_TZ })}` }] }
   ];
-  const fallback = `Daily report ${today}: ${s.o0 || 0} orders, ${money(+s.r0, cur)}, ${g.open_now || 0} open tickets, ${risk14.length} SKUs low on stock.`;
+  const fallback = `Daily report ${today}: ${s.o0 || 0} orders, ${money(+s.r0, cur)}, ${g.open_now || 0} open tickets.`;
   return { blocks, fallback };
 }
 async function postDailyReport() {
