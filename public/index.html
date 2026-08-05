@@ -714,6 +714,9 @@ footer{color:rgba(16,17,20,.45)}
     </div>
     <div class="grid two" style="gap:8px">
       <div><label style="font-weight:600;color:var(--ink)">Entry document</label><input type="file" id="frDocEntry"></div>
+      <div><label style="font-weight:600;color:var(--ink)">Customs invoice</label><input type="file" id="frDocCustoms"></div>
+    </div>
+    <div class="grid two" style="gap:8px">
       <div><label style="font-weight:600;color:var(--ink)">Other</label><input type="file" id="frDocOther"></div>
     </div>
 
@@ -1275,7 +1278,7 @@ function openFreight(sh) {
   frStageDraft = (sh?.stages && sh.stages.length) ? [...sh.stages] : [...frDefaultStages];
   frRenderStages();
   el('frNotify').checked = true;
-  ['frDocPacking','frDocInvoice','frDocEntry','frDocOther'].forEach(id => el(id).value = '');
+  ['frDocPacking','frDocInvoice','frDocEntry','frDocCustoms','frDocOther'].forEach(id => el(id).value = '');
   el('frDocs').innerHTML = sh && (sh.docs || []).length
     ? 'Existing: ' + sh.docs.map(d => `<a href="/api/freight/doc/${d.id}" target="_blank">${esc(d.label)}</a>`).join(', ')
     : 'No documents uploaded yet.';
@@ -1307,7 +1310,7 @@ async function saveFreight() {
       carrier: el('frCarrier').value.trim(), eta: el('frEta').value, notes: el('frNotes').value.trim(),
       items, stages: frStageDraft, step: prevStep, notify: el('frNotify').checked })});
     const sid = r.id;
-    const uploads = [['Packing list','frDocPacking'],['Invoice','frDocInvoice'],['Entry document','frDocEntry'],['Other','frDocOther']];
+    const uploads = [['Packing list','frDocPacking'],['Invoice','frDocInvoice'],['Entry document','frDocEntry'],['Customs invoice','frDocCustoms'],['Other','frDocOther']];
     for (const [label, inputId] of uploads) {
       const f = el(inputId).files[0];
       if (f) {
