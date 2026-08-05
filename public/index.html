@@ -1141,7 +1141,7 @@ function renderFreight() {
   document.getElementById('frList').innerHTML = rows.length ? rows.map(s => {
     const eta = s.eta ? new Date(s.eta + 'T00:00:00').toLocaleDateString(undefined, { day:'numeric', month:'short', year:'numeric' }) : '—';
     const done = s.step >= (s.stages || []).length && (s.stages || []).length > 0;
-    const late = s.eta && !done && new Date(s.eta + 'T00:00:00') < new Date();
+    const late = s.eta && !done && new Date(s.eta + 'T23:59:59') < new Date(); // overdue only once the ETA day has fully passed
     const route = `${frFlag(s.from_country)} ${esc(s.from_country || '?')} → ${frFlag(s.to_country)} ${esc(s.to_country || '?')}`;
     const lbl = t => `<span style="font-size:12px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--muted)">${t}</span>`;
     const items = (s.items || []).length
