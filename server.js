@@ -1818,10 +1818,10 @@ app.get('/api/shipbob/summary', async (_req, res) => {
   const conn = await getConnector('shipbob');
   const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='shipbob'`)).rows[0]?.v || null;
   const items = (await pool.query(
-    `SELECT sku, name, upc, on_hand, fulfillable, committed, by_fc FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' ORDER BY sku, name`)).rows;
+    `SELECT sku, name, upc, on_hand, fulfillable, committed, by_fc FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request') ORDER BY sku, name`)).rows;
   const totals = (await pool.query(
     `SELECT count(*)::int items, coalesce(sum(on_hand),0)::int on_hand, coalesce(sum(fulfillable),0)::int fulfillable,
-            coalesce(sum(committed),0)::int committed FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`)).rows[0];
+            coalesce(sum(committed),0)::int committed FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request')`)).rows[0];
   res.json({ configured: !!conn, items, totals, sync: ss });
 });
 app.post('/api/shipbob/sync', async (req, res) => {
@@ -1952,9 +1952,9 @@ app.get('/api/floship/summary', async (_req, res) => {
   const conn = await getConnector('floship');
   const ss = (await pool.query(`SELECT v FROM sync_state WHERE k='floship'`)).rows[0]?.v || null;
   const items = (await pool.query(
-    `SELECT sku, description, upc, qty, on_hand, by_wh FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' ORDER BY sku`)).rows;
+    `SELECT sku, description, upc, qty, on_hand, by_wh FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request') ORDER BY sku`)).rows;
   const totals = (await pool.query(
-    `SELECT count(*)::int items, coalesce(sum(qty),0)::int qty, coalesce(sum(on_hand),0)::int on_hand FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`)).rows[0];
+    `SELECT count(*)::int items, coalesce(sum(qty),0)::int qty, coalesce(sum(on_hand),0)::int on_hand FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request')`)).rows[0];
   res.json({ configured: !!conn, items, totals, sync: ss });
 });
 app.post('/api/floship/sync', async (req, res) => {
@@ -2074,9 +2074,9 @@ app.post('/api/freight/doc/delete', async (req, res) => {
 const GRID_PALETTE = ['#db2777', '#ea580c', '#7c3aed', '#0891b2', '#65a30d', '#9333ea', '#0d9488', '#c026d3', '#dc2626', '#ca8a04'];
 app.get('/api/fulfillment/grid', async (_req, res) => {
   const [sb, fl, man, srcOrd, skuOrd] = await Promise.all([
-    pool.query(`SELECT sku, name, fulfillable, by_fc FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
-    pool.query(`SELECT sku, description, qty, by_wh FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
-    pool.query(`SELECT sku, source, qty, description FROM manual_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
+    pool.query(`SELECT sku, name, fulfillable, by_fc FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request')`),
+    pool.query(`SELECT sku, description, qty, by_wh FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request')`),
+    pool.query(`SELECT sku, source, qty, description FROM manual_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request')`),
     pool.query(`SELECT source, ord FROM inv_source_ord`),
     pool.query(`SELECT sku, ord FROM inv_sku_ord`)
   ]);
@@ -2121,9 +2121,9 @@ app.get('/api/fulfillment/grid', async (_req, res) => {
 app.get('/api/forecast', async (req, res) => {
   const win = Math.max(1, Math.min(parseInt(req.query.window) || 14, 90));
   const [sb, fl, man, sales] = await Promise.all([
-    pool.query(`SELECT sku, name, fulfillable FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
-    pool.query(`SELECT sku, description, qty FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
-    pool.query(`SELECT sku, qty, description FROM manual_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$'`),
+    pool.query(`SELECT sku, name, fulfillable FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request')`),
+    pool.query(`SELECT sku, description, qty FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request')`),
+    pool.query(`SELECT sku, qty, description FROM manual_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request')`),
     pool.query(
       `SELECT it->>'sku' sku, sum(coalesce((it->>'qty')::int, 0))::int units
        FROM orders_cache, LATERAL jsonb_array_elements(items) it
