@@ -586,6 +586,7 @@ footer{color:rgba(16,17,20,.45)}
     <div></div>
     <div class="right">
       <button class="btn" onclick="loadFulfillment()" style="margin:0 6px 0 0;padding:6px 14px">↻ Refresh</button>
+      <button class="btn" onclick="exportGrid()" style="margin:0 6px 0 0;padding:6px 14px;background:#fff;border:1px solid var(--line);box-shadow:none">⬇ Export CSV</button>
       <button class="btn" id="fulImportBtn" onclick="openImport()" style="display:none;margin:0 6px 0 0;padding:6px 14px;background:#fff;border:1px solid var(--line);box-shadow:none">📥 Import sheet</button>
       <button class="btn" id="fulSyncAllBtn" onclick="syncAllFulfillment()" style="display:none;margin:0;padding:6px 14px">🔄 Sync all</button>
     </div>
@@ -1009,6 +1010,19 @@ function renderFgTable() {
     `<tr><td>${r.sku ? `<span class="tag src">${esc(r.sku)}</span>` : '—'}</td><td>${esc(r.name || '')}</td>${srcs.map(s =>
       `<td style="text-align:center;vertical-align:top">${cell(r, s)}</td>`).join('')}<td style="text-align:center;font-weight:700;vertical-align:top">${(r.total || 0).toLocaleString()}</td></tr>`
   ).join('') : `<tr><td colspan="${srcs.length + 3}" class="empty">No matches</td></tr>`;
+}
+function exportGrid() {
+  const srcs = fgData.sources || [], rows = fgData.rows || [];
+  if (!rows.length) return;
+  const q = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const header = ['SKU', 'Description', ...srcs.map(s => s.label), 'Total'];
+  const lines = [header.map(q).join(',')];
+  rows.forEach(r => lines.push([r.sku || '', r.name || '', ...srcs.map(s => r.vals[s.key] || 0), r.total || 0].map(q).join(',')));
+  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'global-inventory-' + new Date().toISOString().slice(0, 10) + '.csv';
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
 }
 async function loadFulfillmentGrid() {
   document.getElementById('fgUpdating').classList.add('on');
