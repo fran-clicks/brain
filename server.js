@@ -3254,6 +3254,14 @@ async function slackPost(token, channel, text, thread_ts, blocks) {
   if (!r.ok) console.error('slack post failed:', r.error);
 }
 const slackEsc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// stable per-shipment colour tag: a #RRGGBB hex Slack renders as a coloured swatch, so each freight
+// gets a consistent colour identifier in messages (derived from the name → same colour every time).
+function freightColor(key) {
+  let h = 5381;
+  for (const ch of String(key || 'freight')) h = ((h << 5) + h + ch.charCodeAt(0)) >>> 0;
+  const chan = i => 64 + (((h >> (i * 8)) & 0xff) % 160); // 64..223 → visible mid-tones
+  return '#' + [chan(0), chan(1), chan(2)].map(x => x.toString(16).padStart(2, '0')).join('');
+}
 // post a freight shipment update to the configured alerts channel (best-effort, never blocks the request)
 const FREIGHT_HEADERS = {
   created: '🚢 New freight shipment',
@@ -3286,7 +3294,7 @@ async function notifyFreight(action, sh, extra) {
 
     const blocks = [
       { type: 'header', text: { type: 'plain_text', text: header, emoji: true } },
-      { type: 'section', text: { type: 'mrkdwn', text: `*${slackEsc(name)}*` } },
+      { type: 'section', text: { type: 'mrkdwn', text: `*${slackEsc(name)}*   ${freightColor(name)}` } },
       { type: 'section', fields: [
         { type: 'mrkdwn', text: `*Route*\n${slackEsc(sh.from_country || '?')}  →  ${slackEsc(sh.to_country || '?')}` },
         { type: 'mrkdwn', text: `*ETA*\n${eta}` },
