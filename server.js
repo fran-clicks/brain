@@ -3253,7 +3253,11 @@ async function slackPost(token, channel, text, thread_ts, blocks) {
   })).json();
   if (!r.ok) console.error('slack post failed:', r.error);
 }
-const slackEsc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// escape for Slack mrkdwn AND defeat Slack's automatic colour-swatch: a "#" followed by 3/6 hex digits
+// (e.g. a reference like #983680) would otherwise render an unwanted colour square. A zero-width space
+// after the "#" keeps the text visible but stops Slack treating it as a hex colour.
+const slackEsc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/#(?=[0-9a-fA-F])/g, '#​');
 // stable per-shipment colour square (emoji) so each freight is distinguishable in Slack without a hex code.
 // keyed off a stable string (the shipment ID) → same square every time for that freight.
 const FREIGHT_SQUARES = ['🟥', '🟧', '🟨', '🟩', '🟦', '🟪', '🟫', '⬛', '⬜'];
