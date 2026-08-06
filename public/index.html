@@ -3198,6 +3198,14 @@ api('/api/auth/me').then(m => {
     loadHealth();
     loadBadges();
     setInterval(loadBadges, 3 * 60 * 1000);
+    // the admin check can resolve AFTER a tab was already opened (slow DB) — re-run the active
+    // admin-gated tab so its admin buttons (Import, Sync all, ＋ Add, edit/delete) appear
+    if (window.isAdmin) {
+      const active = document.querySelector('.section.active')?.id;
+      if (active === 's-fulfillment') loadFulfillment();
+      else if (active === 's-freight') loadFreight();
+      else if (active === 's-stock') loadStock();
+    }
   }
 }).catch(() => {});
 
