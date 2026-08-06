@@ -990,7 +990,7 @@ function renderFgTable() {
   const arrow = key => fgSort && fgSort.key === key ? ' ▼' : '';
   const delBtn = label => `<button title="Remove this source" onclick="event.stopPropagation();clearSource('${esc(label).replace(/'/g,'&#39;')}')" style="display:block;margin:0 auto 4px;width:20px;height:20px;line-height:1;font-weight:800;font-size:13px;color:#101114;background:var(--yellow);border:1px solid rgba(16,17,20,.3);border-radius:4px;cursor:pointer">✕</button>`;
   document.getElementById('fgHead').innerHTML = `<tr>
-    <th style="cursor:pointer" onclick="sortFg('__sku')">SKU${arrow('__sku')}</th><th>Description</th>${srcs.map(s =>
+    <th style="cursor:pointer" onclick="sortFg('__sku')">SKU${arrow('__sku')}</th><th>Product name</th>${srcs.map(s =>
       `<th style="text-align:center;cursor:pointer;vertical-align:bottom" onclick="sortFg('${s.key}')">${!s.api && window.isAdmin ? delBtn(s.label) : ''}<span class="src-badge" style="background:${s.color}">${esc(s.label)}</span>${arrow(s.key)}</th>`).join('')}
     <th style="text-align:center;cursor:pointer" onclick="sortFg('__total')">Total${arrow('__total')}</th></tr>`;
   let rows = (fgData.rows || []).filter(r => ((r.sku || '') + ' ' + (r.name || '')).toLowerCase().includes(q));
@@ -1015,7 +1015,7 @@ function exportGrid() {
   const srcs = fgData.sources || [], rows = fgData.rows || [];
   if (!rows.length) return;
   const q = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-  const header = ['SKU', 'Description', ...srcs.map(s => s.label), 'Total'];
+  const header = ['SKU', 'Product name', ...srcs.map(s => s.label), 'Total'];
   const lines = [header.map(q).join(',')];
   rows.forEach(r => lines.push([r.sku || '', r.name || '', ...srcs.map(s => r.vals[s.key] || 0), r.total || 0].map(q).join(',')));
   const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });

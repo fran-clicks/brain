@@ -2138,6 +2138,15 @@ app.get('/api/fulfillment/grid', async (_req, res) => {
     ...Object.entries(manualSources).map(([key, label], i) =>
       ({ key, label, color: GRID_PALETTE[i % GRID_PALETTE.length], api: false }))
   ];
+  // resolve product names the same way the UK stock tab does: UK-stock name first, then Shopify title (+ variant),
+  // falling back to the source description only if neither exists
+  const gskus = Object.keys(bySku);
+  if (gskus.length) {
+    const nm = (await pool.query(
+      `SELECT sku, coalesce(us.name, pi.title) nm, nullif(pi.variant_title, '') variant FROM unnest($1::text[]) sku
+       LEFT JOIN product_images pi USING (sku) LEFT JOIN uk_stock us USING (sku)`, [gskus])).rows;
+    nm.forEach(r => { if (r.nm) bySku[r.sku].name = r.variant ? `${r.nm} — ${r.variant}` : r.nm; });
+  }
   // order columns to match the imported sheet's layout (ShipBob→'shipbob', Floship→'floship', others by label);
   // anything not in the sheet falls to the end
   const ordOf = s => srcOrdMap[s.api ? s.key : s.label] ?? (900 + sources.indexOf(s));
