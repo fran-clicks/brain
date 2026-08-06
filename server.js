@@ -2026,7 +2026,7 @@ app.post('/api/freight', async (req, res) => {
          items=$7, stages=$8, step=$9, updated_at=now() WHERE id=$10 RETURNING id`, [...f, parseInt(b.id)]);
     if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
     res.json({ ok: true, id: r.rows[0].id });
-    if (notify) notifyFreight('edited', { name: b.name, from_country: b.from_country, to_country: b.to_country,
+    if (notify) notifyFreight('edited', { id: parseInt(b.id), name: b.name, from_country: b.from_country, to_country: b.to_country,
       carrier: b.carrier, eta, notes: b.notes, items, stages, step });
     return;
   }
@@ -2034,7 +2034,7 @@ app.post('/api/freight', async (req, res) => {
     `INSERT INTO freight_shipments (name, from_country, to_country, carrier, eta, notes, items, stages, step, created_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [...f, readSession(req) || '']);
   res.json({ ok: true, id: r.rows[0].id });
-  if (notify) notifyFreight('created', { name: b.name, from_country: b.from_country, to_country: b.to_country,
+  if (notify) notifyFreight('created', { id: r.rows[0].id, name: b.name, from_country: b.from_country, to_country: b.to_country,
     carrier: b.carrier, eta, notes: b.notes, items, stages, step }); // best-effort Slack post, after responding
 });
 // quick stage advance (click a step on the progress bar) — does NOT post to Slack (use the Post button for that)
@@ -2053,7 +2053,7 @@ app.post('/api/freight/announce', async (req, res) => {
     [parseInt(req.body?.id)])).rows[0];
   if (!row) return res.status(404).json({ error: 'shipment not found' });
   res.json({ ok: true });
-  notifyFreight('update', row);
+  notifyFreight('update', { ...row, id: parseInt(req.body?.id) });
 });
 // mark a shipment complete (all stages done) — posts a Slack "completed" alert
 app.post('/api/freight/complete', async (req, res) => {
@@ -2065,7 +2065,7 @@ app.post('/api/freight/complete', async (req, res) => {
   const n = (Array.isArray(row.stages) ? row.stages.length : 0) + 1; // step past the last stage = all done
   await pool.query(`UPDATE freight_shipments SET step=$2, updated_at=now() WHERE id=$1`, [id, n]);
   res.json({ ok: true });
-  if (req.body?.notify !== false) notifyFreight('completed', row);
+  if (req.body?.notify !== false) notifyFreight('completed', { ...row, id });
 });
 app.post('/api/freight/delete', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
@@ -2076,7 +2076,7 @@ app.post('/api/freight/delete', async (req, res) => {
   const r = await pool.query('DELETE FROM freight_shipments WHERE id=$1', [id]);
   if (!r.rowCount) return res.status(404).json({ error: 'shipment not found' });
   res.json({ ok: true });
-  if (row) notifyFreight('deleted', row);
+  if (row) notifyFreight('deleted', { ...row, id });
 });
 // documents: upload (base64), download, delete
 app.post('/api/freight/doc', async (req, res) => {
@@ -3294,7 +3294,7 @@ async function notifyFreight(action, sh, extra) {
 
     const blocks = [
       { type: 'header', text: { type: 'plain_text', text: header, emoji: true } },
-      { type: 'section', text: { type: 'mrkdwn', text: `*${slackEsc(name)}*   ${freightColor(name)}` } },
+      { type: 'section', text: { type: 'mrkdwn', text: `*${slackEsc(name)}*${sh.id != null ? `   ·   ID ${sh.id}` : ''}   ${freightColor(sh.id != null ? 'F' + sh.id : name)}` } },
       { type: 'section', fields: [
         { type: 'mrkdwn', text: `*Route*\n${slackEsc(sh.from_country || '?')}  →  ${slackEsc(sh.to_country || '?')}` },
         { type: 'mrkdwn', text: `*ETA*\n${eta}` },
