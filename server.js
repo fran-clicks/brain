@@ -2143,9 +2143,12 @@ app.get('/api/fulfillment/grid', async (_req, res) => {
   const gskus = Object.keys(bySku);
   if (gskus.length) {
     const nm = (await pool.query(
-      `SELECT sku, coalesce(us.name, pi.title) nm, nullif(pi.variant_title, '') variant FROM unnest($1::text[]) sku
+      `SELECT sku, us.name us_name, pi.title p_title, nullif(pi.variant_title, '') variant FROM unnest($1::text[]) sku
        LEFT JOIN product_images pi USING (sku) LEFT JOIN uk_stock us USING (sku)`, [gskus])).rows;
-    nm.forEach(r => { if (r.nm) bySku[r.sku].name = r.variant ? `${r.nm} — ${r.variant}` : r.nm; });
+    nm.forEach(r => {
+      if (r.us_name) bySku[r.sku].name = r.us_name;                                    // UK-stock name as-is (already has model + colour), matches the UK Stock tab
+      else if (r.p_title) bySku[r.sku].name = r.variant ? `${r.p_title} — ${r.variant}` : r.p_title; // Shopify fallback: base title + colour
+    });
   }
   // order columns to match the imported sheet's layout (ShipBob→'shipbob', Floship→'floship', others by label);
   // anything not in the sheet falls to the end
