@@ -904,7 +904,7 @@ footer{color:rgba(16,17,20,.45)}
   </div>
   <div class="card" id="membersCard" style="display:none">
     <h2>👥 Members <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
-    <table id="membersTable"><thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Invite link</th><th></th></tr></thead><tbody></tbody></table>
+    <table id="membersTable"><thead><tr><th>Email</th><th>Role</th><th>🚢 Shipping docs</th><th>Status</th><th>Invite link</th><th></th></tr></thead><tbody></tbody></table>
     <div class="grid two" style="margin-top:10px">
       <div><label>Email</label><input id="uEmail" type="email" placeholder="name@clicks.tech"></div>
       <div><label>Role</label><select id="uRole"><option value="member">member</option><option value="admin">admin</option></select></div>
@@ -3182,12 +3182,20 @@ async function loadMembers() {
       const remove = canRemove
         ? `<button class="btn" style="margin:0;padding:3px 10px;font-size:12px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="removeUser('${esc(u.email)}')">Remove</button>`
         : '<span style="color:var(--muted);font-size:12px">you</span>';
+      const ship = u.role === 'admin'
+        ? '<span style="color:var(--muted);font-size:12px">✓ (admin)</span>'
+        : `<button class="btn" style="margin:0;padding:3px 10px;font-size:12px;${u.shipping ? '' : 'background:#fff;border:1px solid var(--line);box-shadow:none;color:var(--muted)'}" onclick="toggleShipping('${esc(u.email)}',${u.shipping ? 'false' : 'true'})">${u.shipping ? '🚢 On' : 'Off'}</button>`;
       return `<tr><td><b>${esc(u.email)}</b></td>
        <td><span class="tag ${u.role === 'admin' ? 'date' : 'src'}">${esc(u.role)}</span></td>
+       <td>${ship}</td>
        <td><span class="tag ${u.activated ? 'approved' : 'pending'}">${u.activated ? 'active' : 'awaiting activation'}</span></td>
        <td>${invite}</td><td>${remove}</td></tr>`;
     }).join('');
   } catch {}
+}
+async function toggleShipping(email, on) {
+  try { await api('/api/users/shipping', {method:'POST', body: JSON.stringify({ email, shipping: on })}); loadMembers(); }
+  catch (e) { alert(e.message); }
 }
 async function removeUser(email) {
   if (!confirm(`Remove ${email}? Their account and password are deleted. You can re-add them to send a fresh invite.`)) return;

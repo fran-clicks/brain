@@ -138,7 +138,7 @@ const newInvite = () => ({ token: crypto.randomBytes(24).toString('hex'),
 app.get('/api/users', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const { rows } = await pool.query(
-    `SELECT email, role, (pass_hash IS NOT NULL) AS activated, invite_token, invite_expires, created_at FROM users ORDER BY created_at`);
+    `SELECT email, role, coalesce(shipping,false) shipping, (pass_hash IS NOT NULL) AS activated, invite_token, invite_expires, created_at FROM users ORDER BY created_at`);
   res.json(rows);
 });
 app.post('/api/users', async (req, res) => {
@@ -206,9 +206,26 @@ app.post('/api/auth/activate', async (req, res) => {
 app.get('/api/auth/me', async (req, res) => {
   const email = readSession(req);
   if (!email) return res.json({ email: null });
-  const { rows } = await pool.query('SELECT role FROM users WHERE email=$1', [email]);
-  res.json({ email, role: rows[0]?.role || 'member' });
+  const { rows } = await pool.query('SELECT role, coalesce(shipping,false) shipping FROM users WHERE email=$1', [email]);
+  const role = rows[0]?.role || 'member';
+  // "shipping" sub-role (or admin) may view freight documents
+  res.json({ email, role, shipping: !!rows[0]?.shipping, freight_docs: role === 'admin' || !!rows[0]?.shipping });
 });
+// admin: toggle a member's "shipping" sub-role (lets them see freight documents)
+app.post('/api/users/shipping', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const em = String(req.body?.email || '').toLowerCase().trim();
+  const on = req.body?.shipping === true;
+  const r = await pool.query('UPDATE users SET shipping=$2 WHERE email=$1 RETURNING email, shipping', [em, on]);
+  if (!r.rowCount) return res.status(404).json({ error: 'User not found.' });
+  res.json({ ok: true, email: em, shipping: on });
+});
+// admin or a member with the shipping sub-role
+async function canSeeFreightDocs(req) {
+  if (!req.userEmail) return false;
+  const { rows } = await pool.query('SELECT role, coalesce(shipping,false) shipping FROM users WHERE email=$1', [req.userEmail]);
+  return rows[0]?.role === 'admin' || rows[0]?.shipping === true;
+}
 
 // ---------- Postgres ----------
 const pool = new Pool({
@@ -363,6 +380,7 @@ async function initDb() {
     ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'member';
     ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_token TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS invite_expires TIMESTAMPTZ;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS shipping BOOLEAN DEFAULT false;
     CREATE TABLE IF NOT EXISTS connection_requests (
       id SERIAL PRIMARY KEY, service TEXT NOT NULL, reason TEXT NOT NULL,
       requested_by TEXT DEFAULT 'anonymous', status TEXT DEFAULT 'pending',
@@ -2083,15 +2101,21 @@ app.post('/api/floship/sync', async (req, res) => {
 // ---------- Freight tracker (shipment builder: fields, items, documents, configurable stage stepper) ----------
 const FREIGHT_STAGES = ['Shipment booked', 'Picked up / dropped off', 'En route to destination country',
   'Arrived at destination country', 'Customs clearance', 'En route to final warehouse', 'Arrived at warehouse'];
-app.get('/api/freight', async (_req, res) => {
+app.get('/api/freight', async (req, res) => {
   const rows = (await pool.query(
     `SELECT id, name, reference, from_country, to_country, carrier, to_char(eta,'YYYY-MM-DD') eta,
        notes, items, stages, step, created_by, updated_at
      FROM freight_shipments ORDER BY eta ASC NULLS LAST, id DESC`)).rows;
-  const docs = (await pool.query(`SELECT id, shipment_id, label, filename, mime FROM freight_docs ORDER BY id`)).rows;
-  const byShip = {}; docs.forEach(d => (byShip[d.shipment_id] = byShip[d.shipment_id] || []).push(d));
-  rows.forEach(r => { r.docs = byShip[r.id] || []; });
-  res.json({ default_stages: FREIGHT_STAGES, shipments: rows });
+  // documents are only exposed to admins and members with the "shipping" sub-role
+  const canDocs = await canSeeFreightDocs(req);
+  if (canDocs) {
+    const docs = (await pool.query(`SELECT id, shipment_id, label, filename, mime FROM freight_docs ORDER BY id`)).rows;
+    const byShip = {}; docs.forEach(d => (byShip[d.shipment_id] = byShip[d.shipment_id] || []).push(d));
+    rows.forEach(r => { r.docs = byShip[r.id] || []; });
+  } else {
+    rows.forEach(r => { r.docs = []; });
+  }
+  res.json({ default_stages: FREIGHT_STAGES, shipments: rows, can_docs: canDocs });
 });
 app.post('/api/freight', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
@@ -2174,7 +2198,7 @@ app.post('/api/freight/doc', async (req, res) => {
   res.json({ ok: true, id: r.rows[0].id });
 });
 app.get('/api/freight/doc/:id', async (req, res) => {
-  if (!readSession(req)) return res.status(403).send('sign in');
+  if (!(await canSeeFreightDocs(req))) return res.status(403).send('not authorised — freight documents are for admins and the shipping role');
   const d = (await pool.query('SELECT filename, mime, data FROM freight_docs WHERE id=$1', [parseInt(req.params.id)])).rows[0];
   if (!d) return res.status(404).send('not found');
   res.set('Content-Type', d.mime || 'application/octet-stream');
