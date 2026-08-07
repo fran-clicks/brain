@@ -445,6 +445,12 @@ footer{color:rgba(16,17,20,.45)}
       <table id="gDifficult"><thead><tr><th>Subject</th><th>Messages</th><th>Status</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
+  <div class="card">
+    <h2>🚫 Cancellation & refund tickets <span style="font-weight:400;color:var(--muted);font-size:12px" id="crLabel"></span></h2>
+    <div class="note" style="margin-top:0">From Gorgias ticket fields. "Resolved as" (the Solved-by field) shows what actually happened — a real refund/cancellation vs a query that was retained or answered.</div>
+    <div class="grid two" id="crGrid" style="margin-top:10px"></div>
+    <div class="note" id="crNote" style="margin-top:8px"></div>
+  </div>
   <div class="card" id="gRepeatCard" style="display:none">
     <h2>🔁 Repeat customers <span style="font-weight:400;color:var(--muted);font-size:12px">· 90d · admins only</span></h2>
     <table id="gRepeat"><thead><tr><th>Customer</th><th>Email</th><th>Tickets</th></tr></thead><tbody></tbody></table>
@@ -2796,7 +2802,30 @@ function applyGCustom() {
 const gLabel = () => gCustom
   ? `${new Date(gCustom.from).toLocaleDateString(undefined,{month:'short',day:'numeric'})}–${new Date(gCustom.to).toLocaleDateString(undefined,{month:'short',day:'numeric'})}`
   : ({7:'7d',30:'30d',90:'3m',180:'6m',365:'1y'})[gDays] || gDays + 'd';
+async function loadCancelRefund() {
+  document.getElementById('crLabel').textContent = '· ' + (gCustom ? gLabel() : 'last ' + gLabel());
+  const qs = gCustom ? `from=${gCustom.from}&to=${gCustom.to}` : `days=${gDays}`;
+  const block = (title, d) => {
+    const cap = (n, w) => `<span title="${w} of ${n} tickets have this field filled in">${w}/${n}</span>`;
+    const res = (d.resolutions || []).map(r => {
+      const done = /refund|cancellation|replacement/i.test(r.solved_by);
+      return `<tr><td>${done ? '✅ ' : ''}${esc(r.solved_by)}</td><td style="text-align:right">${r.c}</td></tr>`;
+    }).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
+    return `<div class="card" style="margin:0">
+      <h2 style="font-size:15px">${title} <span style="font-weight:700">${(d.total||0).toLocaleString()}</span></h2>
+      <div class="note" style="margin:2px 0 8px">Fields captured — model ${cap(d.total, d.with_model)} · colour ${cap(d.total, d.with_colour)} · category ${cap(d.total, d.with_category)}</div>
+      <div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em">Resolved as</div>
+      <table style="margin-top:4px"><tbody>${res}</tbody></table>
+    </div>`;
+  };
+  try {
+    const r = await api('/api/gorgias/cancel-refund?' + qs);
+    document.getElementById('crGrid').innerHTML = block('🚫 Cancellation tickets', r.cancel) + block('💸 Refund tickets', r.refund);
+    document.getElementById('crNote').textContent = '✅ = resolved as an actual refund / cancellation / replacement (not just a query). Populates as the ticket re-sync captures custom fields.';
+  } catch (e) { document.getElementById('crNote').textContent = '⚠️ ' + e.message; }
+}
 async function loadGorgias() {
+  loadCancelRefund();
   const note = document.getElementById('gorgiasNote');
   document.getElementById('gLoading').classList.add('on');
   document.getElementById('gUpdating').classList.add('on');

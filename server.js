@@ -260,6 +260,13 @@ async function initDb() {
     ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS messages_count INT;
     ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS customer_email TEXT DEFAULT '';
     ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS customer_name TEXT DEFAULT '';
+    ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS cf_category TEXT DEFAULT '';
+    ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS cf_model TEXT DEFAULT '';
+    ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS cf_colour TEXT DEFAULT '';
+    ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS cf_country TEXT DEFAULT '';
+    ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS cf_solved_by TEXT DEFAULT '';
+    ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS cf_ai_intent TEXT DEFAULT '';
+    ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS custom_fields JSONB DEFAULT '{}';
     CREATE INDEX IF NOT EXISTS idx_tc_created ON tickets_cache (created_datetime);
     CREATE INDEX IF NOT EXISTS idx_tc_closed ON tickets_cache (closed_datetime);
     CREATE TABLE IF NOT EXISTS events (
@@ -837,18 +844,27 @@ async function getGorgiasConfig() {
 let syncRunning = false;
 const BACKFILL_HORIZON_DAYS = 400; // keep ~13 months of history
 
+// Gorgias custom-field IDs for this account (from /api/gorgias/debug). Values come through on each ticket
+// as custom_fields[id].value. "Other"/blank is kept as-is; callers treat those as "not captured".
+const GORGIAS_CF = { category: '235346', model: '235348', colour: '235351', country: '235350', solved_by: '235349', ai_intent: '229827' };
+const cfVal = (cf, key) => String(cf?.[GORGIAS_CF[key]]?.value || '').slice(0, 200);
 async function upsertTicket(x) {
+  const cf = x.custom_fields || {};
   await pool.query(
-    `INSERT INTO tickets_cache (gorgias_id, status, subject, channel, tags, created_datetime, closed_datetime, updated_datetime, spam, messages_count, customer_email, customer_name, synced_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
+    `INSERT INTO tickets_cache (gorgias_id, status, subject, channel, tags, created_datetime, closed_datetime, updated_datetime, spam, messages_count, customer_email, customer_name,
+       cf_category, cf_model, cf_colour, cf_country, cf_solved_by, cf_ai_intent, custom_fields, synced_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,now())
      ON CONFLICT (gorgias_id) DO UPDATE SET status=$2, subject=$3, channel=$4, tags=$5,
        created_datetime=$6, closed_datetime=$7, updated_datetime=$8, spam=$9,
-       messages_count=$10, customer_email=$11, customer_name=$12, synced_at=now()`,
+       messages_count=$10, customer_email=$11, customer_name=$12,
+       cf_category=$13, cf_model=$14, cf_colour=$15, cf_country=$16, cf_solved_by=$17, cf_ai_intent=$18, custom_fields=$19, synced_at=now()`,
     [x.id, x.status || '', (x.subject || '').slice(0, 500), x.channel || '',
      JSON.stringify((x.tags || []).map(g => g?.name).filter(Boolean)),
      x.created_datetime || null, x.closed_datetime || null, x.updated_datetime || null, !!x.spam,
      Number.isFinite(x.messages_count) ? x.messages_count : null,
-     (x.customer?.email || '').slice(0, 200), (x.customer?.name || '').slice(0, 200)]);
+     (x.customer?.email || '').slice(0, 200), (x.customer?.name || '').slice(0, 200),
+     cfVal(cf, 'category'), cfVal(cf, 'model'), cfVal(cf, 'colour'), cfVal(cf, 'country'), cfVal(cf, 'solved_by'), cfVal(cf, 'ai_intent'),
+     JSON.stringify(cf)]);
 }
 
 // re-verify every ticket the cache still thinks is open against Gorgias, in batches of 100.
@@ -889,8 +905,8 @@ async function syncGorgias(maxPages = 8) {
   if (!cfg) return { configured: false };
   syncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)).rows[0]?.v || {};
-  if (st.data_version !== 2) { // re-backfill to populate spam + messages_count + customer on existing rows
-    st.data_version = 2; st.backfill_cursor = null; st.backfill_done = false;
+  if (st.data_version !== 3) { // v3: re-backfill to populate custom fields (category/model/colour/country/solved_by/ai_intent)
+    st.data_version = 3; st.backfill_cursor = null; st.backfill_done = false;
   }
   let pages = 0, upserts = 0, lastError = null;
   const horizon = Date.now() - BACKFILL_HORIZON_DAYS * 864e5;
@@ -1050,6 +1066,30 @@ app.get('/api/gorgias/debug', async (req, res) => {
     try { if (sample[0]) ticketFieldVals = await gorgiasRequest(cfg, `/api/tickets/${sample[0].id}/custom-fields`); } catch (e) { ticketFieldVals = { error: e.message }; }
     res.json({ ticket_top_level_keys: keys, sample_tickets: sample, custom_field_defs: customFieldDefs, ticket_field_values: ticketFieldVals });
   } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
+// cancellation & refund ticket tracker (from Gorgias custom fields), with timeframe + field-capture + resolution
+app.get('/api/gorgias/cancel-refund', async (req, res) => {
+  try {
+    const win = resolveWindow(req.query);
+    const p = [win.start.toISOString(), win.end.toISOString()];
+    const captured = c => `count(*) FILTER (WHERE ${c} <> '' AND ${c} !~* 'other')::int`;
+    const group = async (matchSql) => {
+      const base = `FROM tickets_cache WHERE NOT spam AND created_datetime >= $1 AND created_datetime < $2 AND (${matchSql})`;
+      const totals = (await pool.query(
+        `SELECT count(*)::int total, ${captured('cf_model')} with_model, ${captured('cf_colour')} with_colour,
+          ${captured('cf_category')} with_category, ${captured('cf_country')} with_country, ${captured('cf_solved_by')} with_solved ${base}`, p)).rows[0];
+      const resolutions = (await pool.query(
+        `SELECT coalesce(nullif(cf_solved_by,''),'(not set)') solved_by, count(*)::int c ${base} GROUP BY 1 ORDER BY 2 DESC`, p)).rows;
+      const models = (await pool.query(
+        `SELECT cf_model model, count(*)::int c ${base} AND cf_model <> '' AND cf_model !~* 'other' GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, p)).rows;
+      return { ...totals, resolutions, models };
+    };
+    // Category encodes the intent; AI Intent is the fallback signal
+    const cancel = await group(`cf_category ILIKE '%cancellation%' OR cf_ai_intent ILIKE 'Order::Cancel%'`);
+    const refund = await group(`cf_category ILIKE '%refund%' OR cf_ai_intent ILIKE 'Order::Refund%'`);
+    res.json({ days: win.days, custom: win.custom, from: p[0], to: p[1], cancel, refund });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ---------- Redo (returns) ----------
