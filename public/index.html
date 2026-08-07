@@ -513,7 +513,6 @@ footer{color:rgba(16,17,20,.45)}
     <div class="note" id="kvNote">Loading Klaviyo data…</div>
     <div class="right">
       <span class="updating-pill" id="kvUpdating"><div class="spin"></div>Updating…</span>
-      <button class="btn" id="kvTestBtn" onclick="kvTestNotify(this)" style="display:none;margin:0 6px 0 0;padding:6px 14px;background:#fff;border:1px solid var(--line);box-shadow:none">📤 Test Slack alert</button>
       <button class="btn" id="kvSyncBtn" onclick="kvSync()">🔄 Sync now</button>
     </div>
   </div>
@@ -2581,7 +2580,6 @@ async function loadKlaviyo() {
   const note = document.getElementById('kvNote');
   document.getElementById('kvUpdating').classList.add('on');
   try {
-    document.getElementById('kvTestBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
     const s = await api('/api/klaviyo/summary');
     if (!s.configured) { note.textContent = 'Klaviyo is not connected — an admin can add it on the ＋ page.'; return; }
     const t = s.totals_30d || {};
