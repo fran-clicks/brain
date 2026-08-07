@@ -1082,8 +1082,10 @@ app.get('/api/gorgias/cancel-refund', async (req, res) => {
       const resolutions = (await pool.query(
         `SELECT coalesce(nullif(cf_solved_by,''),'(not set)') solved_by, count(*)::int c ${base} GROUP BY 1 ORDER BY 2 DESC`, p)).rows;
       const models = (await pool.query(
-        `SELECT cf_model model, count(*)::int c ${base} AND cf_model <> '' AND cf_model !~* 'other' GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, p)).rows;
-      return { ...totals, resolutions, models };
+        `SELECT cf_model model, count(*)::int c ${base} AND cf_model <> '' AND cf_model !~* 'other' GROUP BY 1 ORDER BY 2 DESC LIMIT 12`, p)).rows;
+      const colours = (await pool.query(
+        `SELECT cf_colour colour, count(*)::int c ${base} AND cf_colour <> '' AND cf_colour !~* 'other' GROUP BY 1 ORDER BY 2 DESC LIMIT 12`, p)).rows;
+      return { ...totals, resolutions, models, colours };
     };
     // Category encodes the intent; AI Intent is the fallback signal
     const cancel = await group(`cf_category ILIKE '%cancellation%' OR cf_ai_intent ILIKE 'Order::Cancel%'`);

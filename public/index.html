@@ -2805,17 +2805,22 @@ const gLabel = () => gCustom
 async function loadCancelRefund() {
   document.getElementById('crLabel').textContent = '· ' + (gCustom ? gLabel() : 'last ' + gLabel());
   const qs = gCustom ? `from=${gCustom.from}&to=${gCustom.to}` : `days=${gDays}`;
+  const clean = v => String(v || '').split('::').pop().trim(); // "iPhone::iPhone 15::15 Pro" → "15 Pro"
   const block = (title, d) => {
     const cap = (n, w) => `<span title="${w} of ${n} tickets have this field filled in">${w}/${n}</span>`;
     const res = (d.resolutions || []).map(r => {
       const done = /refund|cancellation|replacement/i.test(r.solved_by);
       return `<tr><td>${done ? '✅ ' : ''}${esc(r.solved_by)}</td><td style="text-align:right">${r.c}</td></tr>`;
     }).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
+    const bars = (arr, key) => (arr || []).length ? arr.map(x =>
+      `<tr><td>${esc(clean(x[key]))}</td><td style="text-align:right">${x.c}</td></tr>`).join('') : '<tr><td colspan="2" class="empty">—</td></tr>';
+    const lbl = t => `<div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-top:10px">${t}</div>`;
     return `<div class="card" style="margin:0">
       <h2 style="font-size:15px">${title} <span style="font-weight:700">${(d.total||0).toLocaleString()}</span></h2>
-      <div class="note" style="margin:2px 0 8px">Fields captured — model ${cap(d.total, d.with_model)} · colour ${cap(d.total, d.with_colour)} · category ${cap(d.total, d.with_category)}</div>
-      <div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em">Resolved as</div>
-      <table style="margin-top:4px"><tbody>${res}</tbody></table>
+      <div class="note" style="margin:2px 0 0">Fields captured — model ${cap(d.total, d.with_model)} · colour ${cap(d.total, d.with_colour)} · category ${cap(d.total, d.with_category)}</div>
+      ${lbl('📱 Models flagged')}<table style="margin-top:4px"><tbody>${bars(d.models, 'model')}</tbody></table>
+      ${lbl('🌈 Colours flagged')}<table style="margin-top:4px"><tbody>${bars(d.colours, 'colour')}</tbody></table>
+      ${lbl('Resolved as')}<table style="margin-top:4px"><tbody>${res}</tbody></table>
     </div>`;
   };
   try {
