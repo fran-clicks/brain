@@ -195,6 +195,10 @@ footer{color:rgba(16,17,20,.45)}
     <input id="askInput" placeholder='Ask the brain anything — "cancellation refund tickets closed this week", "what happened around June 20?"…'>
     <button class="btn" onclick="askBrain()">Ask 🧠</button>
   </div>
+  <div id="reportNowWrap" style="display:none;margin-bottom:10px">
+    <button class="btn" onclick="sendDailyReport(this)" style="margin:0;padding:6px 14px;background:#fff;border:1px solid var(--line);box-shadow:none">📤 Send daily report to Slack now</button>
+    <span class="note" style="margin-left:8px">Auto-posts every day at 18:00 London.</span>
+  </div>
   <div class="periods" id="periods">
     <button data-d="7" class="active">7 days</button>
     <button data-d="30">1 month</button>
@@ -3347,6 +3351,7 @@ api('/api/auth/me').then(m => {
       // admins act via their login — hide the password prompts
       document.getElementById('rqPw')?.closest('div')?.style.setProperty('display', 'none');
       document.getElementById('cPw')?.closest('div')?.style.setProperty('display', 'none');
+      document.getElementById('reportNowWrap').style.display = 'block';
     }
     loadKbs(); // re-render with admin controls if applicable
     loadMembers();
