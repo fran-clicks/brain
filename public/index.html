@@ -384,12 +384,8 @@ footer{color:rgba(16,17,20,.45)}
       <span class="updating-pill" id="canUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
     </h2>
     <input class="search" id="canSearch" placeholder="Search product or SKU…">
-    <table id="canTable"><thead><tr><th>SKU / product</th><th style="text-align:right">Units cancelled</th><th style="text-align:right">Orders</th><th></th></tr></thead><tbody></tbody></table>
+    <table id="canTable"><thead><tr><th>SKU / product</th><th style="text-align:right">Units cancelled</th><th style="text-align:right">Orders</th></tr></thead><tbody></tbody></table>
     <div class="note" id="canNote" style="margin-top:8px"></div>
-    <div id="canDetail" style="display:none;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
-      <h2 style="font-size:15px" id="canDetailTitle"></h2>
-      <table id="canDetailOrders"><thead><tr><th>Order</th><th>Cancelled</th><th style="text-align:right">Qty</th></tr></thead><tbody></tbody></table>
-    </div>
   </div>
   <div class="card">
     <h2>Recent orders</h2>
@@ -2294,12 +2290,11 @@ function renderCanTable() {
   const q = (document.getElementById('canSearch').value || '').toLowerCase();
   const rows = canRows.filter(r => (r.sku + ' ' + (r.name || '')).toLowerCase().includes(q));
   document.querySelector('#canTable tbody').innerHTML = rows.length ? rows.map(r =>
-    `<tr style="cursor:pointer" onclick="openCancelProduct('${esc(r.sku).replace(/'/g, "\\'")}')">
+    `<tr>
       <td><span class="tag src">${esc(r.sku)}</span>${r.name && r.name !== r.sku ? ` ${esc(r.name)}` : ''}</td>
       <td style="text-align:right;font-weight:600">${r.units.toLocaleString()}</td>
-      <td style="text-align:right">${r.orders.toLocaleString()}</td>
-      <td><a href="#" onclick="event.stopPropagation();openCancelProduct('${esc(r.sku).replace(/'/g, "\\'")}');return false">orders →</a></td></tr>`).join('')
-    : '<tr><td colspan="4" class="empty">No cancellations in this window 🎉</td></tr>';
+      <td style="text-align:right">${r.orders.toLocaleString()}</td></tr>`).join('')
+    : '<tr><td colspan="3" class="empty">No cancellations in this window 🎉</td></tr>';
 }
 document.getElementById('canSearch').oninput = renderCanTable;
 async function loadCancellations() {
@@ -2312,22 +2307,8 @@ async function loadCancellations() {
     document.getElementById('canNote').textContent = canRows.length
       ? `${canRows.length} products · ${totU.toLocaleString()} units cancelled (90d)`
       : 'No cancellations in the last 90 days.';
-    document.getElementById('canDetail').style.display = 'none';
   } catch (e) { document.getElementById('canNote').textContent = '⚠️ ' + e.message; }
   finally { pill.classList.remove('on'); }
-}
-async function openCancelProduct(sku) {
-  try {
-    const r = await api('/api/shopify/cancellations?window=90&sku=' + encodeURIComponent(sku));
-    document.getElementById('canDetail').style.display = 'block';
-    document.getElementById('canDetailTitle').textContent = (r.name && r.name !== sku ? r.name + ' · ' : '') + sku;
-    const base = r.admin_base || canBase;
-    document.querySelector('#canDetailOrders tbody').innerHTML = (r.orders || []).map(o => {
-      const num = base ? `<a href="${base}${o.shopify_id}" target="_blank"><b>${esc(o.order_number)}</b></a>` : `<b>${esc(o.order_number)}</b>`;
-      return `<tr><td>${num}</td><td>${esc(o.d || '')}</td><td style="text-align:right">${o.qty || 0}</td></tr>`;
-    }).join('') || '<tr><td colspan="3" class="empty">—</td></tr>';
-    document.getElementById('canDetail').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  } catch (e) { document.getElementById('canNote').textContent = '⚠️ ' + e.message; }
 }
 async function showFulfilledDay(day) {
   if (!day) return;
