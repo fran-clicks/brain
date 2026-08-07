@@ -490,6 +490,26 @@ async function getConnector(type) {
 
 app.get('/api/connector-types', async (_req, res) => res.json(await getAllConnectorTypes()));
 
+// update just the Slack alert/freight channels in place (non-secret) — no need to re-enter the bot token
+app.post('/api/slack/channels', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const row = (await pool.query(`SELECT id, config_encrypted, meta FROM connectors WHERE type='slack' AND active=true ORDER BY created_at DESC LIMIT 1`)).rows[0];
+  if (!row) return res.status(404).json({ error: 'Slack is not connected yet — add it first.' });
+  let cfg; try { cfg = decrypt(row.config_encrypted); } catch { return res.status(500).json({ error: 'could not read existing config' }); }
+  const clean = v => String(v || '').trim().slice(0, 120);
+  if (req.body.alert_channel !== undefined) cfg.alert_channel = clean(req.body.alert_channel);
+  if (req.body.freight_channel !== undefined) cfg.freight_channel = clean(req.body.freight_channel);
+  const meta = { ...(row.meta || {}), alert_channel: cfg.alert_channel || '', freight_channel: cfg.freight_channel || '' };
+  await pool.query(`UPDATE connectors SET config_encrypted=$1, meta=$2 WHERE id=$3`, [encrypt(cfg), meta, row.id]);
+  res.json({ ok: true, alert_channel: cfg.alert_channel || '', freight_channel: cfg.freight_channel || '' });
+});
+app.get('/api/slack/channels', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('slack');
+  if (!conn) return res.json({ configured: false });
+  res.json({ configured: true, alert_channel: conn.config.alert_channel || '', freight_channel: conn.config.freight_channel || '' });
+});
+
 app.get('/api/connectors', async (_req, res) => {
   const { rows } = await pool.query(
     'SELECT id, type, name, meta, active, added_by, approval_status, approved_by, created_at, config_encrypted FROM connectors ORDER BY created_at DESC');
