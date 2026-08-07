@@ -228,8 +228,9 @@ async function initDb() {
   // An advisory lock makes the second booting instance wait, then its IF-NOT-EXISTS statements no-op.
   const lockClient = await pool.connect();
   try {
+    await lockClient.query('SET statement_timeout = 0'); // migrations + the lock wait must not be killed by the pool's 20s cap
     await lockClient.query('SELECT pg_advisory_lock(728341)');
-  await pool.query(`
+  await lockClient.query(`
     CREATE TABLE IF NOT EXISTS products (
       id SERIAL PRIMARY KEY, name TEXT NOT NULL, sku TEXT DEFAULT '', specs TEXT DEFAULT '',
       warranty TEXT DEFAULT '', source TEXT DEFAULT 'manual import', created_at TIMESTAMPTZ DEFAULT now());
@@ -368,10 +369,10 @@ async function initDb() {
       decided_by TEXT, decided_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
   `);
   for (const em of ['fran@clicks.tech', 'kp@clicks.tech']) {
-    await pool.query(`INSERT INTO users (email, role) VALUES ($1, 'admin')
+    await lockClient.query(`INSERT INTO users (email, role) VALUES ($1, 'admin')
                       ON CONFLICT (email) DO UPDATE SET role='admin'`, [em]);
   }
-  await pool.query(`INSERT INTO users (email, role) VALUES ('kevin@clicks.tech', 'member')
+  await lockClient.query(`INSERT INTO users (email, role) VALUES ('kevin@clicks.tech', 'member')
                     ON CONFLICT (email) DO NOTHING`);
   } finally {
     await lockClient.query('SELECT pg_advisory_unlock(728341)').catch(() => {});
