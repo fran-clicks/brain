@@ -383,14 +383,12 @@ footer{color:rgba(16,17,20,.45)}
     <h2>❌ Product cancellation explorer <span style="font-weight:400;color:var(--muted);font-size:12px">· cancelled units + reasons per product (last 90 days)</span>
       <span class="updating-pill" id="canUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
     </h2>
-    <div id="canReasons" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
     <input class="search" id="canSearch" placeholder="Search product or SKU…">
     <table id="canTable"><thead><tr><th>SKU / product</th><th style="text-align:right">Units cancelled</th><th style="text-align:right">Orders</th><th></th></tr></thead><tbody></tbody></table>
     <div class="note" id="canNote" style="margin-top:8px"></div>
     <div id="canDetail" style="display:none;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
       <h2 style="font-size:15px" id="canDetailTitle"></h2>
-      <div id="canDetailReasons" style="display:flex;flex-wrap:wrap;gap:6px;margin:6px 0"></div>
-      <table id="canDetailOrders"><thead><tr><th>Order</th><th>Cancelled</th><th>Reason</th><th style="text-align:right">Qty</th></tr></thead><tbody></tbody></table>
+      <table id="canDetailOrders"><thead><tr><th>Order</th><th>Cancelled</th><th style="text-align:right">Qty</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
   <div class="card">
@@ -2309,8 +2307,6 @@ async function loadCancellations() {
   try {
     const r = await api('/api/shopify/cancellations?window=90');
     canRows = r.rows || []; canBase = r.admin_base || '';
-    document.getElementById('canReasons').innerHTML = (r.reasons || []).map(x =>
-      `<span class="tag src">${esc(x.reason)}: <b>${x.orders}</b></span>`).join('');
     renderCanTable();
     const totU = canRows.reduce((s, x) => s + x.units, 0);
     document.getElementById('canNote').textContent = canRows.length
@@ -2325,13 +2321,11 @@ async function openCancelProduct(sku) {
     const r = await api('/api/shopify/cancellations?window=90&sku=' + encodeURIComponent(sku));
     document.getElementById('canDetail').style.display = 'block';
     document.getElementById('canDetailTitle').textContent = (r.name && r.name !== sku ? r.name + ' · ' : '') + sku;
-    document.getElementById('canDetailReasons').innerHTML = (r.reasons || []).map(x =>
-      `<span class="tag src">${esc(x.reason)}: <b>${x.units || 0}</b> units / ${x.orders} orders</span>`).join('') || '<span class="note">No reason breakdown.</span>';
     const base = r.admin_base || canBase;
     document.querySelector('#canDetailOrders tbody').innerHTML = (r.orders || []).map(o => {
       const num = base ? `<a href="${base}${o.shopify_id}" target="_blank"><b>${esc(o.order_number)}</b></a>` : `<b>${esc(o.order_number)}</b>`;
-      return `<tr><td>${num}</td><td>${esc(o.d || '')}</td><td>${esc(o.reason || '—')}</td><td style="text-align:right">${o.qty || 0}</td></tr>`;
-    }).join('') || '<tr><td colspan="4" class="empty">—</td></tr>';
+      return `<tr><td>${num}</td><td>${esc(o.d || '')}</td><td style="text-align:right">${o.qty || 0}</td></tr>`;
+    }).join('') || '<tr><td colspan="3" class="empty">—</td></tr>';
     document.getElementById('canDetail').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) { document.getElementById('canNote').textContent = '⚠️ ' + e.message; }
 }
