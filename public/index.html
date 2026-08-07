@@ -957,10 +957,13 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
 });
 // deep-link support: open a tab directly via #freight etc (used by Slack links)
 function openTabFromHash() {
-  const s = (location.hash || '').replace('#', '');
+  const parts = (location.hash || '').replace('#', '').split('/'); // e.g. "klaviyo/mail/ABC123"
+  const s = parts[0];
   if (!s) return;
   const btn = document.querySelector(`nav button[data-s="${s}"]`);
   if (btn) btn.click();
+  // deep-link straight to a specific Klaviyo email in the sandboxed viewer
+  if (s === 'klaviyo' && parts[1] === 'mail' && parts[2]) setTimeout(() => openMail(decodeURIComponent(parts[2])), 400);
 }
 window.addEventListener('hashchange', openTabFromHash);
 

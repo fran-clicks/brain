@@ -286,6 +286,7 @@ async function initDb() {
     ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS from_email TEXT;
     ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS html TEXT;
     ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS text_body TEXT;
+    ALTER TABLE campaigns_cache ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
     CREATE TABLE IF NOT EXISTS flows_cache (
       flow_id TEXT PRIMARY KEY, name TEXT DEFAULT '', status TEXT DEFAULT '', channel TEXT DEFAULT '',
       recipients INT, open_rate DOUBLE PRECISION, click_rate DOUBLE PRECISION, revenue NUMERIC, synced_at TIMESTAMPTZ DEFAULT now());
@@ -990,6 +991,7 @@ setInterval(async () => {
     const ks = (await pool.query(`SELECT v FROM sync_state WHERE k='klaviyo'`)).rows[0]?.v;
     if (await getConnector('klaviyo') && (!ks?.last_run || Date.now() - Date.parse(ks.last_run) > 55 * 60 * 1000)) {
       await syncKlaviyo();
+      await notifyNewCampaigns();
     }
   } catch (e) { console.error('interval klaviyo sync:', e.message); }
   try {
@@ -1533,7 +1535,7 @@ app.get('/api/klaviyo/debug', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/klaviyo/sync', async (_req, res) => {
-  try { res.json(await syncKlaviyo()); }
+  try { const r = await syncKlaviyo(); res.json(r); notifyNewCampaigns(); }
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 
@@ -3345,6 +3347,46 @@ async function notifyFreight(action, sh, extra) {
     const fallback = `${header} — ${name} · ${sh.from_country || '?'} → ${sh.to_country || '?'} · Stage: ${stageText}`;
     await slackPost(conn.config.bot_token, channel, fallback, undefined, blocks);
   } catch (e) { console.error('freight slack notify failed:', e.message); }
+}
+
+// post a Slack alert for each newly-sent Klaviyo campaign (called after every Klaviyo sync).
+// Only campaigns sent in the last few hours are posted; older un-notified ones are marked silently
+// so a first run (or downtime) never floods the channel with history.
+async function notifyNewCampaigns() {
+  try {
+    const conn = await getConnector('slack');
+    if (!conn?.config?.bot_token) return;
+    const channel = (conn.config.alert_channel || '#clicksbrain').trim();
+    const appUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || 'https://clicks-brain.onrender.com').replace(/\/$/, '');
+    // silently mark anything older than the window so we never post stale campaigns
+    await pool.query(`UPDATE campaigns_cache SET notified_at=now()
+                      WHERE notified_at IS NULL AND (send_time IS NULL OR send_time < now() - interval '6 hours')`);
+    const fresh = (await pool.query(
+      `SELECT klaviyo_id, name, channel, to_char(send_time,'DD Mon YYYY, HH24:MI') sent, recipients, subject, from_email
+       FROM campaigns_cache
+       WHERE notified_at IS NULL AND send_time IS NOT NULL AND send_time >= now() - interval '6 hours'
+       ORDER BY send_time ASC`)).rows;
+    for (const c of fresh) {
+      const icon = (c.channel || '').toLowerCase() === 'sms' ? '📱' : '📧';
+      const fields = [
+        { type: 'mrkdwn', text: `*Subject*\n${slackEsc(c.subject || '—')}` },
+        { type: 'mrkdwn', text: `*Channel*\n${slackEsc((c.channel || 'email').toUpperCase())}` },
+        { type: 'mrkdwn', text: `*Sent*\n${c.sent || '—'}` },
+        { type: 'mrkdwn', text: `*Recipients*\n${c.recipients != null ? c.recipients.toLocaleString() : 'counting…'}` }
+      ];
+      if (c.from_email) fields.push({ type: 'mrkdwn', text: `*From*\n${slackEsc(c.from_email)}` });
+      const blocks = [
+        { type: 'header', text: { type: 'plain_text', text: `${icon} Klaviyo email sent`, emoji: true } },
+        { type: 'section', text: { type: 'mrkdwn', text: `*${slackEsc(c.name || 'Campaign')}*` } },
+        { type: 'section', fields },
+        { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '👀 View email', emoji: true }, url: `${appUrl}/#klaviyo/mail/${encodeURIComponent(c.klaviyo_id)}` }] },
+        { type: 'divider' }
+      ];
+      const fallback = `${icon} Klaviyo email sent — ${c.name || 'Campaign'} · ${c.subject || ''}`;
+      await slackPost(conn.config.bot_token, channel, fallback, undefined, blocks);
+      await pool.query(`UPDATE campaigns_cache SET notified_at=now() WHERE klaviyo_id=$1`, [c.klaviyo_id]);
+    }
+  } catch (e) { console.error('klaviyo campaign notify failed:', e.message); }
 }
 
 // ---------- daily report (Slack, 18:00 Europe/London) ----------
