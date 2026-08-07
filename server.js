@@ -1033,6 +1033,24 @@ app.post('/api/gorgias/sync', async (_req, res) => {
     res.json({ ...r, open_refresh: open });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
+// admin debug: dump a recent ticket's raw shape so we can locate custom fields (Model, Colour, etc.)
+app.get('/api/gorgias/debug', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const cfg = await getGorgiasConfig();
+  if (!cfg) return res.status(400).json({ error: 'Gorgias not connected' });
+  try {
+    const t = await gorgiasRequest(cfg, `/api/tickets?limit=3&order_by=updated_datetime:desc&trashed=false`);
+    // strip the heavy bits so the custom-field structure is easy to read
+    const slim = (x) => { const { messages, events, ...rest } = x || {}; return rest; };
+    const sample = (t.data || []).map(slim);
+    const keys = sample[0] ? Object.keys(sample[0]) : [];
+    // also try the dedicated custom-fields endpoints if they exist on this plan
+    let customFieldDefs = null, ticketFieldVals = null;
+    try { customFieldDefs = await gorgiasRequest(cfg, `/api/custom-fields?limit=30`); } catch (e) { customFieldDefs = { error: e.message }; }
+    try { if (sample[0]) ticketFieldVals = await gorgiasRequest(cfg, `/api/tickets/${sample[0].id}/custom-fields`); } catch (e) { ticketFieldVals = { error: e.message }; }
+    res.json({ ticket_top_level_keys: keys, sample_tickets: sample, custom_field_defs: customFieldDefs, ticket_field_values: ticketFieldVals });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
 
 // ---------- Redo (returns) ----------
 async function redoRequest(cfg, pathAndQuery, pageHeaders = {}) {
