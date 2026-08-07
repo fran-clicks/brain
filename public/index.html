@@ -284,12 +284,9 @@ footer{color:rgba(16,17,20,.45)}
     <h2>⚠️ Model quality watch <span class="tag pending" style="vertical-align:middle">experimental</span>
       <span class="updating-pill" id="qualUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
     </h2>
-    <div class="note" style="margin-top:0">Per phone model, last 90 days. Sales/cancels/refunds/returns come from Shopify + Redo (mapped to a model by product name); ticket columns come from Gorgias custom fields. Best-effort mapping — anything it can't place lands in "Other / unmapped."</div>
-    <div style="overflow-x:auto;margin-top:8px"><table id="qualTable"><thead><tr>
-      <th>Model</th><th style="text-align:right">Units sold</th><th style="text-align:right">Cancels</th>
-      <th style="text-align:right">Refunds</th><th style="text-align:right">Returns</th>
-      <th style="text-align:right">🎫 Cancel</th><th style="text-align:right">🛠️ Defect</th><th style="text-align:right">🛡️ Warranty</th><th>Top return reasons</th>
-    </tr></thead><tbody></tbody></table></div>
+    <div class="note" style="margin-top:0">Pick a model to see its quality signals for the last 90 days, grouped by source. Shopify & Redo data is mapped to a model by product name (best-effort); ticket data comes from Gorgias custom fields.</div>
+    <select id="qualModel" style="margin-top:10px;width:auto;max-width:380px" onchange="renderQualDetail()"></select>
+    <div id="qualDetail" style="margin-top:12px"></div>
     <div class="note" id="qualNote" style="margin-top:8px"></div>
   </div>
 </div>
@@ -1808,31 +1805,36 @@ function buildBreakdownMap(bd) {
   return map;
 }
 
+let qualRows = [];
 async function loadQuality() {
   const pill = document.getElementById('qualUpdating'); pill.classList.add('on');
   try {
     const r = await api('/api/quality/models?window=90');
-    const rows = r.rows || [];
-    const n = v => (v || 0).toLocaleString();
-    const hi = (v, warn) => v > 0 ? `<span style="font-weight:600;color:${warn}">${n(v)}</span>` : '<span style="color:var(--muted)">0</span>';
-    document.querySelector('#qualTable tbody').innerHTML = rows.length ? rows.map(m => {
-      const reasons = (m.reasons || []).map(x => `${esc(x.reason)} (${x.c})`).join(', ') || '—';
-      return `<tr>
-        <td><b>${esc(m.model)}</b></td>
-        <td style="text-align:right">${n(m.sold)}</td>
-        <td style="text-align:right">${hi(m.cancels, 'var(--red)')}</td>
-        <td style="text-align:right">${hi(m.refunds, 'var(--red)')}</td>
-        <td style="text-align:right">${hi(m.returns, '#b45309')}</td>
-        <td style="text-align:right">${hi(m.cancel_t, '#b45309')}</td>
-        <td style="text-align:right">${hi(m.defect_t, 'var(--red)')}</td>
-        <td style="text-align:right">${hi(m.warranty_t, '#b45309')}</td>
-        <td style="font-size:12px;color:var(--muted)">${reasons}</td></tr>`;
-    }).join('') : '<tr><td colspan="9" class="empty">No data yet.</td></tr>';
-    document.getElementById('qualNote').textContent = rows.length
-      ? `${rows.length} models · sorted by total problem signals (cancels + refunds + returns + tickets), 90d`
-      : '';
+    qualRows = r.rows || [];
+    const sel = document.getElementById('qualModel'), prev = sel.value;
+    sel.innerHTML = qualRows.length
+      ? qualRows.map(m => `<option value="${esc(m.model)}">${esc(m.model)} — ${m.problems} issue${m.problems === 1 ? '' : 's'}</option>`).join('')
+      : '<option value="">No data yet</option>';
+    if (prev && qualRows.some(m => m.model === prev)) sel.value = prev;
+    renderQualDetail();
+    document.getElementById('qualNote').textContent = qualRows.length
+      ? `${qualRows.length} models · ordered worst-first · 90 days` : '';
   } catch (e) { document.getElementById('qualNote').textContent = '⚠️ ' + e.message; }
   finally { pill.classList.remove('on'); }
+}
+function renderQualDetail() {
+  const m = qualRows.find(x => x.model === document.getElementById('qualModel').value) || qualRows[0];
+  const box = document.getElementById('qualDetail');
+  if (!m) { box.innerHTML = ''; return; }
+  const pct = v => m.sold > 0 ? ` <span style="color:var(--muted);font-size:12px">(${(v / m.sold * 100).toFixed(1)}%)</span>` : '';
+  const row = (label, val, extra = '') => `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--line)"><span style="color:var(--muted)">${label}</span><span style="font-weight:600">${(val || 0).toLocaleString()}${extra}</span></div>`;
+  const reasons = (m.reasons || []).length ? m.reasons.map(x => `<div style="display:flex;justify-content:space-between;padding:2px 0"><span>${esc(x.reason)}</span><span style="font-weight:600">${x.c}</span></div>`).join('') : '<div class="note" style="margin:2px 0">—</div>';
+  const src = (title, body) => `<div class="card" style="margin:0;flex:1;min-width:230px"><div style="font-size:13px;font-weight:800;margin-bottom:6px">${title}</div>${body}</div>`;
+  box.innerHTML = `<div style="display:flex;gap:12px;flex-wrap:wrap">
+    ${src('🛒 Shopify', row('Units sold', m.sold) + row('Cancelled', m.cancels, pct(m.cancels)) + row('Refunded', m.refunds, pct(m.refunds)))}
+    ${src('🎧 Gorgias tickets', row('Cancellation', m.cancel_t) + row('Defect / technical', m.defect_t) + row('Warranty / replacement', m.warranty_t))}
+    ${src('↩️ Redo returns', row('Returns', m.returns, pct(m.returns)) + `<div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-top:8px">Top reasons</div>${reasons}`)}
+  </div>`;
 }
 async function loadOverview() {
   loadQuality();
