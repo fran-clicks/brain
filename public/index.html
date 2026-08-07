@@ -2812,14 +2812,13 @@ async function loadCancelRefund() {
       const done = /refund|cancellation|replacement/i.test(r.solved_by);
       return `<tr><td>${done ? '✅ ' : ''}${esc(r.solved_by)}</td><td style="text-align:right">${r.c}</td></tr>`;
     }).join('') || '<tr><td colspan="2" class="empty">—</td></tr>';
-    const variantLabel = v => clean(v.model) + (v.colour && !/other/i.test(v.colour) && v.colour !== '' ? ` · ${clean(v.colour)}` : '');
     const variants = (d.variants || []).length ? d.variants.map(v =>
-      `<tr><td>${esc(variantLabel(v))}</td><td style="text-align:right">${v.c}</td></tr>`).join('') : '<tr><td colspan="2" class="empty">—</td></tr>';
+      `<tr><td>${esc(clean(v.model))}</td><td style="text-align:right">${v.c}</td></tr>`).join('') : '<tr><td colspan="2" class="empty">—</td></tr>';
     const lbl = t => `<div style="font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;margin-top:10px">${t}</div>`;
     return `<div class="card" style="margin:0">
       <h2 style="font-size:15px">${title} <span style="font-weight:700">${(d.total||0).toLocaleString()}</span></h2>
-      <div class="note" style="margin:2px 0 0">Fields captured — model ${cap(d.total, d.with_model)} · colour ${cap(d.total, d.with_colour)} · category ${cap(d.total, d.with_category)}</div>
-      ${lbl('📱 Products flagged (model · colour)')}<table style="margin-top:4px"><tbody>${variants}</tbody></table>
+      <div class="note" style="margin:2px 0 0">Fields captured — model ${cap(d.total, d.with_model)} · category ${cap(d.total, d.with_category)}</div>
+      ${lbl('📱 Models flagged')}<table style="margin-top:4px"><tbody>${variants}</tbody></table>
       ${lbl('Resolved as')}<table style="margin-top:4px"><tbody>${res}</tbody></table>
     </div>`;
   };
