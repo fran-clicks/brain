@@ -423,7 +423,8 @@ const CONNECTOR_TYPES = {
     fields: [
       { key: 'bot_token', label: 'Bot User OAuth Token, starts with xoxb- (api.slack.com/apps → your app → OAuth & Permissions)', secret: true },
       { key: 'signing_secret', label: 'Signing Secret (api.slack.com/apps → your app → Basic Information)', secret: true },
-      { key: 'alert_channel', label: 'Alerts channel for freight/updates, e.g. #clicksbrain (invite @clicksbot to it first)', secret: false, optional: true }
+      { key: 'alert_channel', label: 'Main alerts channel, e.g. #clicksbrain (invite @clicksbot to it first)', secret: false, optional: true },
+      { key: 'freight_channel', label: 'Freight-only channel, e.g. #freight (optional — falls back to the main channel; invite @clicksbot)', secret: false, optional: true }
     ]
   },
   redo: {
@@ -3539,7 +3540,7 @@ async function notifyFreight(action, sh, extra) {
   try {
     const conn = await getConnector('slack');
     if (!conn?.config?.bot_token) return;
-    const channel = (conn.config.alert_channel || '#clicksbrain').trim();
+    const channel = (conn.config.freight_channel || conn.config.alert_channel || '#clicksbrain').trim();
     const name = sh.name || 'Untitled shipment';
     const items = (sh.items || []).map(i => `${i.sku} ×${i.qty}`).join(', ') || '—';
     const stages = (sh.stages || []).length ? (sh.stages || []).join('  →  ') : 'none set';
