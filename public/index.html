@@ -281,13 +281,14 @@ footer{color:rgba(16,17,20,.45)}
     </div>
   </div>
   <div class="card" style="margin-top:14px">
-    <h2>⚠️ Variant quality watch <span class="tag pending" style="vertical-align:middle">experimental</span>
+    <h2>⚠️ Model quality watch <span class="tag pending" style="vertical-align:middle">experimental</span>
       <span class="updating-pill" id="qualUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
     </h2>
-    <div class="note" style="margin-top:0">Worst variants by returns + refunds + cancellations (last 90 days, per units sold). Early-stage — refunds/cancels are counted at order level, so treat as a rough signal, not gospel.</div>
+    <div class="note" style="margin-top:0">Per phone model, last 90 days. Sales/cancels/refunds/returns come from Shopify + Redo (mapped to a model by product name); ticket columns come from Gorgias custom fields. Best-effort mapping — anything it can't place lands in "Other / unmapped."</div>
     <div style="overflow-x:auto;margin-top:8px"><table id="qualTable"><thead><tr>
-      <th>SKU / product</th><th style="text-align:right">Sold</th><th style="text-align:right">Return %</th>
-      <th style="text-align:right">Refund %</th><th style="text-align:right">Cancel %</th><th style="text-align:right">Score</th><th>Top return reasons</th>
+      <th>Model</th><th style="text-align:right">Units sold</th><th style="text-align:right">Cancels</th>
+      <th style="text-align:right">Refunds</th><th style="text-align:right">Returns</th>
+      <th style="text-align:right">🎫 Cancel</th><th style="text-align:right">🛠️ Defect</th><th style="text-align:right">🛡️ Warranty</th><th>Top return reasons</th>
     </tr></thead><tbody></tbody></table></div>
     <div class="note" id="qualNote" style="margin-top:8px"></div>
   </div>
@@ -1810,23 +1811,25 @@ function buildBreakdownMap(bd) {
 async function loadQuality() {
   const pill = document.getElementById('qualUpdating'); pill.classList.add('on');
   try {
-    const r = await api('/api/quality/variants?window=90');
+    const r = await api('/api/quality/models?window=90');
     const rows = r.rows || [];
-    const worst = rows.slice(0, 8);
-    const sev = s => s >= 15 ? 'var(--red)' : s >= 7 ? '#b45309' : 'var(--ink)';
-    document.querySelector('#qualTable tbody').innerHTML = worst.length ? worst.map(v => {
-      const reasons = (v.reasons || []).map(x => `${esc(x.reason)} (${x.c})`).join(', ') || '—';
+    const n = v => (v || 0).toLocaleString();
+    const hi = (v, warn) => v > 0 ? `<span style="font-weight:600;color:${warn}">${n(v)}</span>` : '<span style="color:var(--muted)">0</span>';
+    document.querySelector('#qualTable tbody').innerHTML = rows.length ? rows.map(m => {
+      const reasons = (m.reasons || []).map(x => `${esc(x.reason)} (${x.c})`).join(', ') || '—';
       return `<tr>
-        <td><span class="tag src">${esc(v.sku)}</span>${v.name && v.name !== v.sku ? `<div style="font-size:12px;color:var(--muted)">${esc(v.name)}</div>` : ''}</td>
-        <td style="text-align:right">${v.sold.toLocaleString()}</td>
-        <td style="text-align:right">${v.returnRate}%</td>
-        <td style="text-align:right">${v.refundRate}%</td>
-        <td style="text-align:right">${v.cancelRate}%</td>
-        <td style="text-align:right;font-weight:700;color:${sev(v.score)}">${v.score}</td>
+        <td><b>${esc(m.model)}</b></td>
+        <td style="text-align:right">${n(m.sold)}</td>
+        <td style="text-align:right">${hi(m.cancels, 'var(--red)')}</td>
+        <td style="text-align:right">${hi(m.refunds, 'var(--red)')}</td>
+        <td style="text-align:right">${hi(m.returns, '#b45309')}</td>
+        <td style="text-align:right">${hi(m.cancel_t, '#b45309')}</td>
+        <td style="text-align:right">${hi(m.defect_t, 'var(--red)')}</td>
+        <td style="text-align:right">${hi(m.warranty_t, '#b45309')}</td>
         <td style="font-size:12px;color:var(--muted)">${reasons}</td></tr>`;
-    }).join('') : '<tr><td colspan="7" class="empty">Not enough data yet — needs SKUs with 10+ units sold in 90 days.</td></tr>';
+    }).join('') : '<tr><td colspan="9" class="empty">No data yet.</td></tr>';
     document.getElementById('qualNote').textContent = rows.length
-      ? `${rows.length} variants flagged · score = return% + refund% + cancel% (per units sold, 90d)`
+      ? `${rows.length} models · sorted by total problem signals (cancels + refunds + returns + tickets), 90d`
       : '';
   } catch (e) { document.getElementById('qualNote').textContent = '⚠️ ' + e.message; }
   finally { pill.classList.remove('on'); }

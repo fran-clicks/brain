@@ -2329,6 +2329,82 @@ app.get('/api/quality/variants', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// normalise any product name OR Gorgias model value to one canonical model label so the two data
+// worlds (SKU-keyed Shopify/returns vs Model-keyed Gorgias tickets) can be joined. Best-effort.
+function canonicalModel(s) {
+  let t = String(s || '').toLowerCase();
+  if (!t) return null;
+  // Gorgias values are hierarchical ("iPhone::iPhone 15::15 Pro") — collapse to brand + leaf so the
+  // leaf's variant (15 Pro) isn't lost and it lines up with Shopify names ("15 Pro - Royal Ink")
+  if (t.includes('::')) { const seg = t.split('::').map(x => x.trim()); t = seg[0] + ' ' + seg[seg.length - 1]; }
+  if (/power keyboard/.test(t)) return 'Power Keyboard';
+  if (/communicator/.test(t)) return 'Communicator';
+  if (/lanyard/.test(t)) return 'Lanyard';
+  if (/razr.*ultra|ultra onyx|60 ultra/.test(t)) return 'Razr Ultra 2025';
+  if (/razr.*(plus|\+).*(2025|60)|razr.*60\+/.test(t)) return 'Razr Plus 2025';
+  if (/razr.*(2025|\b60\b)/.test(t)) return 'Razr 2025';
+  if (/razr.*(plus|\+).*(2024|50)|razr.*50\+/.test(t)) return 'Razr Plus 2024';
+  if (/razr.*(2024|\b50\b)/.test(t)) return 'Razr 2024';
+  if (/razr|top cover/.test(t)) return 'Razr';
+  let m = t.match(/pixel\s*(10|9|8)\s*(pro xl|pro)?/);
+  if (m) return `Pixel ${m[1]}${m[2] ? ' ' + m[2].replace(/\b\w/g, c => c.toUpperCase()) : ''}`;
+  if (/flip\s*7/.test(t)) return 'Samsung Flip 7';
+  if (/flip\s*6/.test(t)) return 'Samsung Flip 6';
+  m = t.match(/\bs(25|24|23)\s*(ultra|plus|\+)?/);
+  if (m) return `Samsung S${m[1]}${m[2] ? ' ' + (m[2] === '+' ? 'Plus' : m[2].replace(/\b\w/g, c => c.toUpperCase())) : ''}`;
+  m = t.match(/\b(17|16|15|14|13)\s*(pro max|pro|plus|air|mini|e)?/);
+  if (m) return `iPhone ${m[1]}${m[2] ? ' ' + m[2].replace(/\b\w/g, c => c.toUpperCase()) : ''}`;
+  return null;
+}
+// per-model quality: joins Shopify (units/cancels/refunds), Redo (returns + reasons) via SKU→model,
+// and Gorgias tickets (cancel / defect / warranty) via the model custom field.
+app.get('/api/quality/models', async (req, res) => {
+  try {
+    const win = Math.max(7, Math.min(parseInt(req.query.window) || 90, 366));
+    const iv = `now() - make_interval(days => ${win})`;
+    const skuField = `it->>'sku'`;
+    const [sold, cancels, refunds, returns, reasons, tickets] = await Promise.all([
+      pool.query(`SELECT ${skuField} sku, max(it->>'title') title, sum(coalesce((it->>'qty')::int,0))::int u
+        FROM orders_cache, LATERAL jsonb_array_elements(items) it
+        WHERE cancelled_at IS NULL AND created_at >= ${iv} AND coalesce(${skuField},'') <> '' GROUP BY 1`),
+      pool.query(`SELECT ${skuField} sku, sum(coalesce((it->>'qty')::int,0))::int u
+        FROM orders_cache, LATERAL jsonb_array_elements(items) it
+        WHERE cancelled_at IS NOT NULL AND cancelled_at >= ${iv} AND coalesce(${skuField},'') <> '' GROUP BY 1`),
+      pool.query(`SELECT ${skuField} sku, sum(coalesce((it->>'qty')::int,0))::int u
+        FROM orders_cache, LATERAL jsonb_array_elements(items) it
+        WHERE financial_status IN ('refunded','partially_refunded') AND created_at >= ${iv} AND coalesce(${skuField},'') <> '' GROUP BY 1`),
+      pool.query(`SELECT i->>'sku' sku, max(i->>'title') title, count(*)::int c
+        FROM returns_cache, LATERAL jsonb_array_elements(items) i
+        WHERE created_at >= ${iv} AND coalesce(i->>'sku','') <> '' GROUP BY 1`),
+      pool.query(`SELECT i->>'sku' sku, coalesce(nullif(i->>'reason',''),'(none)') reason, count(*)::int c
+        FROM returns_cache, LATERAL jsonb_array_elements(items) i
+        WHERE created_at >= ${iv} AND coalesce(i->>'sku','') <> '' GROUP BY 1,2`),
+      pool.query(`SELECT cf_model,
+          count(*) FILTER (WHERE cf_category ILIKE '%cancellation%' OR cf_ai_intent ILIKE 'Order::Cancel%')::int cancel_t,
+          count(*) FILTER (WHERE cf_category ILIKE '%technical support%' OR cf_category ILIKE '%hardware%' OR cf_category ILIKE '%software%')::int defect_t,
+          count(*) FILTER (WHERE cf_category ILIKE '%warranty%' OR cf_solved_by ILIKE '%replacement%')::int warranty_t
+        FROM tickets_cache WHERE NOT spam AND created_datetime >= ${iv} AND cf_model <> '' GROUP BY 1`)
+    ]);
+    // resolve names for all SKUs so we can map SKU→model
+    const allSkus = [...new Set([...sold.rows, ...cancels.rows, ...refunds.rows, ...returns.rows].map(r => r.sku))];
+    const nameMap = await resolveNames(allSkus);
+    const M = {}; // canonical model → aggregates
+    const ensure = k => (M[k] = M[k] || { model: k, sold: 0, cancels: 0, refunds: 0, returns: 0, cancel_t: 0, defect_t: 0, warranty_t: 0, reasons: {} });
+    const skuModel = sku => canonicalModel(nameMap[sku] || sku) || 'Other / unmapped';
+    sold.rows.forEach(r => { ensure(canonicalModel(nameMap[r.sku] || r.title || r.sku) || 'Other / unmapped').sold += r.u; });
+    cancels.rows.forEach(r => { ensure(skuModel(r.sku)).cancels += r.u; });
+    refunds.rows.forEach(r => { ensure(skuModel(r.sku)).refunds += r.u; });
+    returns.rows.forEach(r => { ensure(canonicalModel(nameMap[r.sku] || r.title || r.sku) || 'Other / unmapped').returns += r.c; });
+    reasons.rows.forEach(r => { const k = canonicalModel(nameMap[r.sku] || r.sku) || 'Other / unmapped'; const m = ensure(k); m.reasons[r.reason] = (m.reasons[r.reason] || 0) + r.c; });
+    tickets.rows.forEach(r => { const k = canonicalModel(r.cf_model) || 'Other / unmapped'; const m = ensure(k); m.cancel_t += r.cancel_t; m.defect_t += r.defect_t; m.warranty_t += r.warranty_t; });
+    const rows = Object.values(M).map(m => ({
+      ...m, reasons: Object.entries(m.reasons).map(([reason, c]) => ({ reason, c })).sort((a, b) => b.c - a.c).slice(0, 3),
+      problems: m.cancels + m.refunds + m.returns + m.cancel_t + m.defect_t + m.warranty_t
+    })).sort((a, b) => b.problems - a.problems);
+    res.json({ window: win, rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // product cancellation explorer: cancelled units + reasons per product; ?sku= drills into one product
 app.get('/api/shopify/cancellations', async (req, res) => {
   try {
