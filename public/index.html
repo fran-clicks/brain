@@ -380,7 +380,7 @@ footer{color:rgba(16,17,20,.45)}
     <table id="shopAwaiting"><thead><tr><th>Order</th><th>Placed</th><th>Waiting</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th></tr></thead><tbody></tbody></table>
   </div>
   <div class="card">
-    <h2>❌ Product cancellation explorer <span style="font-weight:400;color:var(--muted);font-size:12px">· cancelled units + reasons per product (last 90 days)</span>
+    <h2>❌ Product cancellation explorer <span style="font-weight:400;color:var(--muted);font-size:12px">· cancelled units per product (last 90 days)</span>
       <span class="updating-pill" id="canUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
     </h2>
     <input class="search" id="canSearch" placeholder="Search product or SKU…">
@@ -2298,7 +2298,7 @@ function renderCanTable() {
       <td><span class="tag src">${esc(r.sku)}</span>${r.name && r.name !== r.sku ? ` ${esc(r.name)}` : ''}</td>
       <td style="text-align:right;font-weight:600">${r.units.toLocaleString()}</td>
       <td style="text-align:right">${r.orders.toLocaleString()}</td>
-      <td><a href="#" onclick="event.stopPropagation();openCancelProduct('${esc(r.sku).replace(/'/g, "\\'")}');return false">reasons →</a></td></tr>`).join('')
+      <td><a href="#" onclick="event.stopPropagation();openCancelProduct('${esc(r.sku).replace(/'/g, "\\'")}');return false">orders →</a></td></tr>`).join('')
     : '<tr><td colspan="4" class="empty">No cancellations in this window 🎉</td></tr>';
 }
 document.getElementById('canSearch').oninput = renderCanTable;
