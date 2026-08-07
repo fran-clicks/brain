@@ -219,6 +219,16 @@ footer{color:rgba(16,17,20,.45)}
     <div class="note" id="homeNote"></div>
   </div>
   <div class="card" style="margin-top:14px">
+    <h2>⚠️ Variant quality watch <span style="font-weight:400;color:var(--muted);font-size:12px">· worst variants by returns + refunds + cancellations (last 90 days, per units sold)</span>
+      <span class="updating-pill" id="qualUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
+    </h2>
+    <div style="overflow-x:auto"><table id="qualTable"><thead><tr>
+      <th>SKU / product</th><th style="text-align:right">Sold</th><th style="text-align:right">Return %</th>
+      <th style="text-align:right">Refund %</th><th style="text-align:right">Cancel %</th><th style="text-align:right">Score</th><th>Top return reasons</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div class="note" id="qualNote" style="margin-top:8px"></div>
+  </div>
+  <div class="card" style="margin-top:14px">
     <h2>📈 Impact analyzer</h2>
     <div class="note" style="margin-top:0">Pick a metric and an event to see how it moved in the days around that event. This is correlation, not proof — check for other events in the same window.</div>
     <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:10px 0">
@@ -367,6 +377,20 @@ footer{color:rgba(16,17,20,.45)}
     <h2>📦 Awaiting fulfillment</h2>
     <div class="note" id="shopAwaitNote" style="margin-top:0"></div>
     <table id="shopAwaiting"><thead><tr><th>Order</th><th>Placed</th><th>Waiting</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card">
+    <h2>❌ Product cancellation explorer <span style="font-weight:400;color:var(--muted);font-size:12px">· cancelled units + reasons per product (last 90 days)</span>
+      <span class="updating-pill" id="canUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
+    </h2>
+    <div id="canReasons" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+    <input class="search" id="canSearch" placeholder="Search product or SKU…">
+    <table id="canTable"><thead><tr><th>SKU / product</th><th style="text-align:right">Units cancelled</th><th style="text-align:right">Orders</th><th></th></tr></thead><tbody></tbody></table>
+    <div class="note" id="canNote" style="margin-top:8px"></div>
+    <div id="canDetail" style="display:none;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+      <h2 style="font-size:15px" id="canDetailTitle"></h2>
+      <div id="canDetailReasons" style="display:flex;flex-wrap:wrap;gap:6px;margin:6px 0"></div>
+      <table id="canDetailOrders"><thead><tr><th>Order</th><th>Cancelled</th><th>Reason</th><th style="text-align:right">Qty</th></tr></thead><tbody></tbody></table>
+    </div>
   </div>
   <div class="card">
     <h2>Recent orders</h2>
@@ -1782,7 +1806,32 @@ function buildBreakdownMap(bd) {
   return map;
 }
 
+async function loadQuality() {
+  const pill = document.getElementById('qualUpdating'); pill.classList.add('on');
+  try {
+    const r = await api('/api/quality/variants?window=90');
+    const rows = r.rows || [];
+    const worst = rows.slice(0, 8);
+    const sev = s => s >= 15 ? 'var(--red)' : s >= 7 ? '#b45309' : 'var(--ink)';
+    document.querySelector('#qualTable tbody').innerHTML = worst.length ? worst.map(v => {
+      const reasons = (v.reasons || []).map(x => `${esc(x.reason)} (${x.c})`).join(', ') || '—';
+      return `<tr>
+        <td><span class="tag src">${esc(v.sku)}</span>${v.name && v.name !== v.sku ? `<div style="font-size:12px;color:var(--muted)">${esc(v.name)}</div>` : ''}</td>
+        <td style="text-align:right">${v.sold.toLocaleString()}</td>
+        <td style="text-align:right">${v.returnRate}%</td>
+        <td style="text-align:right">${v.refundRate}%</td>
+        <td style="text-align:right">${v.cancelRate}%</td>
+        <td style="text-align:right;font-weight:700;color:${sev(v.score)}">${v.score}</td>
+        <td style="font-size:12px;color:var(--muted)">${reasons}</td></tr>`;
+    }).join('') : '<tr><td colspan="7" class="empty">Not enough data yet — needs SKUs with 10+ units sold in 90 days.</td></tr>';
+    document.getElementById('qualNote').textContent = rows.length
+      ? `${rows.length} variants flagged · score = return% + refund% + cancel% (per units sold, 90d)`
+      : '';
+  } catch (e) { document.getElementById('qualNote').textContent = '⚠️ ' + e.message; }
+  finally { pill.classList.remove('on'); }
+}
 async function loadOverview() {
+  loadQuality();
   try {
     const s = await fetchOverview();
     const t = s.tickets.totals;
@@ -2192,6 +2241,7 @@ async function loadShopify() {
         + (s.sync.backfill_done ? '' : ' · ⏳ history backfill in progress') + (s.sync.last_error ? ` · ⚠️ ${s.sync.last_error}` : '')
       : '';
     loadFulfilledByDay(); // re-run so the fulfilled-by-day card reflects the current product/country/tag filters
+    loadCancellations();
   } catch (e) { note.textContent = 'Shopify error: ' + e.message; }
   finally { document.getElementById('shopUpdating').classList.remove('on'); }
 }
@@ -2232,6 +2282,51 @@ async function loadFulfilledByDay() {
       : `<tr><td colspan="4" class="empty">${r.backfill_done === false ? '⏳ Fulfillment dates are still backfilling — check back shortly.' : 'No fulfillments in this window.'}</td></tr>`;
   } catch (e) { tb.innerHTML = `<tr><td colspan="4" class="empty">⚠️ ${esc(e.message)}</td></tr>`; }
   finally { pill.classList.remove('on'); }
+}
+// ---- product cancellation explorer ----
+let canRows = [], canBase = '';
+function renderCanTable() {
+  const q = (document.getElementById('canSearch').value || '').toLowerCase();
+  const rows = canRows.filter(r => (r.sku + ' ' + (r.name || '')).toLowerCase().includes(q));
+  document.querySelector('#canTable tbody').innerHTML = rows.length ? rows.map(r =>
+    `<tr style="cursor:pointer" onclick="openCancelProduct('${esc(r.sku).replace(/'/g, "\\'")}')">
+      <td><span class="tag src">${esc(r.sku)}</span>${r.name && r.name !== r.sku ? ` ${esc(r.name)}` : ''}</td>
+      <td style="text-align:right;font-weight:600">${r.units.toLocaleString()}</td>
+      <td style="text-align:right">${r.orders.toLocaleString()}</td>
+      <td><a href="#" onclick="event.stopPropagation();openCancelProduct('${esc(r.sku).replace(/'/g, "\\'")}');return false">reasons →</a></td></tr>`).join('')
+    : '<tr><td colspan="4" class="empty">No cancellations in this window 🎉</td></tr>';
+}
+document.getElementById('canSearch').oninput = renderCanTable;
+async function loadCancellations() {
+  const pill = document.getElementById('canUpdating'); pill.classList.add('on');
+  try {
+    const r = await api('/api/shopify/cancellations?window=90');
+    canRows = r.rows || []; canBase = r.admin_base || '';
+    document.getElementById('canReasons').innerHTML = (r.reasons || []).map(x =>
+      `<span class="tag src">${esc(x.reason)}: <b>${x.orders}</b></span>`).join('');
+    renderCanTable();
+    const totU = canRows.reduce((s, x) => s + x.units, 0);
+    document.getElementById('canNote').textContent = canRows.length
+      ? `${canRows.length} products · ${totU.toLocaleString()} units cancelled (90d)`
+      : 'No cancellations in the last 90 days.';
+    document.getElementById('canDetail').style.display = 'none';
+  } catch (e) { document.getElementById('canNote').textContent = '⚠️ ' + e.message; }
+  finally { pill.classList.remove('on'); }
+}
+async function openCancelProduct(sku) {
+  try {
+    const r = await api('/api/shopify/cancellations?window=90&sku=' + encodeURIComponent(sku));
+    document.getElementById('canDetail').style.display = 'block';
+    document.getElementById('canDetailTitle').textContent = (r.name && r.name !== sku ? r.name + ' · ' : '') + sku;
+    document.getElementById('canDetailReasons').innerHTML = (r.reasons || []).map(x =>
+      `<span class="tag src">${esc(x.reason)}: <b>${x.units || 0}</b> units / ${x.orders} orders</span>`).join('') || '<span class="note">No reason breakdown.</span>';
+    const base = r.admin_base || canBase;
+    document.querySelector('#canDetailOrders tbody').innerHTML = (r.orders || []).map(o => {
+      const num = base ? `<a href="${base}${o.shopify_id}" target="_blank"><b>${esc(o.order_number)}</b></a>` : `<b>${esc(o.order_number)}</b>`;
+      return `<tr><td>${num}</td><td>${esc(o.d || '')}</td><td>${esc(o.reason || '—')}</td><td style="text-align:right">${o.qty || 0}</td></tr>`;
+    }).join('') || '<tr><td colspan="4" class="empty">—</td></tr>';
+    document.getElementById('canDetail').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (e) { document.getElementById('canNote').textContent = '⚠️ ' + e.message; }
 }
 async function showFulfilledDay(day) {
   if (!day) return;

@@ -338,6 +338,7 @@ async function initDb() {
     ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS order_tags JSONB DEFAULT '[]';
     ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS fulfilled_at TIMESTAMPTZ;
     ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
+    ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS cancel_reason TEXT DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_oc_created ON orders_cache (created_at);
     CREATE INDEX IF NOT EXISTS idx_oc_fulfilled ON orders_cache (fulfilled_at);
     CREATE TABLE IF NOT EXISTS product_images (
@@ -2211,6 +2212,106 @@ app.get('/api/forecast', async (req, res) => {
   res.json(await forecastRows(win));
 });
 
+// resolve product names (UK-stock name, else Shopify title + variant) for a list of SKUs
+async function resolveNames(skus) {
+  const map = {};
+  if (!skus.length) return map;
+  const rows = (await pool.query(
+    `SELECT sku, us.name us_name, pi.title p_title, nullif(pi.variant_title,'') variant FROM unnest($1::text[]) sku
+     LEFT JOIN product_images pi USING (sku) LEFT JOIN uk_stock us USING (sku)`, [skus])).rows;
+  rows.forEach(r => {
+    if (r.us_name) map[r.sku] = r.us_name;
+    else if (r.p_title) map[r.sku] = r.variant ? `${r.p_title} — ${r.variant}` : r.p_title;
+  });
+  return map;
+}
+
+// variant quality score: per SKU over the window, returns + refunds + cancellations, each normalised
+// per units sold, summed into one score (higher = worse). Return reasons come from Redo.
+app.get('/api/quality/variants', async (req, res) => {
+  try {
+    const win = Math.max(7, Math.min(parseInt(req.query.window) || 90, 366));
+    const iv = `now() - make_interval(days => ${win})`;
+    const [sold, returns, refunds, cancels, reasons] = await Promise.all([
+      pool.query(`SELECT it->>'sku' sku, sum(coalesce((it->>'qty')::int,0))::int u
+        FROM orders_cache, LATERAL jsonb_array_elements(items) it
+        WHERE cancelled_at IS NULL AND created_at >= ${iv} AND coalesce(it->>'sku','') <> '' GROUP BY 1`),
+      pool.query(`SELECT i->>'sku' sku, count(*)::int c
+        FROM returns_cache, LATERAL jsonb_array_elements(items) i
+        WHERE created_at >= ${iv} AND coalesce(i->>'sku','') <> '' GROUP BY 1`),
+      pool.query(`SELECT it->>'sku' sku, sum(coalesce((it->>'qty')::int,0))::int u
+        FROM orders_cache, LATERAL jsonb_array_elements(items) it
+        WHERE financial_status IN ('refunded','partially_refunded') AND created_at >= ${iv} AND coalesce(it->>'sku','') <> '' GROUP BY 1`),
+      pool.query(`SELECT it->>'sku' sku, sum(coalesce((it->>'qty')::int,0))::int u
+        FROM orders_cache, LATERAL jsonb_array_elements(items) it
+        WHERE cancelled_at IS NOT NULL AND cancelled_at >= ${iv} AND coalesce(it->>'sku','') <> '' GROUP BY 1`),
+      pool.query(`SELECT i->>'sku' sku, coalesce(nullif(i->>'reason',''),'(none)') reason, count(*)::int c
+        FROM returns_cache, LATERAL jsonb_array_elements(items) i
+        WHERE created_at >= ${iv} AND coalesce(i->>'sku','') <> '' GROUP BY 1,2`)
+    ]);
+    const soldM = {}; sold.rows.forEach(r => soldM[r.sku] = r.u);
+    const retM = {}; returns.rows.forEach(r => retM[r.sku] = r.c);
+    const refM = {}; refunds.rows.forEach(r => refM[r.sku] = r.u);
+    const canM = {}; cancels.rows.forEach(r => canM[r.sku] = r.u);
+    const reasonM = {}; reasons.rows.forEach(r => (reasonM[r.sku] = reasonM[r.sku] || []).push({ reason: r.reason, c: r.c }));
+    // only score SKUs with enough sales to be meaningful
+    const MIN_SOLD = 10;
+    const skus = Object.keys(soldM).filter(s => soldM[s] >= MIN_SOLD);
+    const names = await resolveNames(skus);
+    const pct = (n, d) => d > 0 ? Math.round((n / d) * 1000) / 10 : 0;
+    const rows = skus.map(sku => {
+      const u = soldM[sku];
+      const returnRate = pct(retM[sku] || 0, u), refundRate = pct(refM[sku] || 0, u), cancelRate = pct(canM[sku] || 0, u);
+      const score = Math.round((returnRate + refundRate + cancelRate) * 10) / 10;
+      return { sku, name: names[sku] || sku, sold: u, returns: retM[sku] || 0, refunds: refM[sku] || 0, cancels: canM[sku] || 0,
+        returnRate, refundRate, cancelRate, score, reasons: (reasonM[sku] || []).sort((a, b) => b.c - a.c).slice(0, 4) };
+    }).filter(r => r.score > 0).sort((a, b) => b.score - a.score);
+    res.json({ window: win, min_sold: MIN_SOLD, rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// product cancellation explorer: cancelled units + reasons per product; ?sku= drills into one product
+app.get('/api/shopify/cancellations', async (req, res) => {
+  try {
+    const win = Math.max(1, Math.min(parseInt(req.query.window) || 90, 366));
+    const iv = `now() - make_interval(days => ${win})`;
+    const conn = await getConnector('shopify');
+    const adminBase = shopifyAdminOrderBase(conn?.config?.store_domain);
+    const reasonLabel = `coalesce(nullif(cancel_reason,''),'(unknown)')`;
+    if (req.query.sku) {
+      const sku = String(req.query.sku);
+      const [orders, byReason] = await Promise.all([
+        pool.query(`SELECT shopify_id, order_number, to_char(cancelled_at,'YYYY-MM-DD') d, ${reasonLabel} reason,
+            (SELECT sum(coalesce((it->>'qty')::int,0)) FROM jsonb_array_elements(items) it WHERE it->>'sku'=$1)::int qty
+          FROM orders_cache
+          WHERE cancelled_at IS NOT NULL AND cancelled_at >= ${iv}
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements(items) it WHERE it->>'sku'=$1)
+          ORDER BY cancelled_at DESC LIMIT 200`, [sku]),
+        pool.query(`SELECT ${reasonLabel} reason, count(*)::int orders,
+            sum((SELECT sum(coalesce((it->>'qty')::int,0)) FROM jsonb_array_elements(items) it WHERE it->>'sku'=$1))::int units
+          FROM orders_cache
+          WHERE cancelled_at IS NOT NULL AND cancelled_at >= ${iv}
+            AND EXISTS (SELECT 1 FROM jsonb_array_elements(items) it WHERE it->>'sku'=$1)
+          GROUP BY 1 ORDER BY 2 DESC`, [sku])
+      ]);
+      const nm = await resolveNames([sku]);
+      return res.json({ sku, name: nm[sku] || sku, admin_base: adminBase, reasons: byReason.rows, orders: orders.rows });
+    }
+    const [products, reasons] = await Promise.all([
+      pool.query(`SELECT it->>'sku' sku, max(it->>'title') title,
+          sum(coalesce((it->>'qty')::int,0))::int units, count(distinct shopify_id)::int orders
+        FROM orders_cache, LATERAL jsonb_array_elements(items) it
+        WHERE cancelled_at IS NOT NULL AND cancelled_at >= ${iv} AND coalesce(it->>'sku','') <> ''
+        GROUP BY 1 ORDER BY 3 DESC`),
+      pool.query(`SELECT ${reasonLabel} reason, count(*)::int orders FROM orders_cache
+        WHERE cancelled_at IS NOT NULL AND cancelled_at >= ${iv} GROUP BY 1 ORDER BY 2 DESC`)
+    ]);
+    const names = await resolveNames(products.rows.map(r => r.sku));
+    const rows = products.rows.map(r => ({ sku: r.sku, name: names[r.sku] || r.title || r.sku, units: r.units, orders: r.orders }));
+    res.json({ window: win, admin_base: adminBase, rows, reasons: reasons.rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // import a spreadsheet (CSV): rows = products, columns = inventory sources. ShipBob/Floship columns are ignored (API is source of truth).
 function parseCsv(text) {
   const rows = []; let row = [], cell = '', q = false;
@@ -2346,7 +2447,7 @@ query Orders($cursor: String, $q: String, $sortKey: OrderSortKeys!) {
   orders(first: 50, after: $cursor, query: $q, sortKey: $sortKey, reverse: true) {
     pageInfo { hasNextPage endCursor }
     nodes {
-      legacyResourceId name createdAt updatedAt cancelledAt closedAt tags
+      legacyResourceId name createdAt updatedAt cancelledAt cancelReason closedAt tags
       currencyCode
       totalPriceSet { shopMoney { amount } }
       displayFinancialStatus displayFulfillmentStatus
@@ -2363,6 +2464,7 @@ function normalizeOrder(n) {
     name: n.name || '',
     created_at: n.createdAt || null,
     cancelled_at: n.cancelledAt || null,
+    cancel_reason: n.cancelReason || '', // Shopify enum: CUSTOMER, INVENTORY, FRAUD, DECLINED, STAFF, OTHER
     archived_at: n.closedAt || null, // Shopify "archived" = order closed
     updated_at: n.updatedAt || null,
     currency: n.currencyCode || '',
@@ -2397,8 +2499,8 @@ async function syncShopify(maxPages = 8) {
   const cfg = conn.config;
   shopifySyncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || {};
-  if (st.engine !== 'graphql-v4') { // v4: re-backfill to pick up archived (closedAt); v3 added fulfillment dates
-    st.engine = 'graphql-v4'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
+  if (st.engine !== 'graphql-v5') { // v5: re-backfill to capture cancelReason; v4 archived; v3 fulfillment dates
+    st.engine = 'graphql-v5'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
   }
   let pages = 0, upserts = 0, lastError = null;
   const horizonIso = new Date(Date.now() - BACKFILL_HORIZON_DAYS * 864e5).toISOString();
@@ -2406,17 +2508,17 @@ async function syncShopify(maxPages = 8) {
   const upsertOrders = async (orders) => {
     for (const o of orders) {
       await pool.query(
-        `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, order_tags, updated_at, fulfilled_at, archived_at, synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
+        `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, order_tags, updated_at, fulfilled_at, archived_at, cancel_reason, synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
          ON CONFLICT (shopify_id) DO UPDATE SET order_number=$2, created_at=$3, cancelled_at=$4, currency=$5,
-           total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, order_tags=$11, updated_at=$12, fulfilled_at=$13, archived_at=$14, synced_at=now()`,
+           total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, order_tags=$11, updated_at=$12, fulfilled_at=$13, archived_at=$14, cancel_reason=$15, synced_at=now()`,
         [o.id, o.name || '', o.created_at || null, o.cancelled_at || null, o.currency || '',
          Number(o.total_price) || 0,
          o.country || '',
          o.financial_status || '', o.fulfillment_status || 'unfulfilled',
          JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity }))),
          JSON.stringify(o.tags || []),
-         o.updated_at || null, o.fulfilled_at || null, o.archived_at || null]);
+         o.updated_at || null, o.fulfilled_at || null, o.archived_at || null, o.cancel_reason || '']);
       upserts++;
     }
   };
