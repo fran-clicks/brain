@@ -219,16 +219,6 @@ footer{color:rgba(16,17,20,.45)}
     <div class="note" id="homeNote"></div>
   </div>
   <div class="card" style="margin-top:14px">
-    <h2>⚠️ Variant quality watch <span style="font-weight:400;color:var(--muted);font-size:12px">· worst variants by returns + refunds + cancellations (last 90 days, per units sold)</span>
-      <span class="updating-pill" id="qualUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
-    </h2>
-    <div style="overflow-x:auto"><table id="qualTable"><thead><tr>
-      <th>SKU / product</th><th style="text-align:right">Sold</th><th style="text-align:right">Return %</th>
-      <th style="text-align:right">Refund %</th><th style="text-align:right">Cancel %</th><th style="text-align:right">Score</th><th>Top return reasons</th>
-    </tr></thead><tbody></tbody></table></div>
-    <div class="note" id="qualNote" style="margin-top:8px"></div>
-  </div>
-  <div class="card" style="margin-top:14px">
     <h2>📈 Impact analyzer</h2>
     <div class="note" style="margin-top:0">Pick a metric and an event to see how it moved in the days around that event. This is correlation, not proof — check for other events in the same window.</div>
     <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:10px 0">
@@ -289,6 +279,17 @@ footer{color:rgba(16,17,20,.45)}
       <div class="err" id="eErr"></div>
       <div class="note">Events appear as 📌 markers on the chart above, so everyone can see their influence on tickets (and sales once connected). Events can't be removed.</div>
     </div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h2>⚠️ Variant quality watch <span class="tag pending" style="vertical-align:middle">experimental</span>
+      <span class="updating-pill" id="qualUpdating" style="margin-left:8px"><div class="spin"></div>Updating…</span>
+    </h2>
+    <div class="note" style="margin-top:0">Worst variants by returns + refunds + cancellations (last 90 days, per units sold). Early-stage — refunds/cancels are counted at order level, so treat as a rough signal, not gospel.</div>
+    <div style="overflow-x:auto;margin-top:8px"><table id="qualTable"><thead><tr>
+      <th>SKU / product</th><th style="text-align:right">Sold</th><th style="text-align:right">Return %</th>
+      <th style="text-align:right">Refund %</th><th style="text-align:right">Cancel %</th><th style="text-align:right">Score</th><th>Top return reasons</th>
+    </tr></thead><tbody></tbody></table></div>
+    <div class="note" id="qualNote" style="margin-top:8px"></div>
   </div>
 </div>
 
