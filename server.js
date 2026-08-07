@@ -3352,6 +3352,24 @@ async function notifyFreight(action, sh, extra) {
 // post a Slack alert for each newly-sent Klaviyo campaign (called after every Klaviyo sync).
 // Only campaigns sent in the last few hours are posted; older un-notified ones are marked silently
 // so a first run (or downtime) never floods the channel with history.
+async function postCampaignAlert(conn, channel, appUrl, c) {
+  const icon = (c.channel || '').toLowerCase() === 'sms' ? '📱' : '📧';
+  const fields = [
+    { type: 'mrkdwn', text: `*Subject*\n${slackEsc(c.subject || '—')}` },
+    { type: 'mrkdwn', text: `*Channel*\n${slackEsc((c.channel || 'email').toUpperCase())}` },
+    { type: 'mrkdwn', text: `*Sent*\n${c.sent || '—'}` },
+    { type: 'mrkdwn', text: `*Recipients*\n${c.recipients != null ? c.recipients.toLocaleString() : 'counting…'}` }
+  ];
+  if (c.from_email) fields.push({ type: 'mrkdwn', text: `*From*\n${slackEsc(c.from_email)}` });
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: `${icon} Klaviyo email sent`, emoji: true } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*${slackEsc(c.name || 'Campaign')}*` } },
+    { type: 'section', fields },
+    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '👀 View email', emoji: true }, url: `${appUrl}/#klaviyo/mail/${encodeURIComponent(c.klaviyo_id)}` }] },
+    { type: 'divider' }
+  ];
+  await slackPost(conn.config.bot_token, channel, `${icon} Klaviyo email sent — ${c.name || 'Campaign'} · ${c.subject || ''}`, undefined, blocks);
+}
 async function notifyNewCampaigns() {
   try {
     const conn = await getConnector('slack');
@@ -3367,27 +3385,25 @@ async function notifyNewCampaigns() {
        WHERE notified_at IS NULL AND send_time IS NOT NULL AND send_time >= now() - interval '6 hours'
        ORDER BY send_time ASC`)).rows;
     for (const c of fresh) {
-      const icon = (c.channel || '').toLowerCase() === 'sms' ? '📱' : '📧';
-      const fields = [
-        { type: 'mrkdwn', text: `*Subject*\n${slackEsc(c.subject || '—')}` },
-        { type: 'mrkdwn', text: `*Channel*\n${slackEsc((c.channel || 'email').toUpperCase())}` },
-        { type: 'mrkdwn', text: `*Sent*\n${c.sent || '—'}` },
-        { type: 'mrkdwn', text: `*Recipients*\n${c.recipients != null ? c.recipients.toLocaleString() : 'counting…'}` }
-      ];
-      if (c.from_email) fields.push({ type: 'mrkdwn', text: `*From*\n${slackEsc(c.from_email)}` });
-      const blocks = [
-        { type: 'header', text: { type: 'plain_text', text: `${icon} Klaviyo email sent`, emoji: true } },
-        { type: 'section', text: { type: 'mrkdwn', text: `*${slackEsc(c.name || 'Campaign')}*` } },
-        { type: 'section', fields },
-        { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '👀 View email', emoji: true }, url: `${appUrl}/#klaviyo/mail/${encodeURIComponent(c.klaviyo_id)}` }] },
-        { type: 'divider' }
-      ];
-      const fallback = `${icon} Klaviyo email sent — ${c.name || 'Campaign'} · ${c.subject || ''}`;
-      await slackPost(conn.config.bot_token, channel, fallback, undefined, blocks);
+      await postCampaignAlert(conn, channel, appUrl, c);
       await pool.query(`UPDATE campaigns_cache SET notified_at=now() WHERE klaviyo_id=$1`, [c.klaviyo_id]);
     }
   } catch (e) { console.error('klaviyo campaign notify failed:', e.message); }
 }
+// admin test: re-post the most recent campaign as a sample notification (does NOT send any email)
+app.post('/api/klaviyo/test-notify', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('slack');
+  if (!conn?.config?.bot_token) return res.status(400).json({ error: 'Slack bot not connected' });
+  const c = (await pool.query(
+    `SELECT klaviyo_id, name, channel, to_char(send_time,'DD Mon YYYY, HH24:MI') sent, recipients, subject, from_email
+     FROM campaigns_cache ORDER BY send_time DESC NULLS LAST LIMIT 1`)).rows[0];
+  if (!c) return res.status(404).json({ error: 'No campaigns cached yet — run a Klaviyo sync first.' });
+  const channel = (conn.config.alert_channel || '#clicksbrain').trim();
+  const appUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || 'https://clicks-brain.onrender.com').replace(/\/$/, '');
+  try { await postCampaignAlert(conn, channel, appUrl, c); res.json({ ok: true, name: c.name }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // ---------- daily report (Slack, 18:00 Europe/London) ----------
 const REPORT_TZ = 'Europe/London';
