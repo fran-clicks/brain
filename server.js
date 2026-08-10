@@ -239,11 +239,24 @@ const pool = new Pool({
   query_timeout: 20000
 });
 pool.on('error', (e) => console.error('pg pool error:', e.message)); // don't let an idle-client error crash the process
+// Safety net: a transient DB timeout inside one request must not take down the whole server.
+// Log and keep serving rather than crash-restarting (which is what happened over the weekend).
+process.on('unhandledRejection', (e) => console.error('unhandledRejection (ignored):', e?.message || e));
+process.on('uncaughtException', (e) => console.error('uncaughtException (ignored):', e?.message || e));
 
 async function initDb() {
   // serialize schema setup across instances: overlapping deploys were deadlocking on the DDL.
   // An advisory lock makes the second booting instance wait, then its IF-NOT-EXISTS statements no-op.
-  const lockClient = await pool.connect();
+  // The free DB can be cold at boot, so retry the first connection instead of crashing immediately.
+  let lockClient;
+  for (let attempt = 1; ; attempt++) {
+    try { lockClient = await pool.connect(); break; }
+    catch (e) {
+      if (attempt >= 8) throw e;
+      console.error(`initDb: database not ready (attempt ${attempt}/8): ${e.message} — retrying in 3s`);
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
   try {
     await lockClient.query('SET statement_timeout = 0'); // migrations + the lock wait must not be killed by the pool's 20s cap
     await lockClient.query('SELECT pg_advisory_lock(728341)');
