@@ -287,6 +287,8 @@ async function initDb() {
       file_data TEXT, file_name TEXT DEFAULT '', file_mime TEXT DEFAULT '',
       submitted_by TEXT DEFAULT 'anonymous', status TEXT DEFAULT 'pending',
       decided_by TEXT, decided_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
+    ALTER TABLE kb_suggestions ADD COLUMN IF NOT EXISTS is_main BOOLEAN DEFAULT false;
+    ALTER TABLE kb_suggestions ADD COLUMN IF NOT EXISTS migrated BOOLEAN DEFAULT false;
     CREATE TABLE IF NOT EXISTS kb_page_revisions (
       id SERIAL PRIMARY KEY, page_id INT NOT NULL, title TEXT, content TEXT,
       replaced_by TEXT, replaced_at TIMESTAMPTZ DEFAULT now());
@@ -410,6 +412,23 @@ async function initDb() {
       requested_by TEXT DEFAULT 'anonymous', status TEXT DEFAULT 'pending',
       decided_by TEXT, decided_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
   `);
+  // single flat knowledge base: ensure one "main" base, and fold any legacy bases in as sources (once)
+  let mainKb = (await lockClient.query(`SELECT id FROM kb_suggestions WHERE is_main LIMIT 1`)).rows[0]?.id;
+  if (!mainKb) {
+    mainKb = (await lockClient.query(
+      `INSERT INTO kb_suggestions (name, description, suggested_by, status, is_main)
+       VALUES ('Clicks Knowledge Base', 'Links, docs and specs for Clicks', 'system', 'approved', true) RETURNING id`)).rows[0].id;
+  }
+  const legacy = (await lockClient.query(`SELECT id, name, description FROM kb_suggestions WHERE NOT is_main AND NOT migrated`)).rows;
+  for (const b of legacy) {
+    const desc = String(b.description || '').trim();
+    const isUrl = /^(https?:\/\/|www\.)/i.test(desc);
+    await lockClient.query(
+      `INSERT INTO kb_pages (kb_id, title, content, link, added_by) VALUES ($1,$2,$3,$4,'migration')`,
+      [mainKb, b.name, isUrl ? '' : desc, isUrl ? desc : '']);
+    await lockClient.query(`UPDATE kb_pages SET kb_id=$1 WHERE kb_id=$2`, [mainKb, b.id]); // keep any real pages
+    await lockClient.query(`UPDATE kb_suggestions SET migrated=true, status='archived' WHERE id=$1`, [b.id]);
+  }
   for (const em of ['fran@clicks.tech', 'kp@clicks.tech']) {
     await lockClient.query(`INSERT INTO users (email, role) VALUES ($1, 'admin')
                       ON CONFLICT (email) DO UPDATE SET role='admin'`, [em]);
@@ -726,6 +745,57 @@ app.post('/api/kb', rejectSecrets(['name', 'description']), async (req, res) => 
     'INSERT INTO kb_suggestions (name, description, suggested_by) VALUES ($1,$2,$3) RETURNING *',
     [name, description, suggested_by || 'anonymous']);
   res.status(201).json(rows[0]);
+});
+
+// ---------- single flat "Clicks Knowledge Base": a list of sources (links / files / notes) ----------
+async function mainKbId() {
+  return (await pool.query(`SELECT id FROM kb_suggestions WHERE is_main LIMIT 1`)).rows[0]?.id || null;
+}
+// everyone signed in sees the source titles; link/file access stays admin-only
+app.get('/api/kb/sources', async (req, res) => {
+  const id = await mainKbId();
+  if (!id) return res.json({ can_open: false, sources: [] });
+  const admin = await isAdminReq(req);
+  const rows = (await pool.query(
+    `SELECT id, title, updated_at, nullif(link,'') link, nullif(file_name,'') file_name
+     FROM kb_pages WHERE kb_id=$1 ORDER BY lower(title)`, [id])).rows;
+  res.json({ can_open: admin, sources: rows.map(r => admin ? r
+    : { id: r.id, title: r.title, has_link: !!r.link, has_file: !!r.file_name }) });
+});
+// member submits a source (no bucket to pick — always the one Clicks KB)
+app.post('/api/kb/submit', rejectSecrets(['title', 'notes', 'link']), async (req, res) => {
+  const id = await mainKbId();
+  if (!id) return res.status(500).json({ error: 'knowledge base not ready' });
+  const b = req.body || {};
+  const notes = String(b.notes || '').trim(), link = String(b.link || '').trim(), fileName = String(b.file_name || '').trim();
+  if (!notes && !link && !b.file_data) return res.status(400).json({ error: 'add a link, a file, or some notes' });
+  const title = (String(b.title || '').trim() || fileName || link || 'Untitled source').slice(0, 300);
+  await pool.query(
+    `INSERT INTO kb_submissions (kb_id, title, notes, link, file_data, file_name, file_mime, submitted_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [id, title, notes.slice(0, 100000), link.slice(0, 1000), b.file_data || null, fileName.slice(0, 200), String(b.file_mime || '').slice(0, 100), req.userEmail || 'anonymous']);
+  res.status(201).json({ ok: true });
+});
+// admin adds a source directly (no review needed)
+app.post('/api/kb/source', rejectSecrets(['title', 'notes', 'link']), async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const id = await mainKbId();
+  if (!id) return res.status(500).json({ error: 'knowledge base not ready' });
+  const b = req.body || {};
+  const notes = String(b.notes || '').trim(), link = String(b.link || '').trim(), fileName = String(b.file_name || '').trim();
+  if (!notes && !link && !b.file_data) return res.status(400).json({ error: 'add a link, a file, or some notes' });
+  const title = (String(b.title || '').trim() || fileName || link || 'Untitled source').slice(0, 300);
+  const content = [notes, link ? `Link: ${link}` : ''].filter(Boolean).join('\n\n');
+  const { rows } = await pool.query(
+    `INSERT INTO kb_pages (kb_id, title, content, link, file_data, file_name, file_mime, added_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+    [id, title, content.slice(0, 100000), link, b.file_data || null, fileName.slice(0, 200), String(b.file_mime || '').slice(0, 100), req.userEmail || 'admin']);
+  res.status(201).json({ ok: true, id: rows[0].id });
+});
+app.post('/api/kb/pages/:id/delete', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  await pool.query('DELETE FROM kb_pages WHERE id=$1', [parseInt(req.params.id)]);
+  res.json({ ok: true });
 });
 
 // ---------- KB pages (content, search, revisions) ----------
