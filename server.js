@@ -814,15 +814,18 @@ function extractFileText(mime, filename, b64) {
 // member (any signed-in user) submits a doc/link/file to a knowledge base for review
 app.post('/api/kb/:id/submit', rejectSecrets(['title', 'notes', 'link']), async (req, res) => {
   const b = req.body || {};
-  if (!b.title) return res.status(400).json({ error: 'title required' });
+  const notes = String(b.notes || '').trim(), link = String(b.link || '').trim(), fileName = String(b.file_name || '').trim();
+  if (!notes && !link && !b.file_data) return res.status(400).json({ error: 'add a link, a file, or some notes' });
+  // title is optional — fall back to the file name, then the link, then a generic label
+  const title = (String(b.title || '').trim() || fileName || link || 'Untitled submission').slice(0, 300);
   const kb = (await pool.query('SELECT status FROM kb_suggestions WHERE id=$1', [req.params.id])).rows[0];
   if (!kb) return res.status(404).json({ error: 'knowledge base not found' });
   if (kb.status !== 'approved') return res.status(400).json({ error: 'This knowledge base is not approved yet.' });
   await pool.query(
     `INSERT INTO kb_submissions (kb_id, title, notes, link, file_data, file_name, file_mime, submitted_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [req.params.id, String(b.title).slice(0, 300), String(b.notes || '').slice(0, 100000), String(b.link || '').slice(0, 1000),
-     b.file_data || null, String(b.file_name || '').slice(0, 200), String(b.file_mime || '').slice(0, 100), req.userEmail || 'anonymous']);
+    [req.params.id, title, notes.slice(0, 100000), link.slice(0, 1000),
+     b.file_data || null, fileName.slice(0, 200), String(b.file_mime || '').slice(0, 100), req.userEmail || 'anonymous']);
   res.status(201).json({ ok: true });
 });
 // admin: list pending submissions (file metadata only, not the base64)

@@ -814,9 +814,9 @@ footer{color:rgba(16,17,20,.45)}
     <div class="note" style="margin-top:0">Propose something for a knowledge base. An admin reviews it before it goes live and becomes usable by Ask the Brain. Don't paste keys or passwords.</div>
     <div class="grid two" style="margin-top:8px">
       <div><label>Knowledge base</label><select id="kbSubKb"></select></div>
-      <div><label>Title</label><input id="kbSubTitle" placeholder="e.g. EU returns policy"></div>
+      <div><label>Title <span style="color:var(--muted);font-weight:400">(optional)</span></label><input id="kbSubTitle" placeholder="auto-named from the file/link if left blank"></div>
     </div>
-    <label>Notes / content</label><textarea id="kbSubNotes" rows="4" placeholder="Type the info, or describe what the link/file contains"></textarea>
+    <label>Notes / content <span style="color:var(--muted);font-weight:400">(optional — a link or file is enough)</span></label><textarea id="kbSubNotes" rows="3" placeholder="Only if you want to add context; otherwise just attach a link or file below"></textarea>
     <div class="grid two">
       <div><label>Link (optional)</label><input id="kbSubLink" placeholder="https://…"></div>
       <div><label>File (optional)</label><input type="file" id="kbSubFile"></div>
@@ -2941,12 +2941,14 @@ async function submitKbDoc(btn) {
   const note = document.getElementById('kbSubNote');
   const kbId = document.getElementById('kbSubKb').value;
   const title = document.getElementById('kbSubTitle').value.trim();
+  const notes = document.getElementById('kbSubNotes').value.trim();
+  const link = document.getElementById('kbSubLink').value.trim();
+  const f = document.getElementById('kbSubFile').files[0];
   if (!kbId) { note.textContent = '⚠️ pick a knowledge base'; return; }
-  if (!title) { note.textContent = '⚠️ add a title'; return; }
+  if (!notes && !link && !f) { note.textContent = '⚠️ add a link, a file, or some notes'; return; }
   btn.disabled = true; note.textContent = 'Submitting…';
   try {
-    const body = { title, notes: document.getElementById('kbSubNotes').value, link: document.getElementById('kbSubLink').value.trim() };
-    const f = document.getElementById('kbSubFile').files[0];
+    const body = { title, notes, link };
     if (f) {
       if (f.size > 8 * 1024 * 1024) throw new Error('file too big (max 8MB)');
       body.file_data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(f); });
