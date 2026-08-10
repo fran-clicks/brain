@@ -796,8 +796,8 @@ footer{color:rgba(16,17,20,.45)}
 
 <!-- KNOWLEDGE BASES -->
 <div class="section" id="s-kb">
-  <div class="card">
-    <h2>🔎 Search the knowledge base</h2>
+  <div class="card" id="kbSearchCard" style="display:none">
+    <h2>🔎 Search the knowledge base <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
     <div style="display:flex;gap:8px">
       <input id="kbQ" placeholder="Search all pages — warranty, shipping times, how to process X…">
       <button class="btn" style="margin:0" onclick="kbDoSearch()">Search</button>
@@ -807,7 +807,26 @@ footer{color:rgba(16,17,20,.45)}
   <div class="card">
     <h2>Knowledge bases</h2>
     <table id="kbTable"><thead><tr><th>Name</th><th>Description</th><th>Suggested by</th><th>Status</th></tr></thead><tbody></tbody></table>
-    <div class="note">Click an approved knowledge base to browse and add its pages. Page edits keep full revision history — nothing is ever lost.</div>
+    <div class="note" id="kbTableNote"></div>
+  </div>
+  <div class="card">
+    <h2>📤 Submit a doc, link or file</h2>
+    <div class="note" style="margin-top:0">Propose something for a knowledge base. An admin reviews it before it goes live and becomes usable by Ask the Brain. Don't paste keys or passwords.</div>
+    <div class="grid two" style="margin-top:8px">
+      <div><label>Knowledge base</label><select id="kbSubKb"></select></div>
+      <div><label>Title</label><input id="kbSubTitle" placeholder="e.g. EU returns policy"></div>
+    </div>
+    <label>Notes / content</label><textarea id="kbSubNotes" rows="4" placeholder="Type the info, or describe what the link/file contains"></textarea>
+    <div class="grid two">
+      <div><label>Link (optional)</label><input id="kbSubLink" placeholder="https://…"></div>
+      <div><label>File (optional)</label><input type="file" id="kbSubFile"></div>
+    </div>
+    <button class="btn" onclick="submitKbDoc(this)">Submit for review</button>
+    <span class="note" id="kbSubNote" style="margin-left:8px"></span>
+  </div>
+  <div class="card" id="kbSubmissionsCard" style="display:none">
+    <h2>🕐 Pending submissions <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
+    <div id="kbSubmissionsList"></div>
   </div>
   <div class="card" id="kbDetail" style="display:none">
     <h2 id="kbDetailTitle"></h2>
@@ -2894,16 +2913,74 @@ async function loadGorgias() {
 // ---------- knowledge bases ----------
 async function loadKbs() {
   const kbs = await api('/api/kb');
+  const admin = window.isAdmin;
+  // admins can open/browse pages; members only see the list (content is admin-only)
   document.querySelector('#kbTable tbody').innerHTML = kbs.length ? kbs.map(k =>
-    `<tr><td>${k.status === 'approved'
+    `<tr><td>${k.status === 'approved' && admin
         ? `<a href="#" onclick="openKb(${k.id},'${esc(k.name).replace(/'/g, '&#39;')}');return false"><b>${esc(k.name)}</b></a>`
         : `<b>${esc(k.name)}</b>`}</td><td>${esc(k.description)}</td><td>${esc(k.suggested_by)}</td>
      <td><span class="tag ${k.status === 'rejected' ? 'src' : esc(k.status)}">${esc(k.status)}</span>
-     ${window.isAdmin && k.status === 'pending' ? `
+     ${admin && k.status === 'pending' ? `
        <button class="btn" style="margin:2px 0 0;padding:3px 10px;font-size:12px" onclick="decideKb(${k.id},'approved')">✓</button>
        <button class="btn" style="margin:2px 0 0;padding:3px 10px;font-size:12px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="decideKb(${k.id},'rejected')">✕</button>` : ''}
      </td></tr>`).join('')
     : '<tr><td colspan="4" class="empty">No knowledge bases yet — suggest one below</td></tr>';
+  document.getElementById('kbTableNote').textContent = admin
+    ? 'Click an approved knowledge base to browse its pages. Edits keep full revision history.'
+    : 'These are the knowledge bases the team maintains. The content is admin-only — submit a doc, link or file below and an admin will review it.';
+  document.getElementById('kbSearchCard').style.display = admin ? 'block' : 'none';
+  if (!admin) document.getElementById('kbDetail').style.display = 'none';
+  // populate the submit dropdown with approved bases
+  const approved = kbs.filter(k => k.status === 'approved');
+  document.getElementById('kbSubKb').innerHTML = approved.length
+    ? approved.map(k => `<option value="${k.id}">${esc(k.name)}</option>`).join('')
+    : '<option value="">No approved knowledge base yet</option>';
+  if (admin) loadKbSubmissions();
+}
+async function submitKbDoc(btn) {
+  const note = document.getElementById('kbSubNote');
+  const kbId = document.getElementById('kbSubKb').value;
+  const title = document.getElementById('kbSubTitle').value.trim();
+  if (!kbId) { note.textContent = '⚠️ pick a knowledge base'; return; }
+  if (!title) { note.textContent = '⚠️ add a title'; return; }
+  btn.disabled = true; note.textContent = 'Submitting…';
+  try {
+    const body = { title, notes: document.getElementById('kbSubNotes').value, link: document.getElementById('kbSubLink').value.trim() };
+    const f = document.getElementById('kbSubFile').files[0];
+    if (f) {
+      if (f.size > 8 * 1024 * 1024) throw new Error('file too big (max 8MB)');
+      body.file_data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.onerror = rej; r.readAsDataURL(f); });
+      body.file_name = f.name; body.file_mime = f.type;
+    }
+    await api(`/api/kb/${kbId}/submit`, {method:'POST', body: JSON.stringify(body)});
+    note.textContent = '✅ Submitted for review';
+    document.getElementById('kbSubTitle').value = ''; document.getElementById('kbSubNotes').value = '';
+    document.getElementById('kbSubLink').value = ''; document.getElementById('kbSubFile').value = '';
+    if (window.isAdmin) loadKbSubmissions();
+  } catch (e) { note.textContent = '⚠️ ' + e.message; }
+  finally { btn.disabled = false; setTimeout(() => note.textContent = '', 5000); }
+}
+async function loadKbSubmissions() {
+  try {
+    const subs = await api('/api/kb/submissions');
+    document.getElementById('kbSubmissionsCard').style.display = subs.length ? 'block' : 'none';
+    document.getElementById('kbSubmissionsList').innerHTML = subs.map(s => `
+      <div class="evt" style="align-items:flex-start"><div style="flex:1">
+        <div class="t"><b>${esc(s.title)}</b> <span class="tag src">${esc(s.kb)}</span></div>
+        <div class="m">by ${esc(s.submitted_by)} · ${esc(String(s.created_at).slice(0,10))}</div>
+        ${s.notes ? `<div style="font-size:13px;margin-top:4px;white-space:pre-wrap">${esc(s.notes.slice(0,400))}${s.notes.length>400?'…':''}</div>` : ''}
+        ${s.link ? `<div style="font-size:12px;margin-top:4px">🔗 <a href="${esc(s.link)}" target="_blank">${esc(s.link)}</a></div>` : ''}
+        ${s.file_name ? `<div style="font-size:12px;margin-top:4px">📎 <a href="/api/kb/submission/${s.id}/file" target="_blank">${esc(s.file_name)}</a></div>` : ''}
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn" style="margin:0;padding:5px 12px" onclick="decideSubmission(${s.id},'approved')">Approve</button>
+        <button class="btn" style="margin:0;padding:5px 12px;background:#fff;color:var(--red);border:1px solid var(--line);box-shadow:none" onclick="decideSubmission(${s.id},'rejected')">Reject</button>
+      </div></div>`).join('');
+  } catch {}
+}
+async function decideSubmission(id, decision) {
+  try { await api(`/api/kb/submission/${id}/decision`, {method:'POST', body: JSON.stringify({ decision })}); loadKbSubmissions(); }
+  catch (e) { alert(e.message); }
 }
 // KB pages: browse, view, edit, add, search
 let curKb = null, curPage = null;

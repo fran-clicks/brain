@@ -276,6 +276,17 @@ async function initDb() {
       added_by TEXT DEFAULT 'anonymous', updated_by TEXT,
       created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now());
     CREATE INDEX IF NOT EXISTS idx_kb_pages_fts ON kb_pages USING GIN (to_tsvector('english', title || ' ' || content));
+    ALTER TABLE kb_pages ADD COLUMN IF NOT EXISTS link TEXT DEFAULT '';
+    ALTER TABLE kb_pages ADD COLUMN IF NOT EXISTS file_data TEXT;      -- base64
+    ALTER TABLE kb_pages ADD COLUMN IF NOT EXISTS file_name TEXT DEFAULT '';
+    ALTER TABLE kb_pages ADD COLUMN IF NOT EXISTS file_mime TEXT DEFAULT '';
+    -- member-submitted docs/links/files awaiting an admin's approval into a KB
+    CREATE TABLE IF NOT EXISTS kb_submissions (
+      id SERIAL PRIMARY KEY, kb_id INT NOT NULL REFERENCES kb_suggestions(id),
+      title TEXT NOT NULL, notes TEXT DEFAULT '', link TEXT DEFAULT '',
+      file_data TEXT, file_name TEXT DEFAULT '', file_mime TEXT DEFAULT '',
+      submitted_by TEXT DEFAULT 'anonymous', status TEXT DEFAULT 'pending',
+      decided_by TEXT, decided_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS kb_page_revisions (
       id SERIAL PRIMARY KEY, page_id INT NOT NULL, title TEXT, content TEXT,
       replaced_by TEXT, replaced_at TIMESTAMPTZ DEFAULT now());
@@ -731,7 +742,9 @@ async function kbSearch(q, limit = 12) {
   return rows;
 }
 
+// KB content (search, page lists, page bodies) is admin-only — members see the list of bases but not the docs
 app.get('/api/kb/search', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const q = String(req.query.q || '').trim();
   if (!q) return res.json([]);
   try { res.json(await kbSearch(q)); }
@@ -739,17 +752,29 @@ app.get('/api/kb/search', async (req, res) => {
 });
 
 app.get('/api/kb/:id/pages', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const { rows } = await pool.query(
-    `SELECT id, title, added_by, updated_by, updated_at, length(content)::int chars
+    `SELECT id, title, added_by, updated_by, updated_at, length(content)::int chars,
+       nullif(link,'') link, nullif(file_name,'') file_name
      FROM kb_pages WHERE kb_id=$1 ORDER BY created_at`, [req.params.id]);
   res.json(rows);
 });
 app.get('/api/kb/pages/:pageId', async (req, res) => {
-  const { rows } = await pool.query('SELECT * FROM kb_pages WHERE id=$1', [req.params.pageId]);
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const { rows } = await pool.query('SELECT id, kb_id, title, content, added_by, updated_by, created_at, updated_at, link, file_name, file_mime FROM kb_pages WHERE id=$1', [req.params.pageId]);
   if (!rows[0]) return res.status(404).json({ error: 'not found' });
   res.json(rows[0]);
 });
+app.get('/api/kb/pages/:pageId/file', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).send('admins only');
+  const d = (await pool.query('SELECT file_data, file_name, file_mime FROM kb_pages WHERE id=$1', [parseInt(req.params.pageId)])).rows[0];
+  if (!d?.file_data) return res.status(404).send('no file');
+  res.set('Content-Type', d.file_mime || 'application/octet-stream');
+  res.set('Content-Disposition', `inline; filename="${(d.file_name || 'file').replace(/"/g, '')}"`);
+  res.send(Buffer.from(d.file_data, 'base64'));
+});
 app.post('/api/kb/:id/pages', rejectSecrets(['title', 'content']), async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only — members submit for approval instead' });
   const { title, content } = req.body || {};
   if (!title) return res.status(400).json({ error: 'title required' });
   const kb = (await pool.query('SELECT status FROM kb_suggestions WHERE id=$1', [req.params.id])).rows[0];
@@ -762,6 +787,7 @@ app.post('/api/kb/:id/pages', rejectSecrets(['title', 'content']), async (req, r
   res.status(201).json(rows[0]);
 });
 app.put('/api/kb/pages/:pageId', rejectSecrets(['title', 'content']), async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const { title, content } = req.body || {};
   const old = (await pool.query('SELECT * FROM kb_pages WHERE id=$1', [req.params.pageId])).rows[0];
   if (!old) return res.status(404).json({ error: 'not found' });
@@ -773,6 +799,68 @@ app.put('/api/kb/pages/:pageId', rejectSecrets(['title', 'content']), async (req
      RETURNING id, title, updated_by, updated_at`,
     [old.id, String(title || old.title).slice(0, 300), String(content ?? old.content).slice(0, 100000), req.userEmail || 'anonymous']);
   res.json(rows[0]);
+});
+
+// ---------- KB submissions (members submit docs/links/files → admins approve into a page) ----------
+// pull readable text out of a base64 file where we can (text-like formats); binaries stay for humans
+function extractFileText(mime, filename, b64) {
+  if (!b64) return '';
+  const name = String(filename || '').toLowerCase();
+  const textly = /^text\//i.test(mime || '') || /\.(txt|md|markdown|csv|tsv|json|html?|log|rtf)$/i.test(name);
+  if (!textly) return ''; // PDFs/images/docx aren't text-extracted here
+  try { return Buffer.from(b64, 'base64').toString('utf8').replace(/\u0000/g, '').slice(0, 60000); }
+  catch { return ''; }
+}
+// member (any signed-in user) submits a doc/link/file to a knowledge base for review
+app.post('/api/kb/:id/submit', rejectSecrets(['title', 'notes', 'link']), async (req, res) => {
+  const b = req.body || {};
+  if (!b.title) return res.status(400).json({ error: 'title required' });
+  const kb = (await pool.query('SELECT status FROM kb_suggestions WHERE id=$1', [req.params.id])).rows[0];
+  if (!kb) return res.status(404).json({ error: 'knowledge base not found' });
+  if (kb.status !== 'approved') return res.status(400).json({ error: 'This knowledge base is not approved yet.' });
+  await pool.query(
+    `INSERT INTO kb_submissions (kb_id, title, notes, link, file_data, file_name, file_mime, submitted_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [req.params.id, String(b.title).slice(0, 300), String(b.notes || '').slice(0, 100000), String(b.link || '').slice(0, 1000),
+     b.file_data || null, String(b.file_name || '').slice(0, 200), String(b.file_mime || '').slice(0, 100), req.userEmail || 'anonymous']);
+  res.status(201).json({ ok: true });
+});
+// admin: list pending submissions (file metadata only, not the base64)
+app.get('/api/kb/submissions', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const { rows } = await pool.query(
+    `SELECT sub.id, sub.kb_id, s.name kb, sub.title, sub.notes, nullif(sub.link,'') link,
+       nullif(sub.file_name,'') file_name, sub.submitted_by, sub.created_at
+     FROM kb_submissions sub JOIN kb_suggestions s ON s.id = sub.kb_id
+     WHERE sub.status='pending' ORDER BY sub.created_at`);
+  res.json(rows);
+});
+app.get('/api/kb/submission/:id/file', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).send('admins only');
+  const d = (await pool.query('SELECT file_data, file_name, file_mime FROM kb_submissions WHERE id=$1', [parseInt(req.params.id)])).rows[0];
+  if (!d?.file_data) return res.status(404).send('no file');
+  res.set('Content-Type', d.file_mime || 'application/octet-stream');
+  res.set('Content-Disposition', `inline; filename="${(d.file_name || 'file').replace(/"/g, '')}"`);
+  res.send(Buffer.from(d.file_data, 'base64'));
+});
+// admin approves (→ becomes a KB page the assistant can use) or rejects a submission
+app.post('/api/kb/submission/:id/decision', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const sub = (await pool.query('SELECT * FROM kb_submissions WHERE id=$1 AND status=$2', [parseInt(req.params.id), 'pending'])).rows[0];
+  if (!sub) return res.status(404).json({ error: 'submission not found or already decided' });
+  const decided = req.body?.decision === 'approved' ? 'approved' : 'rejected';
+  if (decided === 'approved') {
+    // build the page body the AI will read: notes + link + any extractable file text
+    const fileText = extractFileText(sub.file_mime, sub.file_name, sub.file_data);
+    const parts = [sub.notes, sub.link ? `Link: ${sub.link}` : '', fileText ? `\n[Attached file: ${sub.file_name}]\n${fileText}` : ''].filter(Boolean);
+    await pool.query(
+      `INSERT INTO kb_pages (kb_id, title, content, link, file_data, file_name, file_mime, added_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [sub.kb_id, sub.title.slice(0, 300), parts.join('\n\n').slice(0, 100000), sub.link || '', sub.file_data || null, sub.file_name || '', sub.file_mime || '', sub.submitted_by]);
+  }
+  await pool.query('UPDATE kb_submissions SET status=$1, decided_by=$2, decided_at=now() WHERE id=$3',
+    [decided, req.userEmail || 'admin', sub.id]);
+  res.json({ ok: true, decision: decided });
 });
 
 // admin-triggered audit: cross-check knowledge bases against each other and live data
