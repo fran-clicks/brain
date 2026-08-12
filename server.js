@@ -605,6 +605,26 @@ app.get('/api/slack/channels', async (req, res) => {
   if (!conn) return res.json({ configured: false });
   res.json({ configured: true, alert_channel: conn.config.alert_channel || '', freight_channel: conn.config.freight_channel || '' });
 });
+// KB inbox: which Slack user IDs are allowed to DM the bot an update that gets filed into the KB
+app.post('/api/slack/kb-inbox', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const row = (await pool.query(`SELECT id, config_encrypted, meta FROM connectors WHERE type='slack' AND active=true ORDER BY created_at DESC LIMIT 1`)).rows[0];
+  if (!row) return res.status(404).json({ error: 'Slack is not connected yet — add it on the ＋ page first.' });
+  let cfg; try { cfg = decrypt(row.config_encrypted); } catch { return res.status(500).json({ error: 'could not read existing config' }); }
+  const ids = String(req.body?.allowed_user_ids || '').split(/[\s,]+/).map(s => s.trim().replace(/[^A-Za-z0-9]/g, '')).filter(Boolean);
+  cfg.kb_allowed_users = ids;
+  const meta = { ...(row.meta || {}), kb_allowed_users: ids };
+  await pool.query(`UPDATE connectors SET config_encrypted=$1, meta=$2 WHERE id=$3`, [encrypt(cfg), meta, row.id]);
+  res.json({ ok: true, allowed_user_ids: ids });
+});
+app.get('/api/slack/kb-inbox', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('slack');
+  const events_url = `${appBaseUrl()}/api/slack/events`;
+  if (!conn) return res.json({ configured: false, events_url });
+  res.json({ configured: true, has_signing_secret: !!conn.config.signing_secret,
+    allowed_user_ids: conn.config.kb_allowed_users || [], events_url });
+});
 
 app.get('/api/connectors', async (_req, res) => {
   const { rows } = await pool.query(
@@ -4144,12 +4164,52 @@ app.post('/api/slack/events', async (req, res) => {
   const ev = req.body?.event;
   if (!ev || ev.bot_id) return;
   const isMention = ev.type === 'app_mention';
-  const isDm = ev.type === 'message' && ev.channel_type === 'im' && !ev.subtype;
+  const isDm = ev.type === 'message' && ev.channel_type === 'im' && (!ev.subtype || ev.subtype === 'file_share');
   if (!isMention && !isDm) return;
   if (seenSlackEvents.has(ev.ts)) return;
   seenSlackEvents.add(ev.ts);
   if (seenSlackEvents.size > 500) seenSlackEvents.clear();
-  const text = String(ev.text || '').replace(/<@[^>]+>/g, '').trim();
+
+  // KB save: a DM that starts with kb:/note:/save: OR carries a file is filed into the knowledge base
+  // (rather than answered by the assistant). Locked to the allowlist of Slack user IDs.
+  const rawText = String(ev.text || '');
+  const KB_TRIGGER = /^\s*(kb|note|save)\s*[:\-]\s+/i;
+  const hasFiles = Array.isArray(ev.files) && ev.files.length > 0;
+  if (isDm && (KB_TRIGGER.test(rawText) || hasFiles)) {
+    const allowed = (conn.config.kb_allowed_users || []).map(String);
+    if (!allowed.includes(String(ev.user))) {
+      await slackPost(conn.config.bot_token, ev.channel,
+        `🔒 Not authorized to save to the knowledge base. Your Slack ID is \`${ev.user}\` — send it to a Clicks Brain admin to be added.`);
+      return;
+    }
+    const body = rawText.replace(KB_TRIGGER, '').replace(/<@[^>]+>/g, '').trim();
+    let file_data = null, file_name = '', file_mime = '';
+    if (hasFiles) {
+      const f = ev.files[0];
+      const url = f.url_private_download || f.url_private;
+      if (url && (f.size || 0) <= 7 * 1024 * 1024) {
+        try {
+          const dl = await fetch(url, { headers: { Authorization: `Bearer ${conn.config.bot_token}` } });
+          if (dl.ok) { file_data = Buffer.from(await dl.arrayBuffer()).toString('base64'); file_name = f.name || 'slack-file'; file_mime = f.mimetype || 'application/octet-stream'; }
+        } catch (e) { console.error('slack file download failed:', e.message); }
+      }
+    }
+    if (!body && !file_data) { await slackPost(conn.config.bot_token, ev.channel, 'Nothing to save — add some text or attach a file.'); return; }
+    const title = ((body.split('\n')[0] || '').trim() || file_name || 'Slack update').slice(0, 120);
+    const kbId = await mainKbId();
+    if (!kbId) { await slackPost(conn.config.bot_token, ev.channel, '⚠️ KB not ready yet — try again in a moment.'); return; }
+    try {
+      await pool.query(
+        `INSERT INTO kb_pages (kb_id, title, content, file_data, file_name, file_mime, added_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [kbId, title, body.slice(0, 100000), file_data, file_name.slice(0, 200), file_mime.slice(0, 100), `slack:${ev.user}`]);
+      await slackPost(conn.config.bot_token, ev.channel,
+        `✅ Saved to the Clicks Brain knowledge base:\n“${title}”${file_name ? `\n📎 ${file_name}${file_data ? '' : ' (couldn’t fetch the file — check the bot’s files:read scope)'}` : ''}`);
+    } catch (e) { await slackPost(conn.config.bot_token, ev.channel, `⚠️ Couldn’t save that: ${e.message}`); }
+    return;
+  }
+
+  const text = rawText.replace(/<@[^>]+>/g, '').trim();
   if (!text) return;
   try {
     const { reply } = await runAssistant([{ role: 'user', content: text }], { slack: true, userEmail: `slack:${ev.user || 'unknown'}` });

@@ -836,6 +836,23 @@ footer{color:rgba(16,17,20,.45)}
     <h2>🕐 Pending submissions <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
     <div id="kbSubmissionsList"></div>
   </div>
+  <div class="card" id="kbSlackCard" style="display:none">
+    <h2>💬 Slack DM → KB <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only · KP DMs the bot to file an update</span></h2>
+    <div class="note" id="slkbStatus" style="margin-top:0">Loading…</div>
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;font-weight:600;font-size:13px">How it works &amp; setup</summary>
+      <ol style="font-size:13px;color:var(--muted);margin:10px 0 10px 18px;line-height:1.7">
+        <li>KP direct-messages the Clicks Brain Slack bot. To <b>save</b> an update, start the message with <code>kb:</code> (or just attach a file) — e.g. <code>kb: Power Keyboard preorders can't be cancelled after 4 May</code>. Plain messages without <code>kb:</code> are still answered by the brain as normal.</li>
+        <li>First time, KP sends any <code>kb:</code> message — the bot replies with KP's Slack ID (he's not allowlisted yet).</li>
+        <li>Paste that ID below and Save. From then on his <code>kb:</code> messages and file uploads land in the knowledge base.</li>
+      </ol>
+      <div class="note" style="margin-top:0">Needs the Slack app to have <b>Event Subscriptions</b> on with the <b>message.im</b> event, plus the <b>im:history</b> and <b>files:read</b> scopes (reinstall the app after adding them). Request URL: <code id="slkbUrl">—</code></div>
+      <label>Allowed Slack user IDs <span style="color:var(--muted);font-weight:400">(comma-separated — KP's ID, e.g. U012ABCDEF)</span></label>
+      <input id="slkbIds" placeholder="U012ABCDEF">
+      <button class="btn" onclick="saveSlackKb(this)">Save allowlist</button>
+      <span class="note" id="slkbNote" style="margin-left:8px"></span>
+    </details>
+  </div>
   <div class="card" id="kbTelegramCard" style="display:none">
     <h2>📲 Telegram → KB <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only · forward WhatsApp updates in</span></h2>
     <div class="note" id="tgStatus" style="margin-top:0">Loading…</div>
@@ -2970,7 +2987,31 @@ async function loadKbs() {
       ? `${src.length} source${src.length === 1 ? '' : 's'} · click one to view / edit / delete`
       : `${src.length} source${src.length === 1 ? '' : 's'} · 🔗 link · 📎 file · content is admin-only`;
   } catch (e) { document.getElementById('kbSourcesNote').textContent = '⚠️ ' + e.message; }
-  if (admin) { loadKbSubmissions(); loadTelegram(); }
+  if (admin) { loadKbSubmissions(); loadSlackKb(); }
+}
+async function loadSlackKb() {
+  const card = document.getElementById('kbSlackCard');
+  if (!window.isAdmin) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  try {
+    const c = await api('/api/slack/kb-inbox');
+    document.getElementById('slkbUrl').textContent = c.events_url || '—';
+    const st = document.getElementById('slkbStatus');
+    if (!c.configured) { st.innerHTML = '⚪ Slack isn\'t connected yet — add it on the ＋ page first.'; return; }
+    const ids = c.allowed_user_ids || [];
+    document.getElementById('slkbIds').value = ids.join(', ');
+    st.innerHTML = `${c.has_signing_secret ? '🟢' : '🟠'} Slack connected${c.has_signing_secret ? '' : ' — <b>signing secret missing</b> (add it to the Slack connector)'} · ${ids.length} allowed sender${ids.length === 1 ? '' : 's'}${ids.length ? ` (${ids.map(esc).join(', ')})` : ' — <b>add KP\'s Slack ID below</b>'}`;
+  } catch (e) { document.getElementById('slkbStatus').textContent = '⚠️ ' + e.message; }
+}
+async function saveSlackKb(btn) {
+  const note = document.getElementById('slkbNote');
+  btn.disabled = true; note.textContent = 'Saving…';
+  try {
+    const r = await api('/api/slack/kb-inbox', { method: 'POST', body: JSON.stringify({ allowed_user_ids: document.getElementById('slkbIds').value }) });
+    note.textContent = `✅ Allowlist saved (${(r.allowed_user_ids || []).length} ID${(r.allowed_user_ids || []).length === 1 ? '' : 's'}).`;
+    loadSlackKb();
+  } catch (e) { note.textContent = '⚠️ ' + e.message; }
+  finally { btn.disabled = false; }
 }
 async function loadTelegram() {
   const card = document.getElementById('kbTelegramCard');
