@@ -4170,9 +4170,44 @@ app.post('/api/slack/events', async (req, res) => {
   seenSlackEvents.add(ev.ts);
   if (seenSlackEvents.size > 500) seenSlackEvents.clear();
 
+  const rawText = String(ev.text || '');
+  const allowedUsers = (conn.config.kb_allowed_users || []).map(String);
+  const isAllowed = allowedUsers.includes(String(ev.user));
+  const notAuth = () => slackPost(conn.config.bot_token, ev.channel,
+    `🔒 Not authorized to manage the knowledge base. Your Slack ID is \`${ev.user}\` — send it to a Clicks Brain admin to be added.`);
+
+  // KB management commands: `kb list`, `kb delete <id>`, `kb help` (allowlisted)
+  if (isDm) {
+    const cmd = rawText.trim();
+    const mDel = cmd.match(/^kb\s+delete\s+#?(\d+)/i);
+    if (/^kb\s+help\b/i.test(cmd)) {
+      await slackPost(conn.config.bot_token, ev.channel,
+        `*Clicks Brain KB — commands*\n• \`kb: <text>\` — save a note/rule to the knowledge base\n• attach a file (optionally with \`kb:\` caption) — save the file\n• \`kb list\` — show recent KB entries with their IDs\n• \`kb delete <id>\` — remove an entry (use the ID from \`kb list\`)\n• any other message — just asks the brain a question (nothing is saved)`);
+      return;
+    }
+    if (/^kb\s+list\b/i.test(cmd)) {
+      if (!isAllowed) { await notAuth(); return; }
+      const kbId = await mainKbId();
+      const rows = kbId ? (await pool.query(
+        `SELECT id, title, to_char(created_at,'DD Mon') d FROM kb_pages WHERE kb_id=$1 ORDER BY created_at DESC LIMIT 15`, [kbId])).rows : [];
+      const list = rows.length ? rows.map(r => `\`#${r.id}\` ${slackEsc(r.title)} _(${r.d})_`).join('\n')
+        : '_(no entries yet)_';
+      await slackPost(conn.config.bot_token, ev.channel, `*Latest KB entries* (newest first):\n${list}\n\nDelete one with \`kb delete <id>\`.`);
+      return;
+    }
+    if (mDel) {
+      if (!isAllowed) { await notAuth(); return; }
+      const kbId = await mainKbId();
+      const del = kbId ? (await pool.query(`DELETE FROM kb_pages WHERE id=$1 AND kb_id=$2 RETURNING title`, [parseInt(mDel[1]), kbId])).rows[0] : null;
+      await slackPost(conn.config.bot_token, ev.channel, del
+        ? `🗑️ Deleted \`#${mDel[1]}\` — “${slackEsc(del.title)}”.`
+        : `Couldn't find KB entry \`#${mDel[1]}\`. Try \`kb list\` to see current IDs.`);
+      return;
+    }
+  }
+
   // KB save: a DM that starts with kb:/note:/save: OR carries a file is filed into the knowledge base
   // (rather than answered by the assistant). Locked to the allowlist of Slack user IDs.
-  const rawText = String(ev.text || '');
   const KB_TRIGGER = /^\s*(kb|note|save)\s*[:\-]\s+/i;
   const hasFiles = Array.isArray(ev.files) && ev.files.length > 0;
   if (isDm && (KB_TRIGGER.test(rawText) || hasFiles)) {
