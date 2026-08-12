@@ -228,6 +228,34 @@ footer{color:rgba(16,17,20,.45)}
     </div>
     <div class="note" id="homeNote"></div>
   </div>
+  <div class="grid two">
+    <div class="card">
+      <h2>📌 Recent events <span style="font-weight:400;color:var(--muted);font-size:12px">· today & last 7 days</span></h2>
+      <div id="evtRecent"></div>
+    </div>
+    <div class="card">
+      <h2>📅 Upcoming events</h2>
+      <div id="evtUpcoming"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Team events <button class="btn" style="float:right;margin:0;padding:5px 12px" onclick="toggleEvtForm()">＋ Add event</button></h2>
+    <div class="note" style="margin-top:0">Log campaigns, launches, trips — anything that could move the numbers or that the team should plan around. Past events appear as 📌 pins on the chart.</div>
+    <div id="evtForm" style="display:none;border-top:1px solid var(--line);margin-top:10px">
+      <div class="grid two">
+        <div><label>Title</label><input id="eTitle" placeholder="e.g. Win-back email sent to lapsed customers"></div>
+        <div><label>Date</label><input type="date" id="eDate"></div>
+      </div>
+      <label>Details</label><textarea id="eDesc" rows="2" placeholder="Audience, goal, anything the team should know"></textarea>
+      <div class="grid two">
+        <div><label>Your name</label><input id="eBy"></div>
+        <div><label>Attachment (optional, max 5MB — e.g. the email itself)</label><input type="file" id="eFile"></div>
+      </div>
+      <button class="btn" onclick="addEvent()">Add event</button>
+      <div class="err" id="eErr"></div>
+      <div class="note">Events appear as 📌 markers on the chart above, so everyone can see their influence on tickets (and sales once connected). Events can't be removed.</div>
+    </div>
+  </div>
   </div><!-- /masterbox -->
   <div class="card" style="margin-top:14px">
     <h2>📈 Impact analyzer</h2>
@@ -261,34 +289,6 @@ footer{color:rgba(16,17,20,.45)}
       <div class="grid kpis" id="impKpis"></div>
       <div class="chart-wrap" style="height:260px;margin-top:12px"><canvas id="impChart"></canvas></div>
       <div class="note" id="impNote" style="margin-top:8px"></div>
-    </div>
-  </div>
-  <div class="grid two">
-    <div class="card">
-      <h2>📌 Recent events <span style="font-weight:400;color:var(--muted);font-size:12px">· today & last 7 days</span></h2>
-      <div id="evtRecent"></div>
-    </div>
-    <div class="card">
-      <h2>📅 Upcoming events</h2>
-      <div id="evtUpcoming"></div>
-    </div>
-  </div>
-  <div class="card">
-    <h2>Team events <button class="btn" style="float:right;margin:0;padding:5px 12px" onclick="toggleEvtForm()">＋ Add event</button></h2>
-    <div class="note" style="margin-top:0">Log campaigns, launches, trips — anything that could move the numbers or that the team should plan around. Past events appear as 📌 pins on the chart.</div>
-    <div id="evtForm" style="display:none;border-top:1px solid var(--line);margin-top:10px">
-      <div class="grid two">
-        <div><label>Title</label><input id="eTitle" placeholder="e.g. Win-back email sent to lapsed customers"></div>
-        <div><label>Date</label><input type="date" id="eDate"></div>
-      </div>
-      <label>Details</label><textarea id="eDesc" rows="2" placeholder="Audience, goal, anything the team should know"></textarea>
-      <div class="grid two">
-        <div><label>Your name</label><input id="eBy"></div>
-        <div><label>Attachment (optional, max 5MB — e.g. the email itself)</label><input type="file" id="eFile"></div>
-      </div>
-      <button class="btn" onclick="addEvent()">Add event</button>
-      <div class="err" id="eErr"></div>
-      <div class="note">Events appear as 📌 markers on the chart above, so everyone can see their influence on tickets (and sales once connected). Events can't be removed.</div>
     </div>
   </div>
   <div class="card" style="margin-top:14px">
