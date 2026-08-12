@@ -239,6 +239,25 @@ const pool = new Pool({
   query_timeout: 20000
 });
 pool.on('error', (e) => console.error('pg pool error:', e.message)); // don't let an idle-client error crash the process
+// Cold-start resilience: the free-tier DB can refuse/timeout a connection when it's waking up
+// or during a deploy. These failures happen *before* the query runs, so retrying is safe (no
+// double-execution). Transparently retry a couple of times with backoff so a member just sees a
+// slightly slower load instead of "timeout exceeded when trying to connect".
+const _origQuery = pool.query.bind(pool);
+const CONNECT_ERR = /timeout exceeded when trying to connect|Connection terminated|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|ECONNRESET|connection is not open/i;
+pool.query = async (...args) => {
+  const delays = [400, 900, 1600];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await _origQuery(...args);
+    } catch (e) {
+      const transient = CONNECT_ERR.test(e?.message || '') || CONNECT_ERR.test(e?.code || '');
+      if (!transient || attempt >= delays.length) throw e;
+      console.warn(`pg connect retry ${attempt + 1}/${delays.length} after: ${e.message}`);
+      await new Promise(r => setTimeout(r, delays[attempt]));
+    }
+  }
+};
 // Safety net: a transient DB timeout inside one request must not take down the whole server.
 // Log and keep serving rather than crash-restarting (which is what happened over the weekend).
 process.on('unhandledRejection', (e) => console.error('unhandledRejection (ignored):', e?.message || e));
