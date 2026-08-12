@@ -46,9 +46,6 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
 .section{display:none}.section.active{display:block}
 /* master card: groups the cards that update with the timeframe / filters */
 .masterbox{position:relative;border:1.5px solid var(--yellow);background:linear-gradient(180deg,rgba(255,200,0,.09),rgba(255,200,0,.025));border-radius:16px;padding:14px;margin-bottom:16px}
-.masterbox>.mb-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px}
-.masterbox .mb-tag{display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:800;letter-spacing:.03em;text-transform:uppercase;color:#7a5c00;background:var(--yellow);padding:4px 11px;border-radius:999px}
-.masterbox .mb-hint{font-size:12px;color:var(--muted)}
 .masterbox>*:last-child{margin-bottom:0}
 .masterbox .card{background:#fff}
 .err{color:var(--red);font-size:12px;margin-top:8px}
@@ -207,7 +204,6 @@ footer{color:rgba(16,17,20,.45)}
     <span class="note" style="margin-left:8px">Auto-posts every day at 18:00 London.</span>
   </div>
   <div class="masterbox">
-  <div class="mb-head"><span class="mb-tag">📊 Updates with your timeframe</span><span class="mb-hint">These cards reflect the period selected below.</span></div>
   <div class="periods" id="periods">
     <button data-d="7" class="active">7 days</button>
     <button data-d="30">1 month</button>
@@ -316,7 +312,6 @@ footer{color:rgba(16,17,20,.45)}
     </div>
   </div>
   <div class="masterbox">
-  <div class="mb-head"><span class="mb-tag">📊 Updates with your filters</span><span class="mb-hint">Everything in this box reflects the timeframe, product, country and tag chosen here.</span></div>
   <div class="card" id="shopFilters" style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px">
     <div>
       <label style="display:block;font-size:11px;font-weight:600;color:var(--muted);margin-bottom:3px">Timeframe</label>
@@ -419,7 +414,6 @@ footer{color:rgba(16,17,20,.45)}
     </div>
   </div>
   <div class="masterbox">
-  <div class="mb-head"><span class="mb-tag">📊 Updates with your timeframe</span><span class="mb-hint">These cards reflect the period selected below. Cards further down are live snapshots.</span></div>
   <div class="periods" id="gPeriods">
     <button data-d="7" class="active">7 days</button>
     <button data-d="30">1 month</button>
