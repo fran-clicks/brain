@@ -2981,10 +2981,14 @@ async function loadKbs() {
       const name = r.can_open
         ? `<a href="#" onclick="openSource(${s.id});return false"><b>${esc(s.title)}</b></a>`
         : `<b>${esc(s.title)}</b>`;
-      return `<tr><td>${name} ${tags}</td><td style="text-align:right;color:var(--muted);font-size:12px">${s.updated_at ? esc(String(s.updated_at).slice(0,10)) : ''}</td></tr>`;
+      const date = s.updated_at ? esc(String(s.updated_at).slice(0,10)) : '';
+      const del = admin
+        ? `<button title="Delete" onclick="kbDeleteRow(${s.id}, ${JSON.stringify(s.title).replace(/"/g,'&quot;')})" style="border:none;background:none;cursor:pointer;color:var(--red);font-size:14px;padding:0 0 0 10px">🗑️</button>`
+        : '';
+      return `<tr><td>${name} ${tags}</td><td style="text-align:right;color:var(--muted);font-size:12px;white-space:nowrap">${date}${del}</td></tr>`;
     }).join('') : '<tr><td colspan="2" class="empty">No sources yet.</td></tr>';
     document.getElementById('kbSourcesNote').textContent = admin
-      ? `${src.length} source${src.length === 1 ? '' : 's'} · click one to view / edit / delete`
+      ? `${src.length} source${src.length === 1 ? '' : 's'} · click a title to view / edit · 🗑️ to delete`
       : `${src.length} source${src.length === 1 ? '' : 's'} · 🔗 link · 📎 file · content is admin-only`;
   } catch (e) { document.getElementById('kbSourcesNote').textContent = '⚠️ ' + e.message; }
   if (admin) { loadKbSubmissions(); loadSlackKb(); }
@@ -3130,6 +3134,14 @@ async function kbDeleteSource() {
   if (!curSource || !confirm('Delete this source? It will no longer be used by Ask the Brain.')) return;
   try { await api('/api/kb/pages/' + curSource.id + '/delete', {method:'POST', body:'{}'}); document.getElementById('kbDetail').style.display = 'none'; loadKbs(); }
   catch (e) { alert(e.message); }
+}
+async function kbDeleteRow(id, title) {
+  if (!confirm(`Delete “${title}”? It will no longer be used by Ask the Brain.`)) return;
+  try {
+    await api('/api/kb/pages/' + id + '/delete', {method:'POST', body:'{}'});
+    if (curSource && curSource.id === id) document.getElementById('kbDetail').style.display = 'none';
+    loadKbs();
+  } catch (e) { alert(e.message); }
 }
 async function kbDoSearch() {
   const q = document.getElementById('kbQ').value.trim();
