@@ -263,6 +263,20 @@ pool.query = async (...args) => {
 process.on('unhandledRejection', (e) => console.error('unhandledRejection (ignored):', e?.message || e));
 process.on('uncaughtException', (e) => console.error('uncaughtException (ignored):', e?.message || e));
 
+// Run async thunks with bounded concurrency so a single endpoint (e.g. the Overview, which needs
+// ~12 queries) can't ask for more connections than the pool has (max 8) — that overflow is what
+// produced "timeout exceeded when trying to connect" on the wider timeframes. Keep a couple of
+// connections free for other in-flight requests.
+async function poolAll(thunks, limit = 5) {
+  const results = new Array(thunks.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < thunks.length) { const i = next++; results[i] = await thunks[i](); }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, thunks.length) }, worker));
+  return results;
+}
+
 async function initDb() {
   // serialize schema setup across instances: overlapping deploys were deadlocking on the DDL.
   // An advisory lock makes the second booting instance wait, then its IF-NOT-EXISTS statements no-op.
@@ -3140,45 +3154,45 @@ async function overviewStats(win) {
   const [created, opened, closed,
          createdCats, openCats, closedCats,
          createdTags, openTags, closedTags,
-         totals, events, st] = await Promise.all([
-    pool.query(mkCount('created_datetime'), params),
-    pool.query(backlogQuery, params),
-    pool.query(mkCount('closed_datetime'), params),
-    pool.query(mkCats('created_datetime'), params),
-    pool.query(mkCats('created_datetime', "AND status='open'"), params),
-    pool.query(mkCats('closed_datetime'), params),
-    pool.query(mkTags('created_datetime'), params),
-    pool.query(mkTags('created_datetime', "AND status='open'"), params),
-    pool.query(mkTags('closed_datetime'), params),
-    pool.query(`SELECT count(*)::int total,
+         totals, events, st] = await poolAll([
+    () => pool.query(mkCount('created_datetime'), params),
+    () => pool.query(backlogQuery, params),
+    () => pool.query(mkCount('closed_datetime'), params),
+    () => pool.query(mkCats('created_datetime'), params),
+    () => pool.query(mkCats('created_datetime', "AND status='open'"), params),
+    () => pool.query(mkCats('closed_datetime'), params),
+    () => pool.query(mkTags('created_datetime'), params),
+    () => pool.query(mkTags('created_datetime', "AND status='open'"), params),
+    () => pool.query(mkTags('closed_datetime'), params),
+    () => pool.query(`SELECT count(*)::int total,
                 count(*) FILTER (WHERE status='open')::int open,
                 count(*) FILTER (WHERE created_datetime >= $1 AND created_datetime < $2)::int created,
                 count(*) FILTER (WHERE closed_datetime >= $1 AND closed_datetime < $2)::int closed,
                 count(*) FILTER (WHERE created_datetime >= $1 AND created_datetime < $2 AND (subject ~* '${CANCEL_RX}' OR tags::text ~* '${CANCEL_RX}'))::int cancel_refund
                 FROM tickets_cache WHERE NOT spam`, params),
-    pool.query(`SELECT id, title, description, event_date, added_by, attachment_name FROM events
+    () => pool.query(`SELECT id, title, description, event_date, added_by, attachment_name FROM events
                 WHERE event_date >= $1::date AND event_date <= ($2::date + interval '30 days')
                 ORDER BY event_date`, params),
-    pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)
+    () => pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)
   ]);
-  const [salesSeries, cancelSeries, fulfilledSeries, salesTotals, shopifySt] = await Promise.all([
-    pool.query(`SELECT date_trunc('${bucket}', created_at)::date d, count(*)::int orders, round(sum(total_price))::int revenue,
+  const [salesSeries, cancelSeries, fulfilledSeries, salesTotals, shopifySt] = await poolAll([
+    () => pool.query(`SELECT date_trunc('${bucket}', created_at)::date d, count(*)::int orders, round(sum(total_price))::int revenue,
                 count(*) FILTER (WHERE financial_status IN ('refunded','partially_refunded'))::int refunded
                 FROM orders_cache WHERE created_at >= $1 AND created_at < $2 AND cancelled_at IS NULL GROUP BY 1 ORDER BY 1`, params),
-    pool.query(`SELECT date_trunc('${bucket}', cancelled_at)::date d, count(*)::int c
+    () => pool.query(`SELECT date_trunc('${bucket}', cancelled_at)::date d, count(*)::int c
                 FROM orders_cache WHERE cancelled_at >= $1 AND cancelled_at < $2 GROUP BY 1 ORDER BY 1`, params),
-    pool.query(`SELECT date_trunc('${bucket}', fulfilled_at)::date d,
+    () => pool.query(`SELECT date_trunc('${bucket}', fulfilled_at)::date d,
                 coalesce(sum((SELECT sum(coalesce((it->>'qty')::int,0)) FROM jsonb_array_elements(items) it)),0)::int units
                 FROM orders_cache WHERE fulfilled_at >= $1 AND fulfilled_at < $2 AND cancelled_at IS NULL
                 GROUP BY 1 ORDER BY 1`, params),
-    pool.query(`SELECT count(*) FILTER (WHERE cancelled_at IS NULL)::int orders,
+    () => pool.query(`SELECT count(*) FILTER (WHERE cancelled_at IS NULL)::int orders,
                 round(sum(total_price) FILTER (WHERE cancelled_at IS NULL))::int revenue,
                 count(*) FILTER (WHERE cancelled_at IS NOT NULL)::int cancelled,
                 count(*) FILTER (WHERE financial_status IN ('refunded','partially_refunded'))::int refunded,
                 count(*) FILTER (WHERE fulfillment_status='fulfilled' AND cancelled_at IS NULL)::int delivered,
                 max(currency) currency
                 FROM orders_cache WHERE created_at >= $1 AND created_at < $2`, params),
-    pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)
+    () => pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)
   ]);
   const hasSales = (await pool.query('SELECT 1 FROM orders_cache LIMIT 1')).rows.length > 0;
   const campaigns = (await pool.query(
