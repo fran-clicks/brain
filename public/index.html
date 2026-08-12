@@ -836,6 +836,25 @@ footer{color:rgba(16,17,20,.45)}
     <h2>🕐 Pending submissions <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
     <div id="kbSubmissionsList"></div>
   </div>
+  <div class="card" id="kbTelegramCard" style="display:none">
+    <h2>📲 Telegram → KB <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only · forward WhatsApp updates in</span></h2>
+    <div class="note" id="tgStatus" style="margin-top:0">Loading…</div>
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;font-weight:600;font-size:13px">Set up / update the bot</summary>
+      <ol style="font-size:13px;color:var(--muted);margin:10px 0 10px 18px;line-height:1.7">
+        <li>In Telegram, open <b>@BotFather</b> → send <code>/newbot</code> → follow the prompts → copy the token it gives you.</li>
+        <li>Paste that token below and hit <b>Save &amp; connect</b>.</li>
+        <li>Open your new bot in Telegram and send it any message — it replies with your Telegram ID.</li>
+        <li>Put that ID (KP's) in <b>Allowed IDs</b> and Save again. From then on, forwarding a message to the bot files it into the KB automatically.</li>
+      </ol>
+      <label>Bot token <span style="color:var(--muted);font-weight:400">(from @BotFather — stored encrypted, never shown again)</span></label>
+      <input id="tgToken" type="password" autocomplete="off" placeholder="123456:ABC-DEF1234ghIkl…">
+      <label>Allowed Telegram IDs <span style="color:var(--muted);font-weight:400">(comma-separated — e.g. KP's ID)</span></label>
+      <input id="tgIds" placeholder="e.g. 812345678">
+      <button class="btn" onclick="saveTelegram(this)">Save &amp; connect</button>
+      <span class="note" id="tgSaveNote" style="margin-left:8px"></span>
+    </details>
+  </div>
   <div class="card" id="kbSearchCard" style="display:none">
     <h2>🔎 Search the knowledge base <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only</span></h2>
     <div style="display:flex;gap:8px">
@@ -2951,7 +2970,40 @@ async function loadKbs() {
       ? `${src.length} source${src.length === 1 ? '' : 's'} · click one to view / edit / delete`
       : `${src.length} source${src.length === 1 ? '' : 's'} · 🔗 link · 📎 file · content is admin-only`;
   } catch (e) { document.getElementById('kbSourcesNote').textContent = '⚠️ ' + e.message; }
-  if (admin) loadKbSubmissions();
+  if (admin) { loadKbSubmissions(); loadTelegram(); }
+}
+async function loadTelegram() {
+  const card = document.getElementById('kbTelegramCard');
+  if (!window.isAdmin) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  try {
+    const c = await api('/api/telegram/config');
+    const st = document.getElementById('tgStatus');
+    if (!c.configured) {
+      st.innerHTML = '⚪ Not connected yet. Expand below to add a bot — then KP can forward WhatsApp updates straight into the knowledge base.';
+    } else {
+      const ids = (c.allowed_ids || []);
+      st.innerHTML = `🟢 Connected as <b>@${esc(c.bot_username || 'bot')}</b> · ${ids.length} allowed sender${ids.length === 1 ? '' : 's'}${ids.length ? ` (${ids.map(esc).join(', ')})` : ' — <b>add KP\'s ID below</b>'}`;
+      document.getElementById('tgIds').value = ids.join(', ');
+    }
+  } catch (e) { document.getElementById('tgStatus').textContent = '⚠️ ' + e.message; }
+}
+async function saveTelegram(btn) {
+  const note = document.getElementById('tgSaveNote');
+  const bot_token = document.getElementById('tgToken').value.trim();
+  const allowed_ids = document.getElementById('tgIds').value.trim();
+  if (!bot_token && !allowed_ids) { note.textContent = 'Paste a bot token (and/or allowed IDs).'; return; }
+  btn.disabled = true; note.textContent = 'Connecting…';
+  try {
+    // if only updating the allowlist, the token field may be blank — but setup needs the token,
+    // so require it unless already connected (server keeps the stored token only via re-entry).
+    const body = { bot_token, allowed_ids };
+    const r = await api('/api/telegram/setup', { method: 'POST', body: JSON.stringify(body) });
+    note.textContent = `✅ Connected as @${r.bot_username}. ` + (r.webhook_ok ? 'Webhook active.' : '⚠️ Webhook: ' + (r.webhook_error || 'failed'));
+    document.getElementById('tgToken').value = '';
+    loadTelegram();
+  } catch (e) { note.textContent = '⚠️ ' + e.message; }
+  finally { btn.disabled = false; }
 }
 async function submitKbDoc(btn) {
   const note = document.getElementById('kbSubNote');

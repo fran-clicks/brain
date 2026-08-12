@@ -17,7 +17,8 @@ app.use(express.json({ limit: '8mb', verify: (req, _res, buf) => { req.rawBody =
 // Exempt: Slack (signs its own requests), health checks, the login page and auth endpoints.
 const AUTH_EXEMPT = (p) =>
   p.startsWith('/api/slack/') || p === '/api/health' || p === '/login.html' || p.startsWith('/api/auth/')
-  || p === '/api/report/daily'; // does its own token check so an external cron can trigger it
+  || p === '/api/report/daily' // does its own token check so an external cron can trigger it
+  || p === '/api/telegram/webhook'; // Telegram calls this; it's protected by a secret-token header + allowlist
 
 const sessionSign = (s) => crypto.createHmac('sha256', KEY).update('session:' + s).digest('base64url');
 const makeSession = (email) => {
@@ -825,6 +826,112 @@ app.post('/api/kb/source', rejectSecrets(['title', 'notes', 'link']), async (req
     [id, title, content.slice(0, 100000), link, b.file_data || null, fileName.slice(0, 200), String(b.file_mime || '').slice(0, 100), req.userEmail || 'admin']);
   res.status(201).json({ ok: true, id: rows[0].id });
 });
+// ---------- Telegram → Knowledge Base ----------
+// KP forwards a WhatsApp team update into the Clicks Brain Telegram bot and it lands in the KB.
+// Ingestion is locked to an allowlist of Telegram user IDs (the bot username is public, so anyone
+// could message it). The bot token + allowlist live in the encrypted 'telegram' connector; the
+// webhook is additionally protected by a per-install secret-token header.
+const tgApi = async (token, method, params) => {
+  const r = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params || {})
+  });
+  return r.json().catch(() => ({}));
+};
+const appBaseUrl = () => (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || 'https://clicks-brain.onrender.com').replace(/\/$/, '');
+
+// admin: connect the bot — validate the token, store config, register the webhook
+app.post('/api/telegram/setup', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  let token = String(req.body?.bot_token || '').trim();
+  const idsRaw = String(req.body?.allowed_ids || '').trim();
+  const allowed_ids = idsRaw ? idsRaw.split(/[\s,]+/).map(s => s.replace(/[^0-9]/g, '')).filter(Boolean) : [];
+  const already = await getConnector('telegram');
+  if (!token && already?.config?.bot_token) token = already.config.bot_token; // updating just the allowlist — reuse stored token
+  if (!token) return res.status(400).json({ error: 'Paste the bot token from @BotFather.' });
+  const me = await tgApi(token, 'getMe');
+  if (!me.ok) return res.status(400).json({ error: 'Telegram rejected that token — double-check it from @BotFather.' });
+  const existing = await getConnector('telegram');
+  const secret = existing?.config?.secret || crypto.randomBytes(24).toString('hex');
+  const cfg = { bot_token: token, secret, allowed_ids, bot_username: me.result?.username || '' };
+  const meta = { bot_username: me.result?.username || '', allowed_ids };
+  if (existing) {
+    await pool.query(`UPDATE connectors SET config_encrypted=$1, meta=$2, active=true WHERE id=$3`, [encrypt(cfg), meta, existing.id]);
+  } else {
+    await pool.query(
+      `INSERT INTO connectors (type, name, config_encrypted, meta, active, added_by, approval_status)
+       VALUES ('telegram', $1, $2, $3, true, $4, 'approved')`,
+      [me.result?.username || 'Telegram bot', encrypt(cfg), meta, req.userEmail || 'admin']);
+  }
+  const hook = await tgApi(token, 'setWebhook', {
+    url: `${appBaseUrl()}/api/telegram/webhook`, secret_token: secret, allowed_updates: ['message'], drop_pending_updates: true
+  });
+  res.json({ ok: true, bot_username: me.result?.username || '', webhook_ok: !!hook.ok, webhook_error: hook.ok ? null : hook.description, allowed_ids });
+});
+
+// admin: read current config (never returns the token)
+app.get('/api/telegram/config', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('telegram');
+  const webhook_url = `${appBaseUrl()}/api/telegram/webhook`;
+  if (!conn) return res.json({ configured: false, webhook_url });
+  res.json({ configured: true, bot_username: conn.config.bot_username || '', allowed_ids: conn.config.allowed_ids || [], webhook_url });
+});
+
+// Telegram webhook: an allowlisted user (KP) forwards an update → store it as a KB source.
+app.post('/api/telegram/webhook', async (req, res) => {
+  res.json({ ok: true }); // ack immediately so Telegram doesn't retry; the work continues below
+  try {
+    const conn = await getConnector('telegram');
+    if (!conn) return;
+    if ((req.headers['x-telegram-bot-api-secret-token'] || '') !== conn.config.secret) return;
+    const token = conn.config.bot_token;
+    const msg = req.body?.message || req.body?.channel_post;
+    if (!msg) return;
+    const fromId = String(msg.from?.id || msg.chat?.id || '');
+    const chatId = msg.chat?.id;
+    const allowed = (conn.config.allowed_ids || []).map(String);
+    if (!allowed.includes(fromId)) {
+      await tgApi(token, 'sendMessage', { chat_id: chatId,
+        text: `🔒 Not authorized to write to the Clicks Brain knowledge base.\nYour Telegram ID is ${fromId} — send that to a Clicks Brain admin to be added.` });
+      return;
+    }
+    const text = (msg.text || msg.caption || '').trim();
+    // media: largest photo size, or a document
+    let file_data = null, file_name = '', file_mime = '';
+    const doc = msg.document;
+    const photo = Array.isArray(msg.photo) && msg.photo.length ? msg.photo[msg.photo.length - 1] : null;
+    const media = doc || photo;
+    if (media?.file_id) {
+      const f = await tgApi(token, 'getFile', { file_id: media.file_id });
+      const fp = f?.result?.file_path;
+      const size = f?.result?.file_size || media.file_size || 0;
+      if (fp && size <= 7 * 1024 * 1024) { // keep within our body/DB comfort zone
+        const dl = await fetch(`https://api.telegram.org/file/bot${token}/${fp}`);
+        if (dl.ok) {
+          file_data = Buffer.from(await dl.arrayBuffer()).toString('base64');
+          file_name = doc?.file_name || fp.split('/').pop() || 'telegram-file';
+          file_mime = doc?.mime_type || (photo ? 'image/jpeg' : 'application/octet-stream');
+        }
+      }
+    }
+    if (!text && !file_data) return; // nothing to store (e.g. a sticker)
+    const who = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || msg.from?.username || 'Telegram';
+    const fwd = msg.forward_from ? [msg.forward_from.first_name, msg.forward_from.last_name].filter(Boolean).join(' ')
+      : (msg.forward_sender_name || msg.forward_origin?.sender_user_name || '');
+    const firstLine = (text.split('\n')[0] || '').trim();
+    const title = (firstLine || file_name || 'Telegram update').slice(0, 120);
+    const content = [text, fwd ? `(forwarded from ${fwd})` : ''].filter(Boolean).join('\n\n');
+    const kbId = await mainKbId();
+    if (!kbId) { await tgApi(token, 'sendMessage', { chat_id: chatId, text: '⚠️ KB not ready yet — try again in a moment.' }); return; }
+    await pool.query(
+      `INSERT INTO kb_pages (kb_id, title, content, file_data, file_name, file_mime, added_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [kbId, title, content.slice(0, 100000), file_data, file_name.slice(0, 200), file_mime.slice(0, 100), `${who} (Telegram)`]);
+    await tgApi(token, 'sendMessage', { chat_id: chatId,
+      text: `✅ Saved to the Clicks Brain knowledge base:\n“${title}”${file_name ? `\n📎 ${file_name}` : ''}` });
+  } catch (e) { console.error('telegram webhook error:', e.message); }
+});
+
 app.post('/api/kb/pages/:id/delete', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   await pool.query('DELETE FROM kb_pages WHERE id=$1', [parseInt(req.params.id)]);
