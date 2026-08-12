@@ -3151,6 +3151,14 @@ async function overviewStats(win) {
           AND (t.closed_datetime IS NULL OR t.closed_datetime >= g.b + interval '1 ${bucket}')) c
      FROM generate_series(date_trunc('${bucket}', $1::timestamptz), date_trunc('${bucket}', $2::timestamptz), interval '1 ${bucket}') g(b)
      ORDER BY 1`;
+  // Per-bucket category & tag breakdowns feed the daily hover tooltip and each scans every ticket
+  // in the window (the tag ones unnest JSON) — that cost scales with window width and is what made
+  // the wide/weekly views (90/180/365d) time out. They add little on a weekly chart, so skip them
+  // there and just return empty breakdowns.
+  const wantBreakdown = bucket === 'day';
+  const noRows = async () => ({ rows: [] });
+  const catQ = (col, extra) => wantBreakdown ? (() => pool.query(mkCats(col, extra || ''), params)) : noRows;
+  const tagQ = (col, extra) => wantBreakdown ? (() => pool.query(mkTags(col, extra || ''), params)) : noRows;
   const [created, opened, closed,
          createdCats, openCats, closedCats,
          createdTags, openTags, closedTags,
@@ -3158,12 +3166,12 @@ async function overviewStats(win) {
     () => pool.query(mkCount('created_datetime'), params),
     () => pool.query(backlogQuery, params),
     () => pool.query(mkCount('closed_datetime'), params),
-    () => pool.query(mkCats('created_datetime'), params),
-    () => pool.query(mkCats('created_datetime', "AND status='open'"), params),
-    () => pool.query(mkCats('closed_datetime'), params),
-    () => pool.query(mkTags('created_datetime'), params),
-    () => pool.query(mkTags('created_datetime', "AND status='open'"), params),
-    () => pool.query(mkTags('closed_datetime'), params),
+    catQ('created_datetime'),
+    catQ('created_datetime', "AND status='open'"),
+    catQ('closed_datetime'),
+    tagQ('created_datetime'),
+    tagQ('created_datetime', "AND status='open'"),
+    tagQ('closed_datetime'),
     () => pool.query(`SELECT count(*)::int total,
                 count(*) FILTER (WHERE status='open')::int open,
                 count(*) FILTER (WHERE created_datetime >= $1 AND created_datetime < $2)::int created,
