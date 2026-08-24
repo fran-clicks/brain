@@ -1823,9 +1823,11 @@ function itemDetailHtml(ev) {
     <span class="tag date">${esc(String(ev.event_date).slice(0,10))}</span> by <b>${esc(ev.added_by)}</b>
     ${ev.description ? `<br>${esc(ev.description)}` : ''}
     ${ev.attachment_name ? `<br>📎 <a href="/api/events/${ev.id}/attachment" target="_blank">${esc(ev.attachment_name)}</a>` : ''}
-    ${ev.klaviyo_id ? `<br><a href="#" onclick="closeEvtPop();document.querySelector('nav button[data-s=klaviyo]').click();return false">open in Klaviyo tab →</a>` : ''}`;
+    ${ev.klaviyo_id ? `<br><a href="#" onclick="closeEvtPop();document.querySelector('nav button[data-s=klaviyo]').click();return false">open in Klaviyo tab →</a>` : ''}
+    ${(window.isAdmin && ev.id != null && ev.kind !== 'campaign' && !ev.klaviyo_id) ? `<br><a href="#" onclick="delEventFromPop(${ev.id}, ${JSON.stringify(String(ev.title)).replace(/"/g,'&quot;')});return false" style="color:var(--red);font-weight:600">🗑️ Delete this event</a>` : ''}`;
 }
 function closeEvtPop() { document.getElementById('evtPop').style.display = 'none'; }
+async function delEventFromPop(id, title) { closeEvtPop(); await delEvent(id, title); }
 function bindEventHover(canvas, getChart) {
   if (canvas.$evtBound) return;
   canvas.$evtBound = true;
