@@ -253,7 +253,7 @@ footer{color:rgba(16,17,20,.45)}
       </div>
       <button class="btn" onclick="addEvent()">Add event</button>
       <div class="err" id="eErr"></div>
-      <div class="note">Events appear as 📌 markers on the chart above, so everyone can see their influence on tickets (and sales once connected). Events can't be removed.</div>
+      <div class="note">Events appear as 📌 markers on the chart above, so everyone can see their influence on tickets (and sales once connected). Admins can remove one with the 🗑️ button in the Recent / Upcoming lists above.</div>
     </div>
   </div>
   </div><!-- /masterbox -->
@@ -717,6 +717,10 @@ footer{color:rgba(16,17,20,.45)}
   <div class="grid kpis" id="frKpis"></div>
   <input class="search" id="frSearch" placeholder="Search name, country, SKU…" style="margin-top:14px">
   <div id="frList"></div>
+  <details id="frArchivedWrap" style="display:none;margin-top:22px">
+    <summary style="cursor:pointer;font-weight:800;font-size:15px;color:var(--muted);padding:6px 0;border-top:1px solid var(--line)">📦 Archived — delivered shipments (<span id="frArchivedCount">0</span>)</summary>
+    <div id="frArchived"></div>
+  </details>
   <div class="note" id="frNote" style="margin-top:8px">Loading…</div>
 </div>
 
@@ -1358,6 +1362,7 @@ function stepperHtml(s, clickable) {
     return `<div class="${cls}"${onclick} title="${esc(st)}"><div class="dot">${inner}</div>${esc(st)}${label ? `<div style="color:#2563eb;font-weight:700;margin-top:2px">${label}</div>` : ''}</div>`;
   }).join('') + `</div>`;
 }
+const frIsDone = s => (s.stages || []).length > 0 && s.step >= s.stages.length;
 function renderFreight() {
   const q = (document.getElementById('frSearch').value || '').toLowerCase();
   const admin = window.isAdmin;
@@ -1365,7 +1370,22 @@ function renderFreight() {
     const hay = [s.name, s.from_country, s.to_country, s.carrier, ...(s.items || []).map(i => i.sku)].join(' ').toLowerCase();
     return hay.includes(q);
   });
-  document.getElementById('frList').innerHTML = rows.length ? rows.map(s => {
+  const active = rows.filter(s => !frIsDone(s));
+  const archived = rows.filter(frIsDone);
+  document.getElementById('frList').innerHTML = active.length
+    ? active.map(s => freightCardHtml(s, admin)).join('')
+    : `<div class="card" style="margin-top:16px"><div class="empty">${admin ? 'No active shipments — click ＋ Add shipment.' : 'No active shipments.'}</div></div>`;
+  const wrap = document.getElementById('frArchivedWrap');
+  if (archived.length) {
+    wrap.style.display = 'block';
+    document.getElementById('frArchivedCount').textContent = archived.length;
+    document.getElementById('frArchived').innerHTML = archived.map(s => freightCardHtml(s, admin)).join('');
+  } else {
+    wrap.style.display = 'none';
+    document.getElementById('frArchived').innerHTML = '';
+  }
+}
+function freightCardHtml(s, admin) {
     const eta = s.eta ? new Date(s.eta + 'T00:00:00').toLocaleDateString(undefined, { day:'numeric', month:'short', year:'numeric' }) : '—';
     const done = s.step >= (s.stages || []).length && (s.stages || []).length > 0;
     const late = s.eta && !done && new Date(s.eta + 'T23:59:59') < new Date(); // overdue only once the ETA day has fully passed
@@ -1409,7 +1429,6 @@ function renderFreight() {
       ${items}${docs}
       ${s.notes ? `<div style="margin-top:12px">${lbl('Notes')}<div style="font-size:14px;line-height:1.5;margin-top:3px">${esc(s.notes)}</div></div>` : ''}
     </div>`;
-  }).join('') : `<div class="card" style="margin-top:16px"><div class="empty">${admin ? 'No shipments yet — click ＋ Add shipment.' : 'No shipments tracked yet.'}</div></div>`;
 }
 async function loadFreight() {
   document.getElementById('frAddBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
@@ -2159,11 +2178,23 @@ function toggleEvtForm() {
   f.style.display = f.style.display === 'none' ? 'block' : 'none';
 }
 function evtRow(e, pin) {
-  return `<div class="evt"><div class="pin">${pin}</div><div>
-    <div class="t">${esc(e.title)} <span class="tag date">${esc(String(e.event_date).slice(0,10))}</span></div>
+  const del = (window.isAdmin && e.id != null && pin === '📌')
+    ? `<button title="Delete event" onclick="delEvent(${e.id}, ${JSON.stringify(String(e.title)).replace(/"/g,'&quot;')})" style="border:none;background:none;cursor:pointer;color:var(--red);font-size:13px;float:right;padding:0 0 0 8px">🗑️</button>`
+    : '';
+  return `<div class="evt"><div class="pin">${pin}</div><div style="flex:1">
+    <div class="t">${esc(e.title)} <span class="tag date">${esc(String(e.event_date).slice(0,10))}</span>${del}</div>
     <div>${esc(e.description)}</div>
     <div class="m">by ${esc(e.added_by)}${e.attachment_name ? ` · <a href="/api/events/${e.id}/attachment" target="_blank">📎 ${esc(e.attachment_name)}</a>` : ''}</div>
   </div></div>`;
+}
+async function delEvent(id, title) {
+  if (!confirm(`Delete "${title}"? This removes it from the lists and its 📌 pin on the charts.`)) return;
+  try {
+    await api('/api/events/' + id + '/delete', { method: 'POST', body: '{}' });
+    loadEvents();
+    ovCache.clear(); loadOverview();
+    impEventsLoaded = false; loadImpactEvents();
+  } catch (e) { alert(e.message); }
 }
 async function loadEvents() {
   const evts = await api('/api/events');

@@ -625,6 +625,48 @@ app.get('/api/slack/kb-inbox', async (req, res) => {
   res.json({ configured: true, has_signing_secret: !!conn.config.signing_secret,
     allowed_user_ids: conn.config.kb_allowed_users || [], events_url });
 });
+// the short KB how-to the bot can DM to a user (Slack mrkdwn)
+const KB_SLACK_GUIDE = [
+  '👋 *Welcome to the Clicks Brain knowledge base*',
+  '',
+  "The KB is the brain's memory — the rules, specs and facts the team needs. Anything saved here is used by *Ask the Brain*, so keep it clean and current.",
+  '',
+  '*To save something* — just DM me:',
+  '• `kb: <your note>` — saves a note or rule. The first line becomes the title, so lead with the point.',
+  '• Attach a *file* (PDF / spec sheet), optionally with a `kb:` caption.',
+  "• A plain message with no `kb:` — I just answer it; nothing is saved.",
+  '',
+  '*Managing entries:*',
+  '• `kb list` — recent entries with their IDs',
+  '• `kb delete <id>` — remove one',
+  '• `kb help` — this command list',
+  '',
+  '*Tips:* lead with the point · one idea per message · prefer standing rules over daily status · date the time-sensitive stuff (e.g. "(as of 2 Mar) …") · skip throwaway chatter.',
+  '',
+  '*Examples:*',
+  '• `kb: For ROW orders, check the order isn\'t set to "Floship" before cancelling or editing.`',
+  "• `kb: (as of 2 Mar) US order-edit freeze — don't cancel/edit any US order placed on or before 2 Mar.`",
+  '• _[attach CP1000_Product_Specification.pdf]_ `kb: CP1000 product specification`'
+].join('\n');
+
+// admin: DM the KB how-to to the allowlisted user(s) (or a specific ?user_id) via the bot
+app.post('/api/slack/send-guide', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('slack');
+  if (!conn?.config?.bot_token) return res.status(400).json({ error: 'Slack is not connected yet.' });
+  const targets = req.body?.user_id ? [String(req.body.user_id).trim()] : (conn.config.kb_allowed_users || []);
+  if (!targets.length) return res.status(400).json({ error: 'No one on the allowlist yet — add KP\'s Slack ID first.' });
+  const results = [];
+  for (const u of targets) {
+    const r = await (await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST', headers: { Authorization: `Bearer ${conn.config.bot_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel: u, text: KB_SLACK_GUIDE })
+    })).json();
+    results.push({ user: u, ok: !!r.ok, error: r.error || null });
+  }
+  const sent = results.filter(r => r.ok).length;
+  res.json({ ok: sent > 0, sent, results });
+});
 
 app.get('/api/connectors', async (_req, res) => {
   const { rows } = await pool.query(
@@ -1193,6 +1235,13 @@ app.get('/api/events/:id/attachment', async (req, res) => {
   res.set('Content-Type', a.attachment_type || 'application/octet-stream');
   res.set('Content-Disposition', `inline; filename="${(a.attachment_name || 'file').replace(/"/g, '')}"`);
   res.send(Buffer.from(a.attachment_data, 'base64'));
+});
+// admin: delete a team event (also removes its 📌 pin from the charts)
+app.post('/api/events/:id/delete', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const r = await pool.query('DELETE FROM events WHERE id=$1', [parseInt(req.params.id)]);
+  if (!r.rowCount) return res.status(404).json({ error: 'event not found' });
+  res.json({ ok: true });
 });
 
 // ---------- Gorgias ----------
