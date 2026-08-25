@@ -767,8 +767,9 @@ app.post('/api/connectors', async (req, res) => {
       const t = await redoRequest(config, `/stores/${config.store_id}/returns`, { 'X-Page-Size': '1' });
       meta = { returns_visible: (t.data.returns || []).length >= 0 ? 'ok' : 'none' };
     } else if (type === 'shipbob') {
-      const chans = await shipbobRequest(config, '/1.0/channel');
-      meta = { channels: Array.isArray(chans) ? chans.length : 'ok' };
+      const chans = await shipbobRequest(config, '/2026-07/channel');
+      const list = Array.isArray(chans) ? chans : (chans.items || []);
+      meta = { channels: list.length || 'ok' };
     } else if (type === 'floship') {
       const p = await floshipProbe(config.base_url, config.token);
       if (!p.ok) throw new Error(`no auth style worked (last: ${p.auth || '?'} → ${p.status || p.error})`);
@@ -2259,24 +2260,28 @@ app.get('/api/stock/export', async (req, res) => {
 });
 
 // ---------- ShipBob (3PL fulfillment inventory) ----------
-async function shipbobRequest(cfg, path) {
+// Uses the dated API (2026-07); the legacy /1.0/ API is retired 29 Aug 2026 (returns 410 Gone).
+// Same PAT + shipbob_channel_id header — only the URL base and inventory shape changed.
+const SHIPBOB_VER = '2026-07';
+async function shipbobRequest(cfg, pathOrUrl) {
   const headers = { Authorization: `Bearer ${cfg.token}`, Accept: 'application/json' };
   if (cfg.channel_id) headers['shipbob_channel_id'] = String(cfg.channel_id);
-  const r = await fetch(`https://api.shipbob.com${path}`, { headers });
+  const url = /^https?:\/\//.test(pathOrUrl) ? pathOrUrl : `https://api.shipbob.com${pathOrUrl}`;
+  const r = await fetch(url, { headers });
   const text = await r.text();
   let body; try { body = JSON.parse(text); } catch { body = text; }
-  if (!r.ok) throw new Error(`ShipBob ${path} → ${r.status}: ${typeof body === 'string' ? body.slice(0, 200) : JSON.stringify(body).slice(0, 200)}`);
+  if (!r.ok) throw new Error(`ShipBob ${pathOrUrl} → ${r.status}: ${typeof body === 'string' ? body.slice(0, 200) : JSON.stringify(body).slice(0, 200)}`);
   return body;
 }
-// pull all pages of a 1.0 list endpoint (array responses, ?Page&Limit)
-async function shipbobList(cfg, base, limit = 250, maxPages = 40) {
+// follow the dated API's cursor pagination ({ items, next }) until there's no next page
+async function shipbobPaged(cfg, startPath, maxPages = 80) {
   const out = [];
-  for (let page = 1; page <= maxPages; page++) {
-    const sep = base.includes('?') ? '&' : '?';
-    const rows = await shipbobRequest(cfg, `${base}${sep}Page=${page}&Limit=${limit}`);
-    const arr = Array.isArray(rows) ? rows : (rows.data || rows.items || []);
-    out.push(...arr);
-    if (arr.length < limit) break;
+  let url = startPath;
+  for (let i = 0; i < maxPages && url; i++) {
+    const body = await shipbobRequest(cfg, url);
+    const items = Array.isArray(body) ? body : (body.items || body.data || []);
+    out.push(...items);
+    url = (body && !Array.isArray(body) && body.next) ? body.next : null;
   }
   return out;
 }
@@ -2289,17 +2294,21 @@ async function syncShipbob() {
   shipbobSyncRunning = true;
   let upserts = 0, lastError = null;
   try {
-    // products carry SKU + quantities + per-fulfillment-center breakdown — everything we need in one call
-    const products = await shipbobList(cfg, '/1.0/product');
+    // one paged call gives SKU + name + per-fulfillment-center quantities; totals are the sum across locations
+    const items = await shipbobPaged(cfg, `/${SHIPBOB_VER}/inventory-level/locations?PageSize=250`);
     const bySku = {};
-    for (const p of products) {
-      const sku = String(p.sku || '').trim();
+    for (const it of items) {
+      const sku = String(it.sku || '').trim();
       if (!sku || !/[A-Za-z]/.test(sku)) continue; // skip blank and all-numeric (barcode) SKUs
-      const onHand = p.total_onhand_quantity ?? 0;
-      if (bySku[sku] && (bySku[sku].on_hand ?? 0) >= onHand) continue; // dedupe channel copies, keep the richest
-      bySku[sku] = { sku, name: String(p.name || '').slice(0, 300), upc: String(p.upc || p.barcode || ''),
-        on_hand: onHand, fulfillable: p.total_fulfillable_quantity ?? 0, committed: p.total_committed_quantity ?? 0,
-        by_fc: p.fulfillable_quantity_by_fulfillment_center || [] };
+      const locs = Array.isArray(it.locations) ? it.locations : [];
+      const sum = k => locs.reduce((n, l) => n + (l[k] || 0), 0);
+      const onHand = sum('on_hand_quantity');
+      if (bySku[sku] && (bySku[sku].on_hand ?? 0) >= onHand) continue; // dedupe, keep the richest
+      bySku[sku] = { sku, name: String(it.name || '').slice(0, 300), upc: '',
+        on_hand: onHand, fulfillable: sum('fulfillable_quantity'), committed: sum('committed_quantity'),
+        by_fc: locs.filter(l => (l.fulfillable_quantity || l.on_hand_quantity || 0) > 0).map(l => ({
+          name: l.name, fulfillable_quantity: l.fulfillable_quantity || 0,
+          on_hand_quantity: l.on_hand_quantity || 0, committed_quantity: l.committed_quantity || 0 })) };
     }
     const skus = Object.keys(bySku);
     for (const sku of skus) {
@@ -2307,7 +2316,8 @@ async function syncShipbob() {
       await pool.query(
         `INSERT INTO shipbob_stock (sku, name, upc, on_hand, fulfillable, committed, by_fc, updated_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,now())
-         ON CONFLICT (sku) DO UPDATE SET name=$2, upc=$3, on_hand=$4, fulfillable=$5, committed=$6, by_fc=$7, updated_at=now()`,
+         ON CONFLICT (sku) DO UPDATE SET name=$2, upc=COALESCE(NULLIF($3,''), shipbob_stock.upc),
+           on_hand=$4, fulfillable=$5, committed=$6, by_fc=$7, updated_at=now()`,
         [r.sku, r.name, r.upc, r.on_hand, r.fulfillable, r.committed, JSON.stringify(r.by_fc)]);
       upserts++;
     }
@@ -2326,7 +2336,7 @@ app.get('/api/shipbob/debug', async (req, res) => {
   const conn = await getConnector('shipbob');
   if (!conn) return res.status(400).json({ error: 'ShipBob not connected — add it on the ＋ page first.' });
   const out = {};
-  for (const [k, path] of [['channels', '/1.0/channel'], ['inventory_sample', '/1.0/inventory?Page=1&Limit=2'], ['product_sample', '/1.0/product?Page=1&Limit=2']]) {
+  for (const [k, path] of [['channels', '/2026-07/channel'], ['inventory_sample', '/2026-07/inventory-level?PageSize=2'], ['inventory_by_fc_sample', '/2026-07/inventory-level/locations?PageSize=2']]) {
     try { out[k] = await shipbobRequest(conn.config, path); }
     catch (e) { out[k] = { error: e.message }; }
   }
