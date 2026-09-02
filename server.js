@@ -3204,25 +3204,27 @@ async function upsertShopifyOrders(orders) {
 // (not fulfilled) since a date — status:any so archived ones are included — and upsert them (fresh
 // address + status). Then any order our cache still marks open that Shopify no longer returns has
 // since been fulfilled/archived, so we correct it. Resumable + time-boxed via sync_state.
-async function refreshConsistency(cfg, sinceIso, maxSeconds = 45) {
+async function refreshConsistency(cfg, sinceIso, maxSeconds = 18) {
   const stRow = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || {};
   const st = stRow;
   if (st.cons_since !== sinceIso) { st.cons_cursor = null; st.cons_done = false; st.cons_since = sinceIso; st.cons_fresh = []; }
   const fresh = new Set(st.cons_fresh || []);
   const start = Date.now();
-  let synced = 0, cursor = st.cons_cursor || null;
-  while (!st.cons_done && Date.now() - start < maxSeconds * 1000) {
-    const { orders, next } = await fetchOrdersPage(cfg, {
-      cursor,
-      q: `created_at:>='${sinceIso}' AND -fulfillment_status:fulfilled AND status:any`,
-      sortKey: 'CREATED_AT'
-    });
-    if (!orders.length) { st.cons_done = true; break; }
-    synced += await upsertShopifyOrders(orders);
-    orders.forEach(o => fresh.add(String(o.id)));
-    cursor = next;
-    if (!next) st.cons_done = true;
-  }
+  let synced = 0, cursor = st.cons_cursor || null, err = null;
+  try {
+    while (!st.cons_done && Date.now() - start < maxSeconds * 1000) {
+      const { orders, next } = await fetchOrdersPage(cfg, {
+        cursor,
+        q: `created_at:>='${sinceIso}' AND -fulfillment_status:fulfilled AND status:any`,
+        sortKey: 'CREATED_AT'
+      });
+      if (!orders.length) { st.cons_done = true; break; }
+      synced += await upsertShopifyOrders(orders);
+      orders.forEach(o => fresh.add(String(o.id)));
+      cursor = next;
+      if (!next) st.cons_done = true;
+    }
+  } catch (e) { err = String(e.message); } // keep the progress we made; report the error
   st.cons_cursor = cursor;
   st.cons_fresh = [...fresh];
   let corrected = 0;
@@ -3236,7 +3238,7 @@ async function refreshConsistency(cfg, sinceIso, maxSeconds = 45) {
   }
   await pool.query(`INSERT INTO sync_state (k, v) VALUES ('shopify', $1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(st)]);
   overviewCache.clear();
-  return { synced, corrected, done: !!st.cons_done };
+  return { synced, corrected, done: !!st.cons_done, error: err };
 }
 
 let shopifySyncRunning = false;

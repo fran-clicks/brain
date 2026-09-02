@@ -2335,9 +2335,11 @@ async function deepSyncOrders() {
   sum.textContent = 'Re-checking each open order directly against Shopify (fixes stale statuses & fills addresses)… up to a minute.';
   try {
     const r = await api('/api/consistency/refresh', { method: 'POST', body: '{}' });
-    sum.innerHTML = r.done
-      ? `✅ Done — refreshed ${r.synced} open orders${r.corrected ? `, cleared ${r.corrected} that were actually fulfilled/archived` : ''}. Now click <b>Run check</b>.`
-      : `Still refreshing (${r.synced} open orders so far) — click <b>⏬ Deep sync</b> again until it says done, then <b>Run check</b>.`;
+    sum.innerHTML = r.error
+      ? `⚠️ ${esc(r.error)} — but ${r.synced} orders refreshed; click <b>⏬ Deep sync</b> again to continue.`
+      : r.done
+        ? `✅ Done — refreshed ${r.synced} open orders${r.corrected ? `, cleared ${r.corrected} that were actually fulfilled/archived` : ''}. Now click <b>Run check</b>.`
+        : `Still refreshing (${r.synced} open orders so far) — click <b>⏬ Deep sync</b> again until it says done, then <b>Run check</b>.`;
   } catch (e) { sum.textContent = '⚠️ ' + e.message; }
   finally { btn.disabled = false; btn.textContent = '⏬ Deep sync'; }
 }
