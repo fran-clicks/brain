@@ -2331,13 +2331,13 @@ async function dismissOrder(orderNumber) {
 }
 async function deepSyncOrders() {
   const btn = document.getElementById('consDeepBtn'), sum = document.getElementById('consSummary');
-  btn.disabled = true; btn.textContent = 'Syncing…'; sum.style.display = 'block';
-  sum.textContent = 'Deep-syncing Shopify order history (addresses + statuses)… this can take up to a minute.';
+  btn.disabled = true; btn.textContent = 'Refreshing…'; sum.style.display = 'block';
+  sum.textContent = 'Re-checking each open order directly against Shopify (fixes stale statuses & fills addresses)… up to a minute.';
   try {
-    const r = await api('/api/shopify/deep-sync', { method: 'POST', body: '{}' });
-    sum.innerHTML = r.backfill_done
-      ? '✅ Shopify history is fully synced. Now click <b>Run check</b>.'
-      : `Synced a batch (${r.cached ?? '?'} orders cached so far). Not done yet — click <b>⏬ Deep sync</b> again, then <b>Run check</b>.`;
+    const r = await api('/api/consistency/refresh', { method: 'POST', body: '{}' });
+    sum.innerHTML = r.done
+      ? `✅ Done — refreshed ${r.synced} open orders${r.corrected ? `, cleared ${r.corrected} that were actually fulfilled/archived` : ''}. Now click <b>Run check</b>.`
+      : `Still refreshing (${r.synced} open orders so far) — click <b>⏬ Deep sync</b> again until it says done, then <b>Run check</b>.`;
   } catch (e) { sum.textContent = '⚠️ ' + e.message; }
   finally { btn.disabled = false; btn.textContent = '⏬ Deep sync'; }
 }

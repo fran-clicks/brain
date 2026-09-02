@@ -2406,7 +2406,7 @@ app.get('/api/consistency/orders', async (req, res) => {
     const shop = (await pool.query(
       `SELECT shopify_id, order_number, ship_address, fulfillment_status, financial_status, to_char(created_at,'YYYY-MM-DD') d
        FROM orders_cache
-       WHERE created_at >= $1 AND cancelled_at IS NULL AND fulfillment_status <> 'fulfilled'
+       WHERE created_at >= $1 AND cancelled_at IS NULL AND archived_at IS NULL AND fulfillment_status <> 'fulfilled'
        ORDER BY created_at DESC LIMIT 5000`, [since])).rows;
     const dismissed = new Set((await pool.query('SELECT order_number FROM consistency_dismissed')).rows.map(r => r.order_number));
     const sbOrders = await shipbobOrdersSince(conn.config, since);
@@ -2453,17 +2453,18 @@ app.post('/api/consistency/dismiss', async (req, res) => {
   consistencyCache = null; // force a fresh compute next run
   res.json({ ok: true });
 });
-// admin: deep Shopify backfill loop — keeps pulling history (newest→oldest) until done or ~50s,
-// so the order check has current addresses/fulfilment for the whole since-Jan window
-app.post('/api/shopify/deep-sync', async (req, res) => {
+// admin: refresh the exact orders the check inspects, straight from Shopify by ID. Corrects stale
+// rows (incl. now-fulfilled/archived orders the normal sync can't see) and fills in addresses.
+// Time-boxed; returns how many remain so the button can be clicked again until done.
+app.post('/api/consistency/refresh', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
-  const start = Date.now();
-  let last = null;
+  const conn = await getConnector('shopify');
+  if (!conn) return res.status(400).json({ error: 'Shopify is not connected.' });
+  const since = `${new Date().getUTCFullYear()}-01-01`;
   try {
-    do { last = await syncShopify(30); }
-    while (!last.backfill_done && !last.error && !last.skipped && Date.now() - start < 50000);
-    overviewCache.clear();
-    res.json({ ...last, elapsed_ms: Date.now() - start });
+    const r = await refreshConsistency(conn.config, since);
+    consistencyCache = null;
+    res.json(r);
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
@@ -3180,6 +3181,63 @@ async function fetchOrdersPage(cfg, { cursor = null, q = null, sortKey = 'UPDATE
     next: d.orders?.pageInfo?.hasNextPage ? d.orders.pageInfo.endCursor : null
   };
 }
+async function upsertShopifyOrders(orders) {
+  let n = 0;
+  for (const o of orders) {
+    await pool.query(
+      `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, order_tags, updated_at, fulfilled_at, archived_at, cancel_reason, ship_address, synced_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
+       ON CONFLICT (shopify_id) DO UPDATE SET order_number=$2, created_at=$3, cancelled_at=$4, currency=$5,
+         total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, order_tags=$11, updated_at=$12, fulfilled_at=$13, archived_at=$14, cancel_reason=$15, ship_address=$16, synced_at=now()`,
+      [o.id, o.name || '', o.created_at || null, o.cancelled_at || null, o.currency || '',
+       Number(o.total_price) || 0, o.country || '',
+       o.financial_status || '', o.fulfillment_status || 'unfulfilled',
+       JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity }))),
+       JSON.stringify(o.tags || []),
+       o.updated_at || null, o.fulfilled_at || null, o.archived_at || null, o.cancel_reason || '',
+       o.ship_address ? JSON.stringify(o.ship_address) : null]);
+    n++;
+  }
+  return n;
+}
+// Refresh the consistency check's data: page Shopify for the orders it CURRENTLY considers open
+// (not fulfilled) since a date — status:any so archived ones are included — and upsert them (fresh
+// address + status). Then any order our cache still marks open that Shopify no longer returns has
+// since been fulfilled/archived, so we correct it. Resumable + time-boxed via sync_state.
+async function refreshConsistency(cfg, sinceIso, maxSeconds = 45) {
+  const stRow = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || {};
+  const st = stRow;
+  if (st.cons_since !== sinceIso) { st.cons_cursor = null; st.cons_done = false; st.cons_since = sinceIso; st.cons_fresh = []; }
+  const fresh = new Set(st.cons_fresh || []);
+  const start = Date.now();
+  let synced = 0, cursor = st.cons_cursor || null;
+  while (!st.cons_done && Date.now() - start < maxSeconds * 1000) {
+    const { orders, next } = await fetchOrdersPage(cfg, {
+      cursor,
+      q: `created_at:>='${sinceIso}' AND -fulfillment_status:fulfilled AND status:any`,
+      sortKey: 'CREATED_AT'
+    });
+    if (!orders.length) { st.cons_done = true; break; }
+    synced += await upsertShopifyOrders(orders);
+    orders.forEach(o => fresh.add(String(o.id)));
+    cursor = next;
+    if (!next) st.cons_done = true;
+  }
+  st.cons_cursor = cursor;
+  st.cons_fresh = [...fresh];
+  let corrected = 0;
+  if (st.cons_done) { // full open set fetched → anything else our cache calls open is now closed
+    const cacheOpen = (await pool.query(
+      `SELECT shopify_id FROM orders_cache WHERE created_at >= $1 AND cancelled_at IS NULL AND archived_at IS NULL AND fulfillment_status <> 'fulfilled'`,
+      [sinceIso])).rows.map(r => String(r.shopify_id));
+    const stale = cacheOpen.filter(id => !fresh.has(id)).map(Number);
+    if (stale.length) { await pool.query(`UPDATE orders_cache SET fulfillment_status='fulfilled', synced_at=now() WHERE shopify_id = ANY($1)`, [stale]); corrected = stale.length; }
+    st.cons_fresh = [];
+  }
+  await pool.query(`INSERT INTO sync_state (k, v) VALUES ('shopify', $1) ON CONFLICT (k) DO UPDATE SET v=$1`, [JSON.stringify(st)]);
+  overviewCache.clear();
+  return { synced, corrected, done: !!st.cons_done };
+}
 
 let shopifySyncRunning = false;
 async function syncShopify(maxPages = 8) {
@@ -3189,30 +3247,13 @@ async function syncShopify(maxPages = 8) {
   const cfg = conn.config;
   shopifySyncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || {};
-  if (st.engine !== 'graphql-v6') { // v6: re-backfill to capture full shipping address; v5 cancelReason; v4 archived; v3 fulfillment dates
-    st.engine = 'graphql-v6'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
+  if (st.engine !== 'graphql-v7') { // v7: status:any (include archived) + address; v6 address; v5 cancelReason; v4 archived; v3 fulfillment dates
+    st.engine = 'graphql-v7'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
   }
   let pages = 0, upserts = 0, lastError = null;
   const horizonIso = new Date(Date.now() - BACKFILL_HORIZON_DAYS * 864e5).toISOString();
 
-  const upsertOrders = async (orders) => {
-    for (const o of orders) {
-      await pool.query(
-        `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, order_tags, updated_at, fulfilled_at, archived_at, cancel_reason, ship_address, synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
-         ON CONFLICT (shopify_id) DO UPDATE SET order_number=$2, created_at=$3, cancelled_at=$4, currency=$5,
-           total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, order_tags=$11, updated_at=$12, fulfilled_at=$13, archived_at=$14, cancel_reason=$15, ship_address=$16, synced_at=now()`,
-        [o.id, o.name || '', o.created_at || null, o.cancelled_at || null, o.currency || '',
-         Number(o.total_price) || 0,
-         o.country || '',
-         o.financial_status || '', o.fulfillment_status || 'unfulfilled',
-         JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity }))),
-         JSON.stringify(o.tags || []),
-         o.updated_at || null, o.fulfilled_at || null, o.archived_at || null, o.cancel_reason || '',
-         o.ship_address ? JSON.stringify(o.ship_address) : null]);
-      upserts++;
-    }
-  };
+  const upsertOrders = async (orders) => { upserts += await upsertShopifyOrders(orders); };
 
   try {
     // incremental: everything updated since last run (UPDATED_AT desc, stop when older than last sync)
@@ -3220,7 +3261,7 @@ async function syncShopify(maxPages = 8) {
       const lastUpd = Date.parse(st.last_updated);
       let cursor = null, newest = null, done = false;
       while (pages < maxPages && !done) {
-        const { orders, next } = await fetchOrdersPage(cfg, { cursor, sortKey: 'UPDATED_AT' });
+        const { orders, next } = await fetchOrdersPage(cfg, { cursor, q: 'status:any', sortKey: 'UPDATED_AT' });
         if (!orders.length) break;
         await upsertOrders(orders);
         if (!newest) newest = orders[0]?.updated_at || null;
@@ -3235,7 +3276,7 @@ async function syncShopify(maxPages = 8) {
     while (!st.backfill_done && pages < maxPages) {
       const { orders, next } = await fetchOrdersPage(cfg, {
         cursor: st.backfill_cursor || null,
-        q: `created_at:>='${horizonIso}'`,
+        q: `created_at:>='${horizonIso}' AND status:any`,
         sortKey: 'CREATED_AT'
       });
       if (!orders.length) { st.backfill_done = true; break; }
