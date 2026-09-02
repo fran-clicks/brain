@@ -398,6 +398,14 @@ footer{color:rgba(16,17,20,.45)}
     <table id="canTable"><thead><tr><th>SKU / product</th><th style="text-align:right">Units cancelled</th><th style="text-align:right">Orders</th></tr></thead><tbody></tbody></table>
     <div class="note" id="canNote" style="margin-top:8px"></div>
   </div>
+  <div class="card" id="consistencyCard" style="display:none">
+    <h2>🔀 Shopify ↔ ShipBob order check <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only · unfulfilled orders since Jan</span>
+      <button class="btn" style="float:right;margin:0;padding:5px 12px" id="consBtn" onclick="runConsistency()">Run check</button>
+    </h2>
+    <div class="note" style="margin-top:0">For each still-open Shopify order (placed since 1 Jan, not yet fulfilled), finds the matching ShipBob order and flags a <b>different shipping address</b>, or cases where <b>ShipBob already shipped</b> but Shopify still shows unfulfilled. Runs live against ShipBob, so give it a few seconds.</div>
+    <div id="consSummary" class="note" style="display:none"></div>
+    <div id="consResults" style="overflow-x:auto"></div>
+  </div>
   <div class="card">
     <h2>Recent orders</h2>
     <table id="shopRecent"><thead><tr><th>Order</th><th>Date</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th><th>Tags</th></tr></thead><tbody></tbody></table>
@@ -2287,12 +2295,38 @@ function clearShopFilters() {
   ['shProduct','shCountry','shTag','shFrom','shTo'].forEach(id => document.getElementById(id).value = '');
   loadShopify();
 }
+const consAddr = a => a
+  ? [a.name, a.company, a.address1, a.address2, [a.city, a.state, a.zip].filter(Boolean).join(' '), a.country].filter(Boolean).map(esc).join('<br>')
+  : '<span style="color:var(--muted)">— (no address)</span>';
+async function runConsistency() {
+  const btn = document.getElementById('consBtn'), box = document.getElementById('consResults'), sum = document.getElementById('consSummary');
+  btn.disabled = true; btn.textContent = 'Checking…'; box.innerHTML = ''; sum.style.display = 'block';
+  sum.textContent = 'Pulling ShipBob orders and comparing… this can take a few seconds.';
+  try {
+    const r = await api('/api/consistency/orders?refresh=1');
+    sum.innerHTML = `Checked <b>${r.checked}</b> unfulfilled Shopify order${r.checked === 1 ? '' : 's'} since ${String(r.since).slice(0,10)} · matched <b>${r.matched}</b> in ShipBob · <b>${r.flagged.length}</b> flagged · ${r.not_in_shipbob} not found in ShipBob · scanned ${r.shipbob_orders_scanned} ShipBob orders.`;
+    if (!r.flagged.length) { box.innerHTML = '<div class="empty" style="margin-top:10px">✅ No mismatches — every matched order lines up.</div>'; return; }
+    box.innerHTML = `<table style="margin-top:10px"><thead><tr><th>Order</th><th>Issue</th><th>Shopify ship-to</th><th>ShipBob ship-to</th></tr></thead><tbody>` +
+      r.flagged.map(f => {
+        const badges = f.issues.map(i => i.type === 'address'
+          ? `<span class="tag pending">📍 address: ${esc(i.fields.join(', '))}</span>`
+          : `<span class="tag" style="background:#fef2f2;color:var(--red)">🚚 ${esc(i.detail || 'fulfillment mismatch')}</span>`).join(' ');
+        return `<tr>
+          <td><b>${esc(f.order_number)}</b><br><span style="color:var(--muted);font-size:12px">${esc(f.date)} · Shopify: ${esc(f.shopify_status)}${f.shipbob_status ? ' · ShipBob: ' + esc(f.shipbob_status) : ''}</span></td>
+          <td>${badges}</td>
+          <td style="font-size:12px;line-height:1.5">${consAddr(f.shopify_address)}</td>
+          <td style="font-size:12px;line-height:1.5">${consAddr(f.shipbob_address)}</td></tr>`;
+      }).join('') + `</tbody></table>`;
+  } catch (e) { sum.textContent = '⚠️ ' + e.message; }
+  finally { btn.disabled = false; btn.textContent = 'Run check'; }
+}
 function fillSelect(id, values) { // preserve current selection, refresh options
   const el = document.getElementById(id), cur = el.value, first = el.options[0].outerHTML;
   el.innerHTML = first + values.map(v => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(v)}</option>`).join('');
 }
 async function loadShopify() {
   const note = document.getElementById('shopNote');
+  document.getElementById('consistencyCard').style.display = window.isAdmin ? 'block' : 'none';
   document.getElementById('shopUpdating').classList.add('on');
   try {
     const qs = new URLSearchParams();

@@ -424,6 +424,7 @@ async function initDb() {
     ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS fulfilled_at TIMESTAMPTZ;
     ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
     ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS cancel_reason TEXT DEFAULT '';
+    ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS ship_address JSONB;
     CREATE INDEX IF NOT EXISTS idx_oc_created ON orders_cache (created_at);
     CREATE INDEX IF NOT EXISTS idx_oc_fulfilled ON orders_cache (fulfilled_at);
     CREATE TABLE IF NOT EXISTS product_images (
@@ -2358,6 +2359,80 @@ app.post('/api/shipbob/sync', async (req, res) => {
   catch (e) { res.status(502).json({ error: e.message }); }
 });
 
+// ---------- Shopify ↔ ShipBob order consistency analyzer ----------
+// For Shopify orders placed since Jan 1 that aren't fulfilled yet, find the matching ShipBob order
+// and flag (a) a different shipping address, or (b) ShipBob already shipped while Shopify still shows
+// unfulfilled. On-demand (admin) — pulls ShipBob orders live, so the result is cached briefly.
+async function shipbobOrdersSince(cfg, sinceIso, maxPages = 60, limit = 250) {
+  const out = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const body = await shipbobRequest(cfg, `/${SHIPBOB_VER}/order?StartDate=${encodeURIComponent(sinceIso)}&SortOrder=Newest&Page=${page}&Limit=${limit}`);
+    const arr = Array.isArray(body) ? body : (body.items || body.data || []);
+    out.push(...arr);
+    if (arr.length < limit) break;
+  }
+  return out;
+}
+const cNorm = s => String(s || '').toLowerCase().replace(/[.,#\-\/]/g, ' ').replace(/\s+/g, ' ').trim();
+const cKey = s => String(s || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+function addrDiff(a, b) { // → array of differing field names, or null if not comparable
+  if (!a || !b) return null;
+  const diffs = [];
+  for (const f of ['address1', 'city', 'zip', 'country', 'state']) {
+    const av = cNorm(a[f]), bv = cNorm(b[f]);
+    if (!av || !bv) continue; // one side blank → can't say it differs
+    if (f === 'zip') { if (av.replace(/\s/g, '').slice(0, 6) !== bv.replace(/\s/g, '').slice(0, 6)) diffs.push('zip'); }
+    else if (av !== bv) diffs.push(f);
+  }
+  return diffs;
+}
+let consistencyCache = null;
+app.get('/api/consistency/orders', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('shipbob');
+  if (!conn) return res.status(400).json({ error: 'ShipBob is not connected — add it on the ＋ page first.' });
+  if (!req.query.refresh && consistencyCache && Date.now() - consistencyCache.t < 10 * 60 * 1000) return res.json(consistencyCache.v);
+  try {
+    const since = `${new Date().getUTCFullYear()}-01-01T00:00:00Z`;
+    const shop = (await pool.query(
+      `SELECT shopify_id, order_number, ship_address, fulfillment_status, financial_status, to_char(created_at,'YYYY-MM-DD') d
+       FROM orders_cache
+       WHERE created_at >= $1 AND cancelled_at IS NULL AND fulfillment_status <> 'fulfilled'
+       ORDER BY created_at DESC LIMIT 5000`, [since])).rows;
+    const sbOrders = await shipbobOrdersSince(conn.config, since);
+    const idx = {};
+    for (const o of sbOrders) {
+      const ship = (o.shipments || [])[0];
+      const rec = {
+        addr: ship?.recipient?.address || o.recipient?.address || null,
+        order_status: o.status || '',
+        shipped: (o.shipments || []).some(s => /completed/i.test(s.status || '') || s.tracking?.tracking_number) || /fulfilled/i.test(o.status || '')
+      };
+      for (const k of [cKey(o.order_number), cKey(o.reference_id)]) if (k) idx[k] = rec;
+    }
+    const flagged = [];
+    let matched = 0, notInShipbob = 0;
+    for (const s of shop) {
+      const sb = idx[cKey(s.order_number)] || idx[cKey(String(s.shopify_id))];
+      if (!sb) { notInShipbob++; continue; } // they didn't ask to flag these; count only
+      matched++;
+      const issues = [];
+      const diffs = addrDiff(s.ship_address, sb.addr);
+      if (diffs && diffs.length) issues.push({ type: 'address', fields: diffs });
+      if (sb.shipped) issues.push({ type: 'fulfillment', detail: 'ShipBob shows shipped/completed but Shopify is still unfulfilled' });
+      if (issues.length) flagged.push({
+        order_number: s.order_number, shopify_id: String(s.shopify_id), date: s.d,
+        shopify_status: s.fulfillment_status, financial_status: s.financial_status,
+        shipbob_status: sb.order_status, shopify_address: s.ship_address, shipbob_address: sb.addr, issues
+      });
+    }
+    const v = { ran_at: new Date().toISOString(), since, checked: shop.length, matched, not_in_shipbob: notInShipbob,
+      shipbob_orders_scanned: sbOrders.length, flagged };
+    consistencyCache = { t: Date.now(), v };
+    res.json(v);
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
 // ---------- Floship (3PL, shape unknown until we probe the live API) ----------
 // auth-style variants to try against a given URL
 function floshipAuthAttempts(url, token) {
@@ -3026,7 +3101,7 @@ query Orders($cursor: String, $q: String, $sortKey: OrderSortKeys!) {
       totalPriceSet { shopMoney { amount } }
       displayFinancialStatus displayFulfillmentStatus
       fulfillments(first: 20) { createdAt }
-      shippingAddress { countryCodeV2 }
+      shippingAddress { address1 address2 city provinceCode zip countryCodeV2 name phone company }
       lineItems(first: 20) { nodes { title sku quantity } }
     }
   }
@@ -3044,6 +3119,13 @@ function normalizeOrder(n) {
     currency: n.currencyCode || '',
     total_price: n.totalPriceSet?.shopMoney?.amount || 0,
     country: n.shippingAddress?.countryCodeV2 || '',
+    ship_address: n.shippingAddress ? {
+      name: n.shippingAddress.name || '', company: n.shippingAddress.company || '',
+      address1: n.shippingAddress.address1 || '', address2: n.shippingAddress.address2 || '',
+      city: n.shippingAddress.city || '', state: n.shippingAddress.provinceCode || '',
+      zip: n.shippingAddress.zip || '', country: n.shippingAddress.countryCodeV2 || '',
+      phone: n.shippingAddress.phone || ''
+    } : null,
     financial_status: (n.displayFinancialStatus || '').toLowerCase(),
     fulfillment_status: (n.displayFulfillmentStatus || 'unfulfilled').toLowerCase(),
     // actual fulfillment date = latest fulfillment's createdAt (null if never fulfilled).
@@ -3073,8 +3155,8 @@ async function syncShopify(maxPages = 8) {
   const cfg = conn.config;
   shopifySyncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || {};
-  if (st.engine !== 'graphql-v5') { // v5: re-backfill to capture cancelReason; v4 archived; v3 fulfillment dates
-    st.engine = 'graphql-v5'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
+  if (st.engine !== 'graphql-v6') { // v6: re-backfill to capture full shipping address; v5 cancelReason; v4 archived; v3 fulfillment dates
+    st.engine = 'graphql-v6'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
   }
   let pages = 0, upserts = 0, lastError = null;
   const horizonIso = new Date(Date.now() - BACKFILL_HORIZON_DAYS * 864e5).toISOString();
@@ -3082,17 +3164,18 @@ async function syncShopify(maxPages = 8) {
   const upsertOrders = async (orders) => {
     for (const o of orders) {
       await pool.query(
-        `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, order_tags, updated_at, fulfilled_at, archived_at, cancel_reason, synced_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
+        `INSERT INTO orders_cache (shopify_id, order_number, created_at, cancelled_at, currency, total_price, country, financial_status, fulfillment_status, items, order_tags, updated_at, fulfilled_at, archived_at, cancel_reason, ship_address, synced_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now())
          ON CONFLICT (shopify_id) DO UPDATE SET order_number=$2, created_at=$3, cancelled_at=$4, currency=$5,
-           total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, order_tags=$11, updated_at=$12, fulfilled_at=$13, archived_at=$14, cancel_reason=$15, synced_at=now()`,
+           total_price=$6, country=$7, financial_status=$8, fulfillment_status=$9, items=$10, order_tags=$11, updated_at=$12, fulfilled_at=$13, archived_at=$14, cancel_reason=$15, ship_address=$16, synced_at=now()`,
         [o.id, o.name || '', o.created_at || null, o.cancelled_at || null, o.currency || '',
          Number(o.total_price) || 0,
          o.country || '',
          o.financial_status || '', o.fulfillment_status || 'unfulfilled',
          JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity }))),
          JSON.stringify(o.tags || []),
-         o.updated_at || null, o.fulfilled_at || null, o.archived_at || null, o.cancel_reason || '']);
+         o.updated_at || null, o.fulfilled_at || null, o.archived_at || null, o.cancel_reason || '',
+         o.ship_address ? JSON.stringify(o.ship_address) : null]);
       upserts++;
     }
   };
