@@ -401,6 +401,7 @@ footer{color:rgba(16,17,20,.45)}
   <div class="card" id="consistencyCard" style="display:none">
     <h2>🔀 Shopify ↔ ShipBob order check <span style="font-weight:400;color:var(--muted);font-size:12px">· admins only · unfulfilled orders since Jan</span>
       <button class="btn" style="float:right;margin:0;padding:5px 12px" id="consBtn" onclick="runConsistency()">Run check</button>
+      <button class="btn" style="float:right;margin:0 8px 0 0;padding:5px 12px;background:#fff;color:var(--ink);border:1px solid var(--line);box-shadow:none" id="consDeepBtn" onclick="deepSyncOrders()" title="Pull the full Shopify order history since Jan so addresses & statuses are current">⏬ Deep sync</button>
     </h2>
     <div class="note" style="margin-top:0">For each still-open Shopify order (placed since 1 Jan, not yet fulfilled), finds the matching ShipBob order and flags a <b>different shipping address</b>, or cases where <b>ShipBob already shipped</b> but Shopify still shows unfulfilled. Runs live against ShipBob, so give it a few seconds.</div>
     <div id="consSummary" class="note" style="display:none"></div>
@@ -2306,19 +2307,39 @@ async function runConsistency() {
     const r = await api('/api/consistency/orders?refresh=1');
     sum.innerHTML = `Checked <b>${r.checked}</b> unfulfilled Shopify order${r.checked === 1 ? '' : 's'} since ${String(r.since).slice(0,10)} · matched <b>${r.matched}</b> in ShipBob · <b>${r.flagged.length}</b> flagged · ${r.not_in_shipbob} not found in ShipBob · scanned ${r.shipbob_orders_scanned} ShipBob orders.`;
     if (!r.flagged.length) { box.innerHTML = '<div class="empty" style="margin-top:10px">✅ No mismatches — every matched order lines up.</div>'; return; }
-    box.innerHTML = `<table style="margin-top:10px"><thead><tr><th>Order</th><th>Issue</th><th>Shopify ship-to</th><th>ShipBob ship-to</th></tr></thead><tbody>` +
+    box.innerHTML = `<table style="margin-top:10px"><thead><tr><th>Order</th><th>Issue</th><th>Shopify ship-to</th><th>ShipBob ship-to</th><th></th></tr></thead><tbody>` +
       r.flagged.map(f => {
         const badges = f.issues.map(i => i.type === 'address'
           ? `<span class="tag pending">📍 address: ${esc(i.fields.join(', '))}</span>`
           : `<span class="tag" style="background:#fef2f2;color:var(--red)">🚚 ${esc(i.detail || 'fulfillment mismatch')}</span>`).join(' ');
-        return `<tr>
+        return `<tr id="cons-${esc(f.order_number)}">
           <td><b>${esc(f.order_number)}</b><br><span style="color:var(--muted);font-size:12px">${esc(f.date)} · Shopify: ${esc(f.shopify_status)}${f.shipbob_status ? ' · ShipBob: ' + esc(f.shipbob_status) : ''}</span></td>
           <td>${badges}</td>
           <td style="font-size:12px;line-height:1.5">${consAddr(f.shopify_address)}</td>
-          <td style="font-size:12px;line-height:1.5">${consAddr(f.shipbob_address)}</td></tr>`;
+          <td style="font-size:12px;line-height:1.5">${consAddr(f.shipbob_address)}</td>
+          <td style="text-align:right"><button title="Remove — reviewed, not an issue" onclick="dismissOrder(${JSON.stringify(String(f.order_number)).replace(/"/g,'&quot;')})" style="border:none;background:none;cursor:pointer;color:var(--muted);font-size:16px">✕</button></td></tr>`;
       }).join('') + `</tbody></table>`;
   } catch (e) { sum.textContent = '⚠️ ' + e.message; }
   finally { btn.disabled = false; btn.textContent = 'Run check'; }
+}
+async function dismissOrder(orderNumber) {
+  const row = document.getElementById('cons-' + orderNumber);
+  try {
+    await api('/api/consistency/dismiss', { method: 'POST', body: JSON.stringify({ order_number: orderNumber }) });
+    if (row) row.remove();
+  } catch (e) { alert(e.message); }
+}
+async function deepSyncOrders() {
+  const btn = document.getElementById('consDeepBtn'), sum = document.getElementById('consSummary');
+  btn.disabled = true; btn.textContent = 'Syncing…'; sum.style.display = 'block';
+  sum.textContent = 'Deep-syncing Shopify order history (addresses + statuses)… this can take up to a minute.';
+  try {
+    const r = await api('/api/shopify/deep-sync', { method: 'POST', body: '{}' });
+    sum.innerHTML = r.backfill_done
+      ? '✅ Shopify history is fully synced. Now click <b>Run check</b>.'
+      : `Synced a batch (${r.cached ?? '?'} orders cached so far). Not done yet — click <b>⏬ Deep sync</b> again, then <b>Run check</b>.`;
+  } catch (e) { sum.textContent = '⚠️ ' + e.message; }
+  finally { btn.disabled = false; btn.textContent = '⏬ Deep sync'; }
 }
 function fillSelect(id, values) { // preserve current selection, refresh options
   const el = document.getElementById(id), cur = el.value, first = el.options[0].outerHTML;

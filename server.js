@@ -427,6 +427,8 @@ async function initDb() {
     ALTER TABLE orders_cache ADD COLUMN IF NOT EXISTS ship_address JSONB;
     CREATE INDEX IF NOT EXISTS idx_oc_created ON orders_cache (created_at);
     CREATE INDEX IF NOT EXISTS idx_oc_fulfilled ON orders_cache (fulfilled_at);
+    CREATE TABLE IF NOT EXISTS consistency_dismissed (
+      order_number TEXT PRIMARY KEY, dismissed_by TEXT DEFAULT '', dismissed_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS product_images (
       sku TEXT PRIMARY KEY, title TEXT DEFAULT '', image_url TEXT, updated_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE product_images ADD COLUMN IF NOT EXISTS variant_title TEXT DEFAULT '';
@@ -2375,10 +2377,17 @@ async function shipbobOrdersSince(cfg, sinceIso, maxPages = 60, limit = 250) {
 }
 const cNorm = s => String(s || '').toLowerCase().replace(/[.,#\-\/]/g, ' ').replace(/\s+/g, ' ').trim();
 const cKey = s => String(s || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+// street normaliser: drop unit designators so "Apt 232" == "232", "Suite 5" == "5", etc.
+const cStreet = s => cNorm(s).replace(/\b(apt|apartment|suite|ste|unit|no|number|fl|floor|bldg|building|rm|room|dept|po box|pobox|box)\b/g, ' ').replace(/\s+/g, ' ').trim();
 function addrDiff(a, b) { // → array of differing field names, or null if not comparable
   if (!a || !b) return null;
   const diffs = [];
   for (const f of ['address1', 'city', 'zip', 'country', 'state']) {
+    if (f === 'address1') {
+      const av = cStreet(a.address1), bv = cStreet(b.address1);
+      if (av && bv && av !== bv) diffs.push('address1');
+      continue;
+    }
     const av = cNorm(a[f]), bv = cNorm(b[f]);
     if (!av || !bv) continue; // one side blank → can't say it differs
     if (f === 'zip') { if (av.replace(/\s/g, '').slice(0, 6) !== bv.replace(/\s/g, '').slice(0, 6)) diffs.push('zip'); }
@@ -2399,6 +2408,7 @@ app.get('/api/consistency/orders', async (req, res) => {
        FROM orders_cache
        WHERE created_at >= $1 AND cancelled_at IS NULL AND fulfillment_status <> 'fulfilled'
        ORDER BY created_at DESC LIMIT 5000`, [since])).rows;
+    const dismissed = new Set((await pool.query('SELECT order_number FROM consistency_dismissed')).rows.map(r => r.order_number));
     const sbOrders = await shipbobOrdersSince(conn.config, since);
     const idx = {};
     for (const o of sbOrders) {
@@ -2413,6 +2423,7 @@ app.get('/api/consistency/orders', async (req, res) => {
     const flagged = [];
     let matched = 0, notInShipbob = 0;
     for (const s of shop) {
+      if (dismissed.has(s.order_number)) continue; // reviewed & removed by an admin
       const sb = idx[cKey(s.order_number)] || idx[cKey(String(s.shopify_id))];
       if (!sb) { notInShipbob++; continue; } // they didn't ask to flag these; count only
       matched++;
@@ -2430,6 +2441,29 @@ app.get('/api/consistency/orders', async (req, res) => {
       shipbob_orders_scanned: sbOrders.length, flagged };
     consistencyCache = { t: Date.now(), v };
     res.json(v);
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+// admin: remove a reviewed order from the check so it stops being listed
+app.post('/api/consistency/dismiss', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const on = String(req.body?.order_number || '').trim();
+  if (!on) return res.status(400).json({ error: 'order_number required' });
+  await pool.query(`INSERT INTO consistency_dismissed (order_number, dismissed_by) VALUES ($1,$2)
+                    ON CONFLICT (order_number) DO NOTHING`, [on, req.userEmail || 'admin']);
+  consistencyCache = null; // force a fresh compute next run
+  res.json({ ok: true });
+});
+// admin: deep Shopify backfill loop — keeps pulling history (newest→oldest) until done or ~50s,
+// so the order check has current addresses/fulfilment for the whole since-Jan window
+app.post('/api/shopify/deep-sync', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const start = Date.now();
+  let last = null;
+  try {
+    do { last = await syncShopify(30); }
+    while (!last.backfill_done && !last.error && !last.skipped && Date.now() - start < 50000);
+    overviewCache.clear();
+    res.json({ ...last, elapsed_ms: Date.now() - start });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
