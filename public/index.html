@@ -3186,10 +3186,10 @@ async function loadCommunicator() {
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
     const blankVariant = (sh.by_color || []).every(x => x.k === '(unknown)') && (sh.by_layout || []).every(x => x.k === '(unknown)');
     document.getElementById('commShopNote').textContent = !sh.has_data
-      ? 'No Communicator orders found on Shopify yet in this period.'
+      ? 'No Communicator device orders found in this period. If you expect some, click 🔄 Sync Shopify — product data was just added, so older orders need a re-sync (may take a couple of clicks).'
       : blankVariant
-        ? 'Orders found, but variant (colour/layout) isn\'t captured on them yet — click 🔄 Sync Shopify to pull it in (may take a couple of clicks for older orders).'
-        : 'Configured Communicator units sold on Shopify, split by variant.';
+        ? 'Orders found, but the colour/layout isn\'t captured yet — click 🔄 Sync Shopify to pull it in.'
+        : 'Communicator device units sold on Shopify (product ' + '15906286371185), split by variant.';
     const vrows = (arr, empty) => arr.length ? arr.map(x => `<tr><td>${esc(x.k)}</td><td style="text-align:right">${x.c}</td></tr>`).join('') : `<tr><td colspan="2" class="empty">${empty}</td></tr>`;
     document.querySelector('#commByColor tbody').innerHTML = vrows(sh.by_color || [], '—');
     document.querySelector('#commByLayout tbody').innerHTML = vrows(sh.by_layout || [], '—');

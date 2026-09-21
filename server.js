@@ -1521,7 +1521,9 @@ app.get('/api/gorgias/cancel-refund', async (req, res) => {
 });
 
 // ---------- Communicator device (Gorgias tickets tagged "Communicator") ----------
-// Reservations happen on Stripe (not Shopify), so this view is support-only for now.
+// The Communicator device on Shopify: one product, 3 colours × 7 keyboard layouts = 21 variants.
+// Accessories (cases etc.) are separate products and are intentionally excluded here.
+const COMMUNICATOR_PRODUCT_ID = '15906286371185';
 app.get('/api/communicator/stats', async (req, res) => {
   try {
     const win = resolveWindow(req.query);
@@ -1550,10 +1552,9 @@ app.get('/api/communicator/stats', async (req, res) => {
         FROM tickets_cache WHERE NOT spam AND ${TAG} AND ${inWin} ORDER BY created_datetime DESC LIMIT 60`, p)
     ]);
     // ---- Shopify sales (configured Communicators land here as orders) ----
-    // Restrict to the Communicator DEVICE: title mentions communicator AND the variant colour is one of
-    // the device colours (Smoke/Onyx/Clover). This excludes Communicator *accessories* (cases etc.) whose
-    // colours are Dune/Spice/Surf and were polluting the keyboard-layout breakdown.
-    const COMM = `it->>'title' ILIKE '%communicator%' AND it->>'variant' ~* '(^|/|\\s)(smoke|onyx|clover)(\\s|/|$)'`;
+    // Restrict to the Communicator DEVICE by exact Shopify product id (3 colours × 7 keyboard layouts).
+    // Accessories (cases in Dune/Spice/Surf etc.) are different products, so they're excluded cleanly.
+    const COMM = `it->>'product_id' = '${COMMUNICATOR_PRODUCT_ID}'`;
     const variantRows = (await pool.query(
       `SELECT coalesce(nullif(it->>'variant',''),'(no variant)') variant,
          sum(CASE WHEN cancelled_at IS NULL THEN coalesce((it->>'qty')::int,0) ELSE 0 END)::int sold,
@@ -3216,7 +3217,7 @@ query Orders($cursor: String, $q: String, $sortKey: OrderSortKeys!) {
       displayFinancialStatus displayFulfillmentStatus
       fulfillments(first: 20) { createdAt }
       shippingAddress { address1 address2 city provinceCode zip countryCodeV2 name phone company }
-      lineItems(first: 20) { nodes { title sku quantity variantTitle } }
+      lineItems(first: 20) { nodes { title sku quantity variantTitle product { legacyResourceId } } }
     }
   }
 }`;
@@ -3249,7 +3250,7 @@ function normalizeOrder(n) {
       return ds.length ? ds[ds.length - 1] : null;
     })(),
     tags: Array.isArray(n.tags) ? n.tags : [],
-    line_items: (n.lineItems?.nodes || []).map(li => ({ title: li.title, sku: li.sku, quantity: li.quantity, variant: li.variantTitle || '' }))
+    line_items: (n.lineItems?.nodes || []).map(li => ({ title: li.title, sku: li.sku, quantity: li.quantity, variant: li.variantTitle || '', product_id: li.product?.legacyResourceId ? String(li.product.legacyResourceId) : '' }))
   };
 }
 
@@ -3271,7 +3272,7 @@ async function upsertShopifyOrders(orders) {
       [o.id, o.name || '', o.created_at || null, o.cancelled_at || null, o.currency || '',
        Number(o.total_price) || 0, o.country || '',
        o.financial_status || '', o.fulfillment_status || 'unfulfilled',
-       JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity, variant: li.variant || '' }))),
+       JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity, variant: li.variant || '', product_id: li.product_id || '' }))),
        JSON.stringify(o.tags || []),
        o.updated_at || null, o.fulfilled_at || null, o.archived_at || null, o.cancel_reason || '',
        o.ship_address ? JSON.stringify(o.ship_address) : null]);
@@ -3328,8 +3329,8 @@ async function syncShopify(maxPages = 8) {
   const cfg = conn.config;
   shopifySyncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || {};
-  if (st.engine !== 'graphql-v8') { // v8: capture line-item variant title; v7 status:any+address; v6 address; v5 cancelReason
-    st.engine = 'graphql-v8'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
+  if (st.engine !== 'graphql-v9') { // v9: capture line-item product id; v8 variant title; v7 status:any+address; v6 address
+    st.engine = 'graphql-v9'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
   }
   let pages = 0, upserts = 0, lastError = null;
   const horizonIso = new Date(Date.now() - BACKFILL_HORIZON_DAYS * 864e5).toISOString();
