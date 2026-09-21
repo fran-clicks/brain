@@ -1520,6 +1520,46 @@ app.get('/api/gorgias/cancel-refund', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ---------- Communicator device (Gorgias tickets tagged "Communicator") ----------
+// Reservations happen on Stripe (not Shopify), so this view is support-only for now.
+app.get('/api/communicator/stats', async (req, res) => {
+  try {
+    const win = resolveWindow(req.query);
+    const p = [win.start.toISOString(), win.end.toISOString()];
+    const bucket = win.bucket;
+    const TAG = `EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) tg WHERE tg ILIKE '%communicator%')`;
+    const inWin = `created_datetime >= $1 AND created_datetime < $2`;
+    const breakdown = col => `SELECT coalesce(nullif(${col},''),'(not set)') k, count(*)::int c
+       FROM tickets_cache WHERE NOT spam AND ${TAG} AND ${inWin} GROUP BY 1 ORDER BY 2 DESC`;
+    const [totals, series, cats, solved, colours, toptags, recent] = await poolAll([
+      () => pool.query(`SELECT count(*)::int total,
+          count(*) FILTER (WHERE status='open')::int open,
+          count(*) FILTER (WHERE ${inWin})::int created,
+          count(*) FILTER (WHERE closed_datetime >= $1 AND closed_datetime < $2)::int closed,
+          count(*) FILTER (WHERE ${inWin} AND (subject ~* 'cancel|refund' OR tags::text ~* 'cancel|refund'))::int cancel_refund
+        FROM tickets_cache WHERE NOT spam AND ${TAG}`, p),
+      () => pool.query(`SELECT date_trunc('${bucket}',created_datetime)::date d, count(*)::int c
+        FROM tickets_cache WHERE NOT spam AND ${TAG} AND ${inWin} GROUP BY 1 ORDER BY 1`, p),
+      () => pool.query(breakdown('cf_category'), p),
+      () => pool.query(breakdown('cf_solved_by'), p),
+      () => pool.query(breakdown('cf_colour'), p),
+      () => pool.query(`SELECT tg tag, count(*)::int c
+        FROM tickets_cache, jsonb_array_elements_text(tags) tg
+        WHERE NOT spam AND ${TAG} AND ${inWin} AND tg !~* 'communicator' GROUP BY 1 ORDER BY 2 DESC LIMIT 15`, p),
+      () => pool.query(`SELECT gorgias_id, subject, channel, status, cf_category, cf_colour, cf_solved_by, created_datetime
+        FROM tickets_cache WHERE NOT spam AND ${TAG} AND ${inWin} ORDER BY created_datetime DESC LIMIT 60`, p)
+    ]);
+    const cfg = (await getConnector('gorgias'))?.config;
+    res.json({
+      days: win.days, custom: win.custom, bucket, from: p[0], to: p[1],
+      gorgias_domain: cfg?.domain || process.env.GORGIAS_DOMAIN || null,
+      totals: totals.rows[0], series: series.rows,
+      categories: cats.rows, resolutions: solved.rows, colours: colours.rows,
+      tags: toptags.rows, recent: recent.rows
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ---------- Redo (returns) ----------
 async function redoRequest(cfg, pathAndQuery, pageHeaders = {}) {
   const r = await fetch(`https://api.getredo.com/v2.2${pathAndQuery}`, {

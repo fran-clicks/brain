@@ -183,6 +183,7 @@ footer{color:rgba(16,17,20,.45)}
 <nav>
   <button data-s="home" class="active">🏠 Overview</button>
   <button data-s="gorgias">🎧 Gorgias</button>
+  <button data-s="communicator">📟 Communicator</button>
   <button data-s="klaviyo">✉️ Klaviyo</button>
   <button data-s="sales">🛒 Shopify</button>
   <button data-s="redo">↩️ Returns</button>
@@ -474,6 +475,53 @@ footer{color:rgba(16,17,20,.45)}
   <div class="card">
     <h2>Latest tickets</h2>
     <table id="gRecent"><thead><tr><th>Subject</th><th>Channel</th><th>Status</th><th>Date</th></tr></thead><tbody></tbody></table>
+  </div>
+</div>
+
+<!-- COMMUNICATOR (Gorgias tickets tagged Communicator) -->
+<div class="section" id="s-communicator">
+  <div class="synchead">
+    <div>
+      <div style="font-size:22px;font-weight:800;letter-spacing:-.01em">📟 Communicator</div>
+      <div style="color:var(--muted);font-size:13px;margin-top:2px">Support stats for tickets tagged <b>Communicator</b>. <span class="updating-pill" id="commUpdating"><div class="spin"></div>Loading…</span></div>
+    </div>
+  </div>
+  <div class="periods" id="commPeriods">
+    <button data-d="7">7 days</button>
+    <button data-d="30" class="active">1 month</button>
+    <button data-d="90">3 months</button>
+    <button data-d="180">6 months</button>
+    <button data-d="365">1 year</button>
+  </div>
+  <div class="grid kpis" id="commKpis"></div>
+  <div class="card" style="margin-top:14px">
+    <h2>Tickets created</h2>
+    <div class="chart-wrap"><canvas id="commChart"></canvas></div>
+  </div>
+  <div class="grid two">
+    <div class="card">
+      <h2>By category</h2>
+      <table id="commCats"><thead><tr><th>Category</th><th>Tickets</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Resolved as <span style="font-weight:400;color:var(--muted);font-size:12px">· solved-by</span></h2>
+      <table id="commSolved"><thead><tr><th>Resolution</th><th>Tickets</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <div class="grid two">
+    <div class="card">
+      <h2>By colour</h2>
+      <table id="commColours"><thead><tr><th>Colour</th><th>Tickets</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>Top tags <span style="font-weight:400;color:var(--muted);font-size:12px">· alongside Communicator</span></h2>
+      <table id="commTags"><thead><tr><th>Tag</th><th>Tickets</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Latest Communicator tickets</h2>
+    <table id="commRecent"><thead><tr><th>Subject</th><th>Category</th><th>Colour</th><th>Status</th><th>Date</th></tr></thead><tbody></tbody></table>
+    <div class="note" id="commNote" style="margin-top:8px"></div>
   </div>
 </div>
 
@@ -1058,6 +1106,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (s === 'kb') { loadKbs(); loadKbAudit(); }
   if (s === 'fulfillment') loadFulfillment();
   if (s === 'freight') loadFreight();
+  if (s === 'communicator') loadCommunicator();
   if (s === 'conn') { loadConnectorTypes(); loadConnectors(); loadRequests(); loadMembers(); loadHealth(); }
   try { history.replaceState(null, '', '#' + s); } catch (e) {}
 });
@@ -3050,6 +3099,58 @@ async function loadGorgias() {
        <td>${esc(String(t.d).slice(0,10))}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">—</td></tr>';
   } catch (e) { note.textContent = 'Gorgias error: ' + e.message; }
   finally { document.getElementById('gLoading').classList.remove('on'); document.getElementById('gUpdating').classList.remove('on'); }
+}
+
+// ---------- Communicator device (Gorgias tickets tagged Communicator) ----------
+let commDays = 30, commChart;
+document.querySelectorAll('#commPeriods button[data-d]').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#commPeriods button[data-d]').forEach(x => x.classList.remove('active'));
+  b.classList.add('active'); commDays = +b.dataset.d; loadCommunicator();
+});
+async function loadCommunicator() {
+  document.getElementById('commUpdating').classList.add('on');
+  try {
+    const r = await api('/api/communicator/stats?days=' + commDays);
+    const t = r.totals || {};
+    const lbl = { 7:'7d', 30:'1mo', 90:'3mo', 180:'6mo', 365:'1y' }[commDays] || commDays + 'd';
+    document.getElementById('commKpis').innerHTML = [
+      {l:'Tickets tagged Communicator (all)', v: t.total ?? 0},
+      {l:`Created (${lbl})`, v: t.created ?? 0},
+      {l:`Closed (${lbl})`, v: t.closed ?? 0},
+      {l:'Open now', v: t.open ?? 0},
+      {l:`Cancel / refund (${lbl})`, v: t.cancel_refund ?? 0}
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    // chart
+    const days = r.series || [];
+    const labels = days.map(d => String(d.d).slice(0,10));
+    if (commChart) commChart.destroy();
+    commChart = new Chart(document.getElementById('commChart'), {
+      type: 'bar',
+      data: { labels, datasets: [{ label: 'Communicator tickets created', data: days.map(d => d.c),
+        backgroundColor: '#ffc800', borderColor: 'rgba(16,17,20,.2)', borderWidth: 1, borderRadius: 6 }] },
+      options: { responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: { title: i => fmtAxisDate(i[0].label, r.bucket) } } },
+        scales: { y: { beginAtZero: true, ticks: { precision: 0 } },
+          x: { ticks: { maxRotation: 0, autoSkipPadding: r.bucket === 'week' ? 26 : 16,
+               callback: function(v){ return fmtAxisDate(this.getLabelForValue(v), r.bucket); } }, grid: { display: false } } } }
+    });
+    const rows = (arr, empty) => arr.length ? arr.map(x => `<tr><td>${esc(x.k || x.tag)}</td><td>${x.c}</td></tr>`).join('') : `<tr><td colspan="2" class="empty">${empty}</td></tr>`;
+    document.querySelector('#commCats tbody').innerHTML = rows(r.categories || [], '—');
+    document.querySelector('#commSolved tbody').innerHTML = rows(r.resolutions || [], '—');
+    document.querySelector('#commColours tbody').innerHTML = rows(r.colours || [], '—');
+    document.querySelector('#commTags tbody').innerHTML = rows(r.tags || [], 'No other tags');
+    const tk = (id, label) => r.gorgias_domain
+      ? `<a href="https://${esc(r.gorgias_domain)}.gorgias.com/app/ticket/${id}" target="_blank">${label}</a>` : label;
+    document.querySelector('#commRecent tbody').innerHTML = (r.recent || []).length
+      ? r.recent.map(x => `<tr>
+          <td>${tk(x.gorgias_id, esc(x.subject || '(no subject)'))}</td>
+          <td>${esc(x.cf_category || '—')}</td><td>${esc(x.cf_colour || '—')}</td>
+          <td><span class="tag ${x.status === 'open' ? 'pending' : 'approved'}">${esc(x.status)}</span></td>
+          <td>${esc(String(x.created_datetime).slice(0,10))}</td></tr>`).join('')
+      : '<tr><td colspan="5" class="empty">No Communicator-tagged tickets in this period.</td></tr>';
+    document.getElementById('commNote').textContent = `${t.total ?? 0} tickets ever tagged Communicator · matched on any tag containing "communicator".`;
+  } catch (e) { document.getElementById('commNote').textContent = '⚠️ ' + e.message; }
+  finally { document.getElementById('commUpdating').classList.remove('on'); }
 }
 
 // ---------- Clicks Knowledge Base (single flat list of sources) ----------
