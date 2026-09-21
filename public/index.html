@@ -493,7 +493,23 @@ footer{color:rgba(16,17,20,.45)}
     <button data-d="180">6 months</button>
     <button data-d="365">1 year</button>
   </div>
-  <div class="grid kpis" id="commKpis"></div>
+  <div class="card" style="margin-top:14px">
+    <h2>🛒 Shopify sales <span style="font-weight:400;color:var(--muted);font-size:12px">· configured Communicator orders</span></h2>
+    <div class="grid kpis" id="commShopKpis"></div>
+    <div class="note" id="commShopNote" style="margin-top:8px"></div>
+  </div>
+  <div class="grid two">
+    <div class="card">
+      <h2>By colour</h2>
+      <table id="commByColor"><thead><tr><th>Colour</th><th style="text-align:right">Units sold</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <h2>By keyboard layout</h2>
+      <table id="commByLayout"><thead><tr><th>Layout</th><th style="text-align:right">Units sold</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <h2 style="font-size:16px;margin:20px 0 0">🎧 Support tickets</h2>
+  <div class="grid kpis" id="commKpis" style="margin-top:12px"></div>
   <div class="card" style="margin-top:14px">
     <h2>Tickets created</h2>
     <div class="chart-wrap"><canvas id="commChart"></canvas></div>
@@ -3120,6 +3136,19 @@ async function loadCommunicator() {
       {l:'Open now', v: t.open ?? 0},
       {l:`Cancel / refund (${lbl})`, v: t.cancel_refund ?? 0}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    // Shopify sales
+    const sh = r.shopify || { sold:0, cancelled:0, refunded:0, by_color:[], by_layout:[], has_data:false };
+    document.getElementById('commShopKpis').innerHTML = [
+      {l:`Units sold (${lbl})`, v: sh.sold ?? 0},
+      {l:`Cancelled (${lbl})`, v: sh.cancelled ?? 0},
+      {l:`Refunded orders (${lbl})`, v: sh.refunded ?? 0}
+    ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
+    document.getElementById('commShopNote').textContent = sh.has_data
+      ? 'Configured Communicator units sold on Shopify, split by variant.'
+      : 'No Communicator orders found on Shopify yet in this period (variant data fills in as the order backfill runs).';
+    const vrows = (arr, empty) => arr.length ? arr.map(x => `<tr><td>${esc(x.k)}</td><td style="text-align:right">${x.c}</td></tr>`).join('') : `<tr><td colspan="2" class="empty">${empty}</td></tr>`;
+    document.querySelector('#commByColor tbody').innerHTML = vrows(sh.by_color || [], '—');
+    document.querySelector('#commByLayout tbody').innerHTML = vrows(sh.by_layout || [], '—');
     // chart
     const days = r.series || [];
     const labels = days.map(d => String(d.d).slice(0,10));

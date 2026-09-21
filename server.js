@@ -1549,13 +1549,38 @@ app.get('/api/communicator/stats', async (req, res) => {
       () => pool.query(`SELECT gorgias_id, subject, channel, status, cf_category, cf_colour, cf_solved_by, created_datetime
         FROM tickets_cache WHERE NOT spam AND ${TAG} AND ${inWin} ORDER BY created_datetime DESC LIMIT 60`, p)
     ]);
+    // ---- Shopify sales (configured Communicators land here as orders) ----
+    // split each line item's variant title into Colour (Smoke/Onyx/Clover) + Keyboard layout (the other token)
+    const variantRows = (await pool.query(
+      `SELECT coalesce(nullif(it->>'variant',''),'(no variant)') variant,
+         sum(CASE WHEN cancelled_at IS NULL THEN coalesce((it->>'qty')::int,0) ELSE 0 END)::int sold,
+         sum(CASE WHEN cancelled_at IS NOT NULL THEN coalesce((it->>'qty')::int,0) ELSE 0 END)::int cancelled
+       FROM orders_cache, jsonb_array_elements(items) it
+       WHERE created_at >= $1 AND created_at < $2 AND it->>'title' ILIKE '%communicator%'
+       GROUP BY 1`, p)).rows;
+    const refunded = (await pool.query(
+      `SELECT count(DISTINCT shopify_id)::int c FROM orders_cache, jsonb_array_elements(items) it
+       WHERE created_at >= $1 AND created_at < $2 AND it->>'title' ILIKE '%communicator%'
+         AND financial_status IN ('refunded','partially_refunded')`, p)).rows[0].c;
+    const COLORS = { smoke: 'Smoke', onyx: 'Onyx', clover: 'Clover' };
+    const byColor = {}, byLayout = {}; let sold = 0, cancelled = 0;
+    for (const r of variantRows) {
+      sold += r.sold; cancelled += r.cancelled;
+      const parts = String(r.variant).split('/').map(s => s.trim()).filter(Boolean);
+      let color = '(unknown)', layout = '(unknown)';
+      for (const part of parts) { if (COLORS[part.toLowerCase()]) color = COLORS[part.toLowerCase()]; else layout = part; }
+      byColor[color] = (byColor[color] || 0) + r.sold;
+      byLayout[layout] = (byLayout[layout] || 0) + r.sold;
+    }
+    const toArr = o => Object.entries(o).map(([k, c]) => ({ k, c })).sort((a, b) => b.c - a.c);
     const cfg = (await getConnector('gorgias'))?.config;
     res.json({
       days: win.days, custom: win.custom, bucket, from: p[0], to: p[1],
       gorgias_domain: cfg?.domain || process.env.GORGIAS_DOMAIN || null,
       totals: totals.rows[0], series: series.rows,
       categories: cats.rows, resolutions: solved.rows, colours: colours.rows,
-      tags: toptags.rows, recent: recent.rows
+      tags: toptags.rows, recent: recent.rows,
+      shopify: { sold, cancelled, refunded, by_color: toArr(byColor), by_layout: toArr(byLayout), has_data: variantRows.length > 0 }
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -3177,7 +3202,7 @@ query Orders($cursor: String, $q: String, $sortKey: OrderSortKeys!) {
       displayFinancialStatus displayFulfillmentStatus
       fulfillments(first: 20) { createdAt }
       shippingAddress { address1 address2 city provinceCode zip countryCodeV2 name phone company }
-      lineItems(first: 20) { nodes { title sku quantity } }
+      lineItems(first: 20) { nodes { title sku quantity variantTitle } }
     }
   }
 }`;
@@ -3210,7 +3235,7 @@ function normalizeOrder(n) {
       return ds.length ? ds[ds.length - 1] : null;
     })(),
     tags: Array.isArray(n.tags) ? n.tags : [],
-    line_items: (n.lineItems?.nodes || []).map(li => ({ title: li.title, sku: li.sku, quantity: li.quantity }))
+    line_items: (n.lineItems?.nodes || []).map(li => ({ title: li.title, sku: li.sku, quantity: li.quantity, variant: li.variantTitle || '' }))
   };
 }
 
@@ -3232,7 +3257,7 @@ async function upsertShopifyOrders(orders) {
       [o.id, o.name || '', o.created_at || null, o.cancelled_at || null, o.currency || '',
        Number(o.total_price) || 0, o.country || '',
        o.financial_status || '', o.fulfillment_status || 'unfulfilled',
-       JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity }))),
+       JSON.stringify((o.line_items || []).map(li => ({ title: li.title, sku: li.sku, qty: li.quantity, variant: li.variant || '' }))),
        JSON.stringify(o.tags || []),
        o.updated_at || null, o.fulfilled_at || null, o.archived_at || null, o.cancel_reason || '',
        o.ship_address ? JSON.stringify(o.ship_address) : null]);
@@ -3289,8 +3314,8 @@ async function syncShopify(maxPages = 8) {
   const cfg = conn.config;
   shopifySyncRunning = true;
   const st = (await pool.query(`SELECT v FROM sync_state WHERE k='shopify'`)).rows[0]?.v || {};
-  if (st.engine !== 'graphql-v7') { // v7: status:any (include archived) + address; v6 address; v5 cancelReason; v4 archived; v3 fulfillment dates
-    st.engine = 'graphql-v7'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
+  if (st.engine !== 'graphql-v8') { // v8: capture line-item variant title; v7 status:any+address; v6 address; v5 cancelReason
+    st.engine = 'graphql-v8'; st.backfill_cursor = null; st.backfill_done = false; st.last_error = null;
   }
   let pages = 0, upserts = 0, lastError = null;
   const horizonIso = new Date(Date.now() - BACKFILL_HORIZON_DAYS * 864e5).toISOString();
