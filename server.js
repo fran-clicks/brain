@@ -1550,17 +1550,20 @@ app.get('/api/communicator/stats', async (req, res) => {
         FROM tickets_cache WHERE NOT spam AND ${TAG} AND ${inWin} ORDER BY created_datetime DESC LIMIT 60`, p)
     ]);
     // ---- Shopify sales (configured Communicators land here as orders) ----
-    // split each line item's variant title into Colour (Smoke/Onyx/Clover) + Keyboard layout (the other token)
+    // Restrict to the Communicator DEVICE: title mentions communicator AND the variant colour is one of
+    // the device colours (Smoke/Onyx/Clover). This excludes Communicator *accessories* (cases etc.) whose
+    // colours are Dune/Spice/Surf and were polluting the keyboard-layout breakdown.
+    const COMM = `it->>'title' ILIKE '%communicator%' AND it->>'variant' ~* '(^|/|\\s)(smoke|onyx|clover)(\\s|/|$)'`;
     const variantRows = (await pool.query(
       `SELECT coalesce(nullif(it->>'variant',''),'(no variant)') variant,
          sum(CASE WHEN cancelled_at IS NULL THEN coalesce((it->>'qty')::int,0) ELSE 0 END)::int sold,
          sum(CASE WHEN cancelled_at IS NOT NULL THEN coalesce((it->>'qty')::int,0) ELSE 0 END)::int cancelled
        FROM orders_cache, jsonb_array_elements(items) it
-       WHERE created_at >= $1 AND created_at < $2 AND it->>'title' ILIKE '%communicator%'
+       WHERE created_at >= $1 AND created_at < $2 AND ${COMM}
        GROUP BY 1`, p)).rows;
     const refunded = (await pool.query(
       `SELECT count(DISTINCT shopify_id)::int c FROM orders_cache, jsonb_array_elements(items) it
-       WHERE created_at >= $1 AND created_at < $2 AND it->>'title' ILIKE '%communicator%'
+       WHERE created_at >= $1 AND created_at < $2 AND ${COMM}
          AND financial_status IN ('refunded','partially_refunded')`, p)).rows[0].c;
     // reservation tag on the order = a configured Stripe reservation; no tag = brand-new direct order
     const srcRow = (await pool.query(
@@ -1570,7 +1573,7 @@ app.get('/api/communicator/stats', async (req, res) => {
          SELECT coalesce((it->>'qty')::int,0) q,
            EXISTS (SELECT 1 FROM jsonb_array_elements_text(o.order_tags) t WHERE t ILIKE '%reservation%') res
          FROM orders_cache o, jsonb_array_elements(o.items) it
-         WHERE o.created_at >= $1 AND o.created_at < $2 AND o.cancelled_at IS NULL AND it->>'title' ILIKE '%communicator%'
+         WHERE o.created_at >= $1 AND o.created_at < $2 AND o.cancelled_at IS NULL AND ${COMM}
        ) x`, p)).rows[0];
     const COLORS = { smoke: 'Smoke', onyx: 'Onyx', clover: 'Clover' };
     const byColor = {}, byLayout = {}; let sold = 0, cancelled = 0;
