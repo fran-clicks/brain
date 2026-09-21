@@ -1524,6 +1524,8 @@ app.get('/api/gorgias/cancel-refund', async (req, res) => {
 // The Communicator device on Shopify: one product, 3 colours × 7 keyboard layouts = 21 variants.
 // Accessories (cases etc.) are separate products and are intentionally excluded here.
 const COMMUNICATOR_PRODUCT_ID = '15906286371185';
+// Communicator accessories (cases etc.) — separate products, shown in their own section
+const COMMUNICATOR_ACCESSORY_IDS = ['15906302329201', '15942233817457', '15991068393841', '15924450034033', '15991068655985'];
 app.get('/api/communicator/stats', async (req, res) => {
   try {
     const win = resolveWindow(req.query);
@@ -1587,6 +1589,16 @@ app.get('/api/communicator/stats', async (req, res) => {
       byLayout[layout] = (byLayout[layout] || 0) + r.sold;
     }
     const toArr = o => Object.entries(o).map(([k, c]) => ({ k, c })).sort((a, b) => b.c - a.c);
+    // ---- Accessories (cases etc.) — separate products, grouped by product + variant ----
+    const accRows = (await pool.query(
+      `SELECT it->>'title' title, coalesce(nullif(it->>'variant',''),'—') variant,
+         sum(CASE WHEN cancelled_at IS NULL THEN coalesce((it->>'qty')::int,0) ELSE 0 END)::int sold
+       FROM orders_cache, jsonb_array_elements(items) it
+       WHERE created_at >= $1 AND created_at < $2 AND it->>'product_id' = ANY($3)
+       GROUP BY 1,2
+       HAVING sum(CASE WHEN cancelled_at IS NULL THEN coalesce((it->>'qty')::int,0) ELSE 0 END) > 0
+       ORDER BY 1, 3 DESC`, [...p, COMMUNICATOR_ACCESSORY_IDS])).rows;
+    const accSold = accRows.reduce((n, r) => n + r.sold, 0);
     const cfg = (await getConnector('gorgias'))?.config;
     res.json({
       days: win.days, custom: win.custom, bucket, from: p[0], to: p[1],
@@ -1595,7 +1607,8 @@ app.get('/api/communicator/stats', async (req, res) => {
       categories: cats.rows, resolutions: solved.rows, colours: colours.rows,
       tags: toptags.rows, recent: recent.rows,
       shopify: { sold, cancelled, refunded, reservation_sold: srcRow.reservation_sold, new_sold: srcRow.new_sold,
-        by_color: toArr(byColor), by_layout: toArr(byLayout), has_data: variantRows.length > 0 }
+        by_color: toArr(byColor), by_layout: toArr(byLayout), has_data: variantRows.length > 0 },
+      accessories: { sold: accSold, rows: accRows }
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

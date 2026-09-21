@@ -520,6 +520,10 @@ footer{color:rgba(16,17,20,.45)}
       <table id="commByLayout"><thead><tr><th>Layout</th><th style="text-align:right">Units sold</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
+  <div class="card">
+    <h2>🧩 Accessories <span style="font-weight:400;color:var(--muted);font-size:12px">· cases &amp; add-ons · <span id="commAccTotal"></span></span></h2>
+    <table id="commAcc"><thead><tr><th>Product</th><th>Variant</th><th style="text-align:right">Units sold</th></tr></thead><tbody></tbody></table>
+  </div>
   <h2 style="font-size:16px;margin:20px 0 0">🎧 Support tickets</h2>
   <div class="grid kpis" id="commKpis" style="margin-top:12px"></div>
   <div class="card" style="margin-top:14px">
@@ -3193,6 +3197,12 @@ async function loadCommunicator() {
     const vrows = (arr, empty) => arr.length ? arr.map(x => `<tr><td>${esc(x.k)}</td><td style="text-align:right">${x.c}</td></tr>`).join('') : `<tr><td colspan="2" class="empty">${empty}</td></tr>`;
     document.querySelector('#commByColor tbody').innerHTML = vrows(sh.by_color || [], '—');
     document.querySelector('#commByLayout tbody').innerHTML = vrows(sh.by_layout || [], '—');
+    // accessories
+    const acc = r.accessories || { sold:0, rows:[] };
+    document.getElementById('commAccTotal').textContent = `${acc.sold ?? 0} units sold (${lbl})`;
+    document.querySelector('#commAcc tbody').innerHTML = (acc.rows || []).length
+      ? acc.rows.map(a => `<tr><td>${esc(a.title || '—')}</td><td>${esc(a.variant || '—')}</td><td style="text-align:right">${a.sold}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="empty">No accessory sales in this period (re-sync Shopify if you expect some).</td></tr>';
     // chart
     const days = r.series || [];
     const labels = days.map(d => String(d.d).slice(0,10));
@@ -3820,7 +3830,7 @@ api('/api/auth/me').then(m => {
       const active = (document.querySelector('.section.active')?.id || '').replace('s-', '');
       const reload = {
         fulfillment: loadFulfillment, freight: loadFreight, stock: loadStock,
-        gorgias: loadGorgias, sales: loadShopify, klaviyo: loadKlaviyo, redo: loadRedo,
+        gorgias: loadGorgias, sales: loadShopify, klaviyo: loadKlaviyo, redo: loadRedo, communicator: loadCommunicator,
         kb: () => { loadKbs(); loadKbAudit(); },
         conn: () => { loadConnectorTypes(); loadConnectors(); loadRequests(); }
       };
