@@ -412,6 +412,10 @@ footer{color:rgba(16,17,20,.45)}
     <h2>Recent orders</h2>
     <table id="shopRecent"><thead><tr><th>Order</th><th>Date</th><th>Country</th><th>Total</th><th>Payment</th><th>Fulfillment</th><th>Tags</th></tr></thead><tbody></tbody></table>
   </div>
+  <div class="card" id="shCommSnap">
+    📟 <b>Communicator</b> · <span id="shCommSnapText">…</span>
+    <a href="#" style="float:right;font-weight:600;font-size:13px" onclick="document.querySelector('nav button[data-s=communicator]').click();return false">Full Communicator stats →</a>
+  </div>
 </div>
 
 <!-- GORGIAS -->
@@ -475,6 +479,10 @@ footer{color:rgba(16,17,20,.45)}
   <div class="card">
     <h2>Latest tickets</h2>
     <table id="gRecent"><thead><tr><th>Subject</th><th>Channel</th><th>Status</th><th>Date</th></tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card" id="gCommSnap">
+    📟 <b>Communicator</b> · <span id="gCommSnapText">…</span>
+    <a href="#" style="float:right;font-weight:600;font-size:13px" onclick="document.querySelector('nav button[data-s=communicator]').click();return false">Full Communicator stats →</a>
   </div>
 </div>
 
@@ -2414,6 +2422,7 @@ function fillSelect(id, values) { // preserve current selection, refresh options
 }
 async function loadShopify() {
   const note = document.getElementById('shopNote');
+  commSnapshot();
   document.getElementById('consistencyCard').style.display = window.isAdmin ? 'block' : 'none';
   document.getElementById('shopUpdating').classList.add('on');
   try {
@@ -3053,6 +3062,7 @@ async function loadCancelRefund() {
 }
 async function loadGorgias() {
   loadCancelRefund();
+  commSnapshot();
   const note = document.getElementById('gorgiasNote');
   document.getElementById('gLoading').classList.add('on');
   document.getElementById('gUpdating').classList.add('on');
@@ -3117,6 +3127,21 @@ async function loadGorgias() {
   finally { document.getElementById('gLoading').classList.remove('on'); document.getElementById('gUpdating').classList.remove('on'); }
 }
 
+// compact Communicator snapshot shown on the Gorgias & Shopify tabs (deep detail lives in its own tab)
+async function commSnapshot() {
+  if (!document.getElementById('gCommSnapText') && !document.getElementById('shCommSnapText')) return;
+  try {
+    const r = await api('/api/communicator/stats?days=30');
+    const t = r.totals || {}, sh = r.shopify || {};
+    const g = document.getElementById('gCommSnapText');
+    if (g) g.textContent = `${t.created ?? 0} tickets created (30d) · ${t.open ?? 0} open now · ${t.total ?? 0} tagged all-time`;
+    const s = document.getElementById('shCommSnapText');
+    if (s) s.textContent = `${sh.sold ?? 0} units sold (30d) · ${sh.cancelled ?? 0} cancelled · ${sh.refunded ?? 0} refunded orders`;
+  } catch (e) {
+    const el = document.getElementById('gCommSnapText') || document.getElementById('shCommSnapText');
+    if (el) el.textContent = 'stats unavailable';
+  }
+}
 // ---------- Communicator device (Gorgias tickets tagged Communicator) ----------
 let commDays = 30, commChart;
 document.querySelectorAll('#commPeriods button[data-d]').forEach(b => b.onclick = () => {
