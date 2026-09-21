@@ -491,7 +491,11 @@ footer{color:rgba(16,17,20,.45)}
   <div class="synchead">
     <div>
       <div style="font-size:22px;font-weight:800;letter-spacing:-.01em">📟 Communicator</div>
-      <div style="color:var(--muted);font-size:13px;margin-top:2px">Support stats for tickets tagged <b>Communicator</b>. <span class="updating-pill" id="commUpdating"><div class="spin"></div>Loading…</span></div>
+      <div style="color:var(--muted);font-size:13px;margin-top:2px">Support stats for tickets tagged <b>Communicator</b>, plus Shopify sales by variant. <span class="updating-pill" id="commUpdating"><div class="spin"></div>Loading…</span></div>
+    </div>
+    <div class="right">
+      <span class="updating-pill" id="commSyncPill"><div class="spin"></div>Syncing…</span>
+      <button class="btn" id="commSyncBtn" onclick="syncCommunicator(this)" style="display:none">🔄 Sync Shopify</button>
     </div>
   </div>
   <div class="periods" id="commPeriods">
@@ -3148,7 +3152,17 @@ document.querySelectorAll('#commPeriods button[data-d]').forEach(b => b.onclick 
   document.querySelectorAll('#commPeriods button[data-d]').forEach(x => x.classList.remove('active'));
   b.classList.add('active'); commDays = +b.dataset.d; loadCommunicator();
 });
+async function syncCommunicator(btn) {
+  const pill = document.getElementById('commSyncPill');
+  btn.disabled = true; pill.classList.add('on');
+  try {
+    await api('/api/shopify/sync', { method: 'POST', body: '{}' }); // re-fetches orders incl. line-item variant
+    await loadCommunicator();
+  } catch (e) { document.getElementById('commShopNote').textContent = '⚠️ ' + e.message; }
+  finally { btn.disabled = false; pill.classList.remove('on'); }
+}
 async function loadCommunicator() {
+  document.getElementById('commSyncBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
   document.getElementById('commUpdating').classList.add('on');
   try {
     const r = await api('/api/communicator/stats?days=' + commDays);
@@ -3170,9 +3184,12 @@ async function loadCommunicator() {
       {l:`Cancelled (${lbl})`, v: sh.cancelled ?? 0},
       {l:`Refunded orders (${lbl})`, v: sh.refunded ?? 0}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');
-    document.getElementById('commShopNote').textContent = sh.has_data
-      ? 'Configured Communicator units sold on Shopify, split by variant.'
-      : 'No Communicator orders found on Shopify yet in this period (variant data fills in as the order backfill runs).';
+    const blankVariant = (sh.by_color || []).every(x => x.k === '(unknown)') && (sh.by_layout || []).every(x => x.k === '(unknown)');
+    document.getElementById('commShopNote').textContent = !sh.has_data
+      ? 'No Communicator orders found on Shopify yet in this period.'
+      : blankVariant
+        ? 'Orders found, but variant (colour/layout) isn\'t captured on them yet — click 🔄 Sync Shopify to pull it in (may take a couple of clicks for older orders).'
+        : 'Configured Communicator units sold on Shopify, split by variant.';
     const vrows = (arr, empty) => arr.length ? arr.map(x => `<tr><td>${esc(x.k)}</td><td style="text-align:right">${x.c}</td></tr>`).join('') : `<tr><td colspan="2" class="empty">${empty}</td></tr>`;
     document.querySelector('#commByColor tbody').innerHTML = vrows(sh.by_color || [], '—');
     document.querySelector('#commByLayout tbody').innerHTML = vrows(sh.by_layout || [], '—');
