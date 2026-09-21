@@ -3165,6 +3165,8 @@ async function loadCommunicator() {
     const sh = r.shopify || { sold:0, cancelled:0, refunded:0, by_color:[], by_layout:[], has_data:false };
     document.getElementById('commShopKpis').innerHTML = [
       {l:`Units sold (${lbl})`, v: sh.sold ?? 0},
+      {l:`From reservations (${lbl})`, v: sh.reservation_sold ?? 0},
+      {l:`Brand-new orders (${lbl})`, v: sh.new_sold ?? 0},
       {l:`Cancelled (${lbl})`, v: sh.cancelled ?? 0},
       {l:`Refunded orders (${lbl})`, v: sh.refunded ?? 0}
     ].map(k => `<div class="kpi"><div class="l">${esc(k.l)}</div><div class="v">${esc(k.v)}</div></div>`).join('');

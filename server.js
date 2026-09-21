@@ -1562,6 +1562,16 @@ app.get('/api/communicator/stats', async (req, res) => {
       `SELECT count(DISTINCT shopify_id)::int c FROM orders_cache, jsonb_array_elements(items) it
        WHERE created_at >= $1 AND created_at < $2 AND it->>'title' ILIKE '%communicator%'
          AND financial_status IN ('refunded','partially_refunded')`, p)).rows[0].c;
+    // reservation tag on the order = a configured Stripe reservation; no tag = brand-new direct order
+    const srcRow = (await pool.query(
+      `SELECT coalesce(sum(CASE WHEN res THEN q ELSE 0 END),0)::int reservation_sold,
+              coalesce(sum(CASE WHEN NOT res THEN q ELSE 0 END),0)::int new_sold
+       FROM (
+         SELECT coalesce((it->>'qty')::int,0) q,
+           EXISTS (SELECT 1 FROM jsonb_array_elements_text(o.order_tags) t WHERE t ILIKE '%reservation%') res
+         FROM orders_cache o, jsonb_array_elements(o.items) it
+         WHERE o.created_at >= $1 AND o.created_at < $2 AND o.cancelled_at IS NULL AND it->>'title' ILIKE '%communicator%'
+       ) x`, p)).rows[0];
     const COLORS = { smoke: 'Smoke', onyx: 'Onyx', clover: 'Clover' };
     const byColor = {}, byLayout = {}; let sold = 0, cancelled = 0;
     for (const r of variantRows) {
@@ -1580,7 +1590,8 @@ app.get('/api/communicator/stats', async (req, res) => {
       totals: totals.rows[0], series: series.rows,
       categories: cats.rows, resolutions: solved.rows, colours: colours.rows,
       tags: toptags.rows, recent: recent.rows,
-      shopify: { sold, cancelled, refunded, by_color: toArr(byColor), by_layout: toArr(byLayout), has_data: variantRows.length > 0 }
+      shopify: { sold, cancelled, refunded, reservation_sold: srcRow.reservation_sold, new_sold: srcRow.new_sold,
+        by_color: toArr(byColor), by_layout: toArr(byLayout), has_data: variantRows.length > 0 }
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
