@@ -3582,12 +3582,13 @@ async function overviewStats(win) {
     `SELECT date_trunc('${bucket}', ${col})::date d, t.tag, count(*)::int c
      FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
      WHERE ${col} >= $1 AND ${col} < $2 AND NOT spam ${extra} GROUP BY 1, 2 ORDER BY 1, 3 DESC`;
-  // "tickets to solve" = open backlog at the END of each bucket: created by then and not yet closed by then
+  // "tickets to solve" = open backlog at the END of each bucket. Open-at-X = (created before X) − (closed
+  // before X), which are two index-friendly range counts (idx_tc_created / idx_tc_closed) instead of the
+  // old correlated scan with an un-indexable OR. Equivalent result, far cheaper.
   const backlogQuery =
     `SELECT to_char(g.b::date,'YYYY-MM-DD') d,
-       (SELECT count(*)::int FROM tickets_cache t
-        WHERE NOT t.spam AND t.created_datetime < g.b + interval '1 ${bucket}'
-          AND (t.closed_datetime IS NULL OR t.closed_datetime >= g.b + interval '1 ${bucket}')) c
+       ((SELECT count(*)::int FROM tickets_cache t WHERE NOT t.spam AND t.created_datetime < g.b + interval '1 ${bucket}')
+      - (SELECT count(*)::int FROM tickets_cache t WHERE NOT t.spam AND t.closed_datetime < g.b + interval '1 ${bucket}')) c
      FROM generate_series(date_trunc('${bucket}', $1::timestamptz), date_trunc('${bucket}', $2::timestamptz), interval '1 ${bucket}') g(b)
      ORDER BY 1`;
   // Per-bucket category & tag breakdowns feed the daily hover tooltip and each scans every ticket
