@@ -1536,10 +1536,15 @@ app.get('/api/gorgias/cancel-refund', async (req, res) => {
 });
 
 // ---------- Communicator device (Gorgias tickets tagged "Communicator") ----------
-// The Communicator device on Shopify: one product, 3 colours × 7 keyboard layouts = 21 variants.
-// Accessories (cases etc.) are separate products and are intentionally excluded here.
+// ╔═══════════════════════════════════════════════════════════════════════════════════╗
+// ║ CONFIG — Communicator Shopify product IDs (used by the Communicator tab's sales stats) ║
+// ║ ⚠️ If a product is DELETED & recreated in Shopify it gets a NEW id and silently drops  ║
+// ║    out of these numbers. When that happens, update the id(s) below. Find a product's  ║
+// ║    id in its Shopify admin URL: …/products/<THIS NUMBER>.                              ║
+// ╚═══════════════════════════════════════════════════════════════════════════════════╝
+// The Communicator device: one product, 3 colours (Smoke/Onyx/Clover) × 7 keyboard layouts = 21 variants.
 const COMMUNICATOR_PRODUCT_ID = '15906286371185';
-// Communicator accessories (cases etc.) — separate products, shown in their own section
+// Communicator accessories (cases etc.) — separate products, shown in the tab's own "Accessories" section.
 const COMMUNICATOR_ACCESSORY_IDS = ['15906302329201', '15942233817457', '15991068393841', '15924450034033', '15991068655985'];
 app.get('/api/communicator/stats', async (req, res) => {
   try {
