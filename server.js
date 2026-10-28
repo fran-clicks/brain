@@ -54,6 +54,21 @@ app.use(express.static(path.join(__dirname, 'public'), {
   }
 }));
 
+// error hygiene for generic server failures: log full detail server-side, but hide DB/driver
+// internals (schema, SQL, connection strings) from the client while keeping operational signals
+// (timeouts, network, our own thrown messages) that are useful and safe to show.
+function clientError(e) {
+  const m = String(e?.message || 'error');
+  if (/relation "|column "|syntax error|does not exist|violates .*constraint|duplicate key|invalid input syntax|at character \d|password=|postgres(?:ql)?:\/\//i.test(m)) {
+    return 'Something went wrong on our side. Please try again.';
+  }
+  return m.slice(0, 200);
+}
+function send500(res, e, status = 500) {
+  console.error(`[${status}]`, e?.stack || e?.message || e);
+  res.status(status).json({ error: clientError(e) });
+}
+
 const ALLOWED_USERS = ['fran@clicks.tech', 'kp@clicks.tech'];
 const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 64).toString('hex');
 
@@ -1027,7 +1042,7 @@ app.get('/api/kb/search', async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.json([]);
   try { res.json(await kbSearch(q)); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  catch (e) { send500(res, e); }
 });
 
 app.get('/api/kb/:id/pages', async (req, res) => {
@@ -1191,7 +1206,7 @@ Order by severity. If everything is genuinely fine, return [].`;
     await pool.query(`INSERT INTO sync_state (k, v) VALUES ('kb_audit', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
       [JSON.stringify(record)]);
     res.json(record);
-  } catch (e) { res.status(502).json({ error: e.message }); }
+  } catch (e) { send500(res, e, 502); }
 });
 app.get('/api/kb/audit', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
@@ -1477,7 +1492,7 @@ app.post('/api/gorgias/sync', async (_req, res) => {
     const r = await syncGorgias(50);
     const open = await refreshOpenTickets(); // re-verify open set right away
     res.json({ ...r, open_refresh: open });
-  } catch (e) { res.status(502).json({ error: e.message }); }
+  } catch (e) { send500(res, e, 502); }
 });
 // admin debug: dump a recent ticket's raw shape so we can locate custom fields (Model, Colour, etc.)
 app.get('/api/gorgias/debug', async (req, res) => {
@@ -1495,7 +1510,7 @@ app.get('/api/gorgias/debug', async (req, res) => {
     try { customFieldDefs = await gorgiasRequest(cfg, `/api/custom-fields?limit=30`); } catch (e) { customFieldDefs = { error: e.message }; }
     try { if (sample[0]) ticketFieldVals = await gorgiasRequest(cfg, `/api/tickets/${sample[0].id}/custom-fields`); } catch (e) { ticketFieldVals = { error: e.message }; }
     res.json({ ticket_top_level_keys: keys, sample_tickets: sample, custom_field_defs: customFieldDefs, ticket_field_values: ticketFieldVals });
-  } catch (e) { res.status(502).json({ error: e.message }); }
+  } catch (e) { send500(res, e, 502); }
 });
 
 // short-lived cache for heavy read aggregates (keyed by endpoint + query); cuts repeat DB load
@@ -1532,7 +1547,7 @@ app.get('/api/gorgias/cancel-refund', async (req, res) => {
     return { days: win.days, custom: win.custom, from: p[0], to: p[1], cancel, refund };
     });
     res.json(out);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { send500(res, e); }
 });
 
 // ---------- Communicator device (Gorgias tickets tagged "Communicator") ----------
@@ -1633,7 +1648,7 @@ app.get('/api/communicator/stats', async (req, res) => {
     };
     });
     res.json(out);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { send500(res, e); }
 });
 
 // ---------- Redo (returns) ----------
@@ -1872,11 +1887,11 @@ app.get('/api/redo/summary', async (_req, res) => {
     res.json({ configured: true, totals_30d: tot.rows[0], top_reasons: reasons.rows, open_by_status: statuses.rows,
       recent: recent.rows, leakage, defects, reason_by_product: (typeof reasonByProduct !== 'undefined' ? reasonByProduct : null),
       currency, extra_error: extraError, sync: ss });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { send500(res, e); }
 });
 app.post('/api/redo/sync', async (_req, res) => {
   try { res.json(await syncRedo(20)); }
-  catch (e) { res.status(502).json({ error: e.message }); }
+  catch (e) { send500(res, e, 502); }
 });
 
 // ---------- Klaviyo (campaigns + attribution) ----------
@@ -2135,11 +2150,11 @@ app.get('/api/klaviyo/debug', async (req, res) => {
       out.blank_now_filled = blank.map(c => ({ name: c.name, campaign_in_report: !!byCampaign[c.klaviyo_id] }));
     } catch (e) { out.error = String(e.message); }
     res.json(out);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { send500(res, e); }
 });
 app.post('/api/klaviyo/sync', async (_req, res) => {
   try { const r = await syncKlaviyo(); res.json(r); notifyNewCampaigns(); }
-  catch (e) { res.status(502).json({ error: e.message }); }
+  catch (e) { send500(res, e, 502); }
 });
 
 // ---------- UK stock (simple keyed JSON API) ----------
@@ -2241,7 +2256,7 @@ app.get('/api/stock', async (_req, res) => {
 app.post('/api/stock/sync', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   try { res.json(await syncUkStock()); }
-  catch (e) { res.status(502).json({ error: e.message }); }
+  catch (e) { send500(res, e, 502); }
 });
 
 // ---------- UK stock management (clicks-brain is the source of truth; admins only) ----------
@@ -2474,7 +2489,7 @@ app.get('/api/shipbob/summary', async (_req, res) => {
 app.post('/api/shipbob/sync', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   try { res.json(await syncShipbob()); }
-  catch (e) { res.status(502).json({ error: e.message }); }
+  catch (e) { send500(res, e, 502); }
 });
 
 // ---------- Shopify ↔ ShipBob order consistency analyzer ----------
@@ -2557,7 +2572,7 @@ app.get('/api/consistency/orders', async (req, res) => {
       shipbob_orders_scanned: sbOrders.length, flagged };
     consistencyCache = { t: Date.now(), v };
     res.json(v);
-  } catch (e) { res.status(502).json({ error: e.message }); }
+  } catch (e) { send500(res, e, 502); }
 });
 // admin: remove a reviewed order from the check so it stops being listed
 app.post('/api/consistency/dismiss', async (req, res) => {
@@ -2581,7 +2596,7 @@ app.post('/api/consistency/refresh', async (req, res) => {
     const r = await refreshConsistency(conn.config, since);
     consistencyCache = null;
     res.json(r);
-  } catch (e) { res.status(502).json({ error: e.message }); }
+  } catch (e) { send500(res, e, 502); }
 });
 
 // ---------- Floship (3PL, shape unknown until we probe the live API) ----------
@@ -2714,7 +2729,7 @@ app.get('/api/floship/summary', async (_req, res) => {
 app.post('/api/floship/sync', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   try { res.json(await syncFloship()); }
-  catch (e) { res.status(502).json({ error: e.message }); }
+  catch (e) { send500(res, e, 502); }
 });
 
 // ---------- Freight tracker (shipment builder: fields, items, documents, configurable stage stepper) ----------
@@ -2991,7 +3006,7 @@ app.get('/api/quality/variants', async (req, res) => {
         returnRate, refundRate, cancelRate, score, reasons: (reasonM[sku] || []).sort((a, b) => b.c - a.c).slice(0, 4) };
     }).filter(r => r.score > 0).sort((a, b) => b.score - a.score);
     res.json({ window: win, min_sold: MIN_SOLD, rows });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { send500(res, e); }
 });
 
 // normalise any product name OR Gorgias model value to one canonical model label so the two data
@@ -3067,7 +3082,7 @@ app.get('/api/quality/models', async (req, res) => {
       problems: m.cancels + m.refunds + m.returns + m.cancel_t + m.defect_t + m.warranty_t
     })).sort((a, b) => b.problems - a.problems);
     res.json({ window: win, rows });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { send500(res, e); }
 });
 
 // product cancellation explorer: cancelled units + reasons per product; ?sku= drills into one product
@@ -3109,7 +3124,7 @@ app.get('/api/shopify/cancellations', async (req, res) => {
     const names = await resolveNames(products.rows.map(r => r.sku));
     const rows = products.rows.map(r => ({ sku: r.sku, name: names[r.sku] || r.title || r.sku, units: r.units, orders: r.orders }));
     res.json({ window: win, admin_base: adminBase, rows, reasons: reasons.rows });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { send500(res, e); }
 });
 
 // import a spreadsheet (CSV): rows = products, columns = inventory sources. ShipBob/Floship columns are ignored (API is source of truth).
@@ -3510,7 +3525,7 @@ app.get('/api/shopify/summary', async (_req, res) => {
         countries: optCountries.rows.map(r => r.country),
         tags: optTags.rows.map(r => r.tag),
         products: optProducts.rows.map(r => ({ product: r.product, sku: r.sku })) } });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { send500(res, e); }
 });
 
 // Fulfillments keyed to the ACTUAL fulfillment date (fulfilled_at), not order creation.
@@ -3553,7 +3568,7 @@ app.get('/api/shopify/fulfillments', async (req, res) => {
        WHERE ${cond.join(' AND ')}
        GROUP BY 1 ORDER BY 1 DESC`, p)).rows;
     res.json({ days, admin_base: adminBase, backfill_done: backfillDone, by_day: byDay });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { send500(res, e); }
 });
 
 app.post('/api/shopify/sync', async (_req, res) => {
@@ -3561,7 +3576,7 @@ app.post('/api/shopify/sync', async (_req, res) => {
     const r = await syncShopify(30);
     syncShopifyProducts().catch(e => console.error('product resync:', e.message)); // refresh titles/variants in background
     res.json(r);
-  } catch (e) { res.status(502).json({ error: e.message }); }
+  } catch (e) { send500(res, e, 502); }
 });
 
 // ---------- overview stats (from local cache → any period) ----------
@@ -3712,7 +3727,7 @@ app.get('/api/stats/overview', async (req, res) => {
       if (hit) return res.json({ ...hit.v, stale: true });
       throw e;
     }
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { send500(res, e); }
 });
 
 // ---------- impact analyzer: how a metric moved around an event ----------
@@ -3745,7 +3760,7 @@ app.get('/api/impact/events', async (_req, res) => {
       `SELECT id, title, to_char(event_date,'YYYY-MM-DD') d FROM events ORDER BY event_date DESC LIMIT 300`)).rows
       .map(e => ({ id: 'ev' + e.id, label: e.title, date: e.d, kind: 'event', sub: 'team event' }));
     res.json([...cmps, ...evs].sort((a, b) => a.date < b.date ? 1 : -1));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { send500(res, e); }
 });
 app.get('/api/impact', async (req, res) => {
   try {
@@ -3781,7 +3796,7 @@ app.get('/api/impact', async (req, res) => {
       vs_prev_week_pct: prevWeek > 0 ? Math.round((after - prevWeek) / prevWeek * 1000) / 10 : null,
       series, confounders
     });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { send500(res, e); }
 });
 
 // Gorgias tab: synced-cache stats always; live extras (CSAT, FRT, all-time total) when the connector is available
@@ -4376,7 +4391,7 @@ app.post('/api/klaviyo/test-notify', async (req, res) => {
   const channel = (conn.config.alert_channel || '#clicksbrain').trim();
   const appUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || 'https://clicks-brain.onrender.com').replace(/\/$/, '');
   try { await postCampaignAlert(conn, channel, appUrl, c); res.json({ ok: true, name: c.name }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  catch (e) { send500(res, e); }
 });
 
 // ---------- daily report (Slack, 18:00 Europe/London) ----------
@@ -4488,7 +4503,7 @@ app.post('/api/report/daily', async (req, res) => {
   const ok = (process.env.REPORT_TOKEN && token === process.env.REPORT_TOKEN) || (await isAdminReq(req));
   if (!ok) return res.status(403).json({ error: 'forbidden' });
   try { await postDailyReport(); res.json({ ok: true }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  catch (e) { send500(res, e); }
 });
 // in-app scheduler: post once when the Europe/London clock reaches 18:00 (reliable on an always-on plan)
 let lastReportDay = null;
