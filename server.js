@@ -1498,11 +1498,21 @@ app.get('/api/gorgias/debug', async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 
+// short-lived cache for heavy read aggregates (keyed by endpoint + query); cuts repeat DB load
+const aggCache = new Map();
+async function aggCached(key, ttlMs, producer) {
+  const h = aggCache.get(key);
+  if (h && Date.now() - h.t < ttlMs) return h.v;
+  const v = await producer();
+  aggCache.set(key, { t: Date.now(), v });
+  return v;
+}
 // cancellation & refund ticket tracker (from Gorgias custom fields), with timeframe + field-capture + resolution
 app.get('/api/gorgias/cancel-refund', async (req, res) => {
   try {
     const win = resolveWindow(req.query);
     const p = [win.start.toISOString(), win.end.toISOString()];
+    const out = await aggCached('cr|' + JSON.stringify(req.query), 120000, async () => {
     const captured = c => `count(*) FILTER (WHERE ${c} <> '' AND ${c} !~* 'other')::int`;
     const group = async (matchSql) => {
       const base = `FROM tickets_cache WHERE NOT spam AND created_datetime >= $1 AND created_datetime < $2 AND (${matchSql})`;
@@ -1519,7 +1529,9 @@ app.get('/api/gorgias/cancel-refund', async (req, res) => {
     // Category encodes the intent; AI Intent is the fallback signal
     const cancel = await group(`cf_category ILIKE '%cancellation%' OR cf_ai_intent ILIKE 'Order::Cancel%'`);
     const refund = await group(`cf_category ILIKE '%refund%' OR cf_ai_intent ILIKE 'Order::Refund%'`);
-    res.json({ days: win.days, custom: win.custom, from: p[0], to: p[1], cancel, refund });
+    return { days: win.days, custom: win.custom, from: p[0], to: p[1], cancel, refund };
+    });
+    res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1531,6 +1543,7 @@ const COMMUNICATOR_PRODUCT_ID = '15906286371185';
 const COMMUNICATOR_ACCESSORY_IDS = ['15906302329201', '15942233817457', '15991068393841', '15924450034033', '15991068655985'];
 app.get('/api/communicator/stats', async (req, res) => {
   try {
+    const out = await aggCached('comm|' + JSON.stringify(req.query), 120000, async () => {
     const win = resolveWindow(req.query);
     const p = [win.start.toISOString(), win.end.toISOString()];
     const bucket = win.bucket;
@@ -1603,7 +1616,7 @@ app.get('/api/communicator/stats', async (req, res) => {
        ORDER BY 1, 3 DESC`, [...p, COMMUNICATOR_ACCESSORY_IDS])).rows;
     const accSold = accRows.reduce((n, r) => n + r.sold, 0);
     const cfg = (await getConnector('gorgias'))?.config;
-    res.json({
+    return {
       days: win.days, custom: win.custom, bucket, from: p[0], to: p[1],
       gorgias_domain: cfg?.domain || process.env.GORGIAS_DOMAIN || null,
       totals: totals.rows[0], series: series.rows,
@@ -1612,7 +1625,9 @@ app.get('/api/communicator/stats', async (req, res) => {
       shopify: { sold, cancelled, refunded, reservation_sold: srcRow.reservation_sold, new_sold: srcRow.new_sold,
         by_color: toArr(byColor), by_layout: toArr(byLayout), has_data: variantRows.length > 0 },
       accessories: { sold: accSold, rows: accRows }
+    };
     });
+    res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
