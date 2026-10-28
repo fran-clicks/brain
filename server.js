@@ -347,6 +347,9 @@ async function initDb() {
     ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS custom_fields JSONB DEFAULT '{}';
     CREATE INDEX IF NOT EXISTS idx_tc_created ON tickets_cache (created_datetime);
     CREATE INDEX IF NOT EXISTS idx_tc_closed ON tickets_cache (closed_datetime);
+    -- partial indexes (exclude spam) so the Overview backlog counts stay fast under load / during big backfills
+    CREATE INDEX IF NOT EXISTS idx_tc_created_live ON tickets_cache (created_datetime) WHERE NOT spam;
+    CREATE INDEX IF NOT EXISTS idx_tc_closed_live ON tickets_cache (closed_datetime) WHERE NOT spam;
     CREATE TABLE IF NOT EXISTS events (
       id SERIAL PRIMARY KEY, title TEXT NOT NULL, description TEXT DEFAULT '',
       event_date DATE NOT NULL, added_by TEXT DEFAULT 'anonymous',
@@ -3673,9 +3676,15 @@ app.get('/api/stats/overview', async (req, res) => {
     const key = win.custom ? `${req.query.from}|${req.query.to}` : `d${win.days}`;
     const hit = overviewCache.get(key);
     if (hit && Date.now() - hit.t < 5 * 60 * 1000) return res.json(hit.v); // cleared early whenever a sync lands
-    const v = await overviewStats(win);
-    overviewCache.set(key, { t: Date.now(), v });
-    res.json(v);
+    try {
+      const v = await overviewStats(win);
+      overviewCache.set(key, { t: Date.now(), v });
+      res.json(v);
+    } catch (e) {
+      // DB busy (e.g. a big backfill) → serve last-good data if we have any, rather than erroring the graph
+      if (hit) return res.json({ ...hit.v, stale: true });
+      throw e;
+    }
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
