@@ -1,4 +1,24 @@
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// ---------- toast notifications (one consistent, dismissible banner for failures & confirmations) ----------
+function toast(msg, kind = 'err', ms) {
+  const wrap = document.getElementById('toasts');
+  if (!wrap) return;
+  const icon = kind === 'ok' ? '✅' : kind === 'info' ? 'ℹ️' : '⚠️';
+  const el = document.createElement('div');
+  el.className = 'toast ' + kind;
+  el.innerHTML = `<span>${icon}</span><span>${esc(msg)}</span><span class="x" title="Dismiss">✕</span>`;
+  el.querySelector('.x').onclick = () => el.remove();
+  wrap.appendChild(el);
+  const life = ms ?? (kind === 'err' ? 9000 : 4500);
+  if (life) setTimeout(() => el.remove(), life);
+  return el;
+}
+// catch the silent ones: uncaught errors and unhandled promise rejections become a visible toast
+window.addEventListener('unhandledrejection', e => {
+  const m = e?.reason?.message || String(e?.reason || 'Something went wrong');
+  if (!/not signed in|abort/i.test(m)) toast(m);
+});
+window.addEventListener('error', e => { if (e?.message) toast(e.message); });
 // money formatter: currency symbol + amount (falls back to $/USD if unknown)
 const CCY_SYM = { USD:'$', GBP:'£', EUR:'€', AUD:'A$', CAD:'C$', NZD:'NZ$', JPY:'¥' };
 const money = (v, ccy) => `${CCY_SYM[ccy] || (ccy ? ccy + ' ' : '$')}${Number(v || 0).toLocaleString()}`;
@@ -157,7 +177,7 @@ async function loadManualSources() {
 async function clearSource(src) {
   if (!confirm(`Remove all imported data for "${src}"?`)) return;
   try { await api('/api/inventory/clear-source', {method:'POST', body: JSON.stringify({ source: src })}); loadManualSources(); loadFulfillmentGrid(); }
-  catch (e) { alert(e.message); }
+  catch (e) { toast(e.message); }
 }
 function toggleSrc(p) {
   const body = document.getElementById(p + 'Body'), chev = document.getElementById(p + 'Chev');
@@ -631,7 +651,7 @@ document.querySelectorAll('#periods button[data-d]').forEach(b => b.onclick = ()
 });
 function applyOvCustom() {
   const from = document.getElementById('ovFrom').value, to = document.getElementById('ovTo').value;
-  if (!from || !to || from >= to) { alert('Pick a valid start and end date.'); return; }
+  if (!from || !to || from >= to) { toast('Pick a valid start and end date.'); return; }
   curCustom = { from, to: to + 'T23:59:59' };
   document.querySelectorAll('#periods button[data-d]').forEach(x => x.classList.remove('active'));
   document.querySelector('#periods button[data-d="custom"]').classList.add('active');
@@ -1181,7 +1201,7 @@ async function delEvent(id, title) {
     loadEvents();
     ovCache.clear(); loadOverview();
     impEventsLoaded = false; loadImpactEvents();
-  } catch (e) { alert(e.message); }
+  } catch (e) { toast(e.message); }
 }
 async function loadEvents() {
   const evts = await api('/api/events');
@@ -1303,7 +1323,7 @@ async function dismissOrder(orderNumber) {
   try {
     await api('/api/consistency/dismiss', { method: 'POST', body: JSON.stringify({ order_number: orderNumber }) });
     if (row) row.remove();
-  } catch (e) { alert(e.message); }
+  } catch (e) { toast(e.message); }
 }
 async function deepSyncOrders() {
   const btn = document.getElementById('consDeepBtn'), sum = document.getElementById('consSummary');
@@ -1878,7 +1898,7 @@ async function openMail(id) {
         : 'Body not available — check the API key has the "templates: read" scope, then Sync now.';
     }
     document.getElementById('mailModal').style.display = 'block';
-  } catch (e) { alert(e.message); }
+  } catch (e) { toast(e.message); }
 }
 function closeMail() { document.getElementById('mailModal').style.display = 'none'; }
 document.getElementById('mailModal').addEventListener('click', (e) => { if (e.target.id === 'mailModal') closeMail(); });
@@ -1928,7 +1948,7 @@ document.querySelectorAll('#gPeriods button[data-d]').forEach(b => b.onclick = (
 });
 function applyGCustom() {
   const from = document.getElementById('gFrom').value, to = document.getElementById('gTo').value;
-  if (!from || !to || from >= to) { alert('Pick a valid start and end date.'); return; }
+  if (!from || !to || from >= to) { toast('Pick a valid start and end date.'); return; }
   gCustom = { from, to: to + 'T23:59:59' };
   document.querySelectorAll('#gPeriods button[data-d]').forEach(x => x.classList.remove('active'));
   document.querySelector('#gPeriods button[data-d="custom"]').classList.add('active');
@@ -2262,7 +2282,7 @@ async function loadKbSubmissions() {
 }
 async function decideSubmission(id, decision) {
   try { await api(`/api/kb/submission/${id}/decision`, {method:'POST', body: JSON.stringify({ decision })}); loadKbs(); }
-  catch (e) { alert(e.message); }
+  catch (e) { toast(e.message); }
 }
 async function openSource(id) {
   const p = await api('/api/kb/pages/' + id);
@@ -2302,7 +2322,7 @@ async function kbSavePage() {
 async function kbDeleteSource() {
   if (!curSource || !confirm('Delete this source? It will no longer be used by Ask the Brain.')) return;
   try { await api('/api/kb/pages/' + curSource.id + '/delete', {method:'POST', body:'{}'}); document.getElementById('kbDetail').style.display = 'none'; loadKbs(); }
-  catch (e) { alert(e.message); }
+  catch (e) { toast(e.message); }
 }
 async function kbDeleteRow(id, title) {
   if (!confirm(`Delete “${title}”? It will no longer be used by Ask the Brain.`)) return;
@@ -2310,7 +2330,7 @@ async function kbDeleteRow(id, title) {
     await api('/api/kb/pages/' + id + '/delete', {method:'POST', body:'{}'});
     if (curSource && curSource.id === id) document.getElementById('kbDetail').style.display = 'none';
     loadKbs();
-  } catch (e) { alert(e.message); }
+  } catch (e) { toast(e.message); }
 }
 async function kbDoSearch() {
   const q = document.getElementById('kbQ').value.trim();
@@ -2354,7 +2374,7 @@ async function runKbAudit() {
 }
 async function decideKb(id, decision) {
   try { await api(`/api/kb/${id}/decision`, {method:'POST', body: JSON.stringify({ decision })}); loadKbs(); loadBadges(); }
-  catch (e) { alert(e.message); }
+  catch (e) { toast(e.message); }
 }
 async function addKb() {
   const el = id => document.getElementById(id);
@@ -2547,7 +2567,7 @@ async function loadMembers() {
 }
 async function toggleShipping(email, on) {
   try { await api('/api/users/shipping', {method:'POST', body: JSON.stringify({ email, shipping: on })}); loadMembers(); }
-  catch (e) { alert(e.message); }
+  catch (e) { toast(e.message); }
 }
 async function removeUser(email) {
   if (!confirm(`Remove ${email}? Their account and password are deleted. You can re-add them to send a fresh invite.`)) return;

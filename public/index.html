@@ -62,6 +62,14 @@ footer{font-size:11px;color:var(--muted);text-align:center;margin-top:8px}
 .evt .m{font-size:12px;color:var(--muted)}
 a{color:var(--accent)}
 #aiFab{position:fixed;right:20px;bottom:20px;width:52px;height:52px;border-radius:50%;border:none;background:var(--accent);font-size:24px;cursor:pointer;box-shadow:0 4px 14px rgba(79,70,229,.4);z-index:50}
+#toasts{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:90;display:flex;flex-direction:column;gap:8px;width:min(520px,92vw);pointer-events:none}
+.toast{pointer-events:auto;display:flex;align-items:flex-start;gap:10px;padding:11px 14px;border-radius:12px;font-size:13px;line-height:1.45;box-shadow:0 8px 28px rgba(16,17,20,.18);border:1px solid;animation:toastIn .18s ease-out}
+.toast .x{margin-left:auto;cursor:pointer;opacity:.6;font-weight:700;padding:0 2px}
+.toast .x:hover{opacity:1}
+.toast.err{background:#fef2f2;border-color:#fecaca;color:#991b1b}
+.toast.ok{background:#ecfdf5;border-color:#a7f3d0;color:#065f46}
+.toast.info{background:#eff6ff;border-color:#bfdbfe;color:#1e40af}
+@keyframes toastIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
 #aiPanel{display:none;position:fixed;right:20px;bottom:84px;width:min(380px,90vw);height:480px;background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.15);z-index:50;flex-direction:column;overflow:hidden}
 #aiPanel.open{display:flex}
 #aiHead{background:var(--accent);color:#fff;padding:10px 14px;font-weight:600;font-size:13px;display:flex;justify-content:space-between}
@@ -1095,6 +1103,7 @@ footer{color:rgba(16,17,20,.45)}
 <div id="evtTip" style="display:none;position:fixed;z-index:60;max-width:260px;font-size:12px;line-height:1.5;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);border:1px solid rgba(16,17,20,.12);border-radius:10px;padding:10px 12px;box-shadow:0 8px 28px rgba(16,17,20,.18);pointer-events:none"></div>
 <div id="evtPop" style="display:none;position:fixed;z-index:61;width:300px;max-height:60vh;overflow-y:auto;font-size:12px;line-height:1.5;background:rgba(255,255,255,.97);backdrop-filter:blur(12px);border:1px solid rgba(16,17,20,.14);border-radius:12px;padding:12px 14px;box-shadow:0 12px 40px rgba(16,17,20,.22)"></div>
 
+<div id="toasts"></div>
 <button id="aiFab" title="Ask the brain">🧠</button>
 <div id="aiPanel">
   <div id="aiHead">clicks brain assistant <span id="aiClose">✕</span></div>
