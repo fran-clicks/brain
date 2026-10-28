@@ -3585,15 +3585,22 @@ async function overviewStats(win) {
     `SELECT date_trunc('${bucket}', ${col})::date d, t.tag, count(*)::int c
      FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
      WHERE ${col} >= $1 AND ${col} < $2 AND NOT spam ${extra} GROUP BY 1, 2 ORDER BY 1, 3 DESC`;
-  // "tickets to solve" = open backlog at the END of each bucket. Open-at-X = (created before X) − (closed
-  // before X), which are two index-friendly range counts (idx_tc_created / idx_tc_closed) instead of the
-  // old correlated scan with an un-indexable OR. Equivalent result, far cheaper.
+  // "tickets to solve" = open backlog at the END of each bucket. Computed in ONE query: an opening balance
+  // (tickets open at the window start = created-before − closed-before, two fast indexed counts) plus a
+  // running cumulative of per-bucket created minus closed within the window. Avoids the old per-bucket
+  // full-table counts that timed out on wide/weekly ranges.
   const backlogQuery =
-    `SELECT to_char(g.b::date,'YYYY-MM-DD') d,
-       ((SELECT count(*)::int FROM tickets_cache t WHERE NOT t.spam AND t.created_datetime < g.b + interval '1 ${bucket}')
-      - (SELECT count(*)::int FROM tickets_cache t WHERE NOT t.spam AND t.closed_datetime < g.b + interval '1 ${bucket}')) c
-     FROM generate_series(date_trunc('${bucket}', $1::timestamptz), date_trunc('${bucket}', $2::timestamptz), interval '1 ${bucket}') g(b)
-     ORDER BY 1`;
+    `WITH b AS (SELECT generate_series(date_trunc('${bucket}',$1::timestamptz), date_trunc('${bucket}',$2::timestamptz), interval '1 ${bucket}') bk),
+     cr AS (SELECT date_trunc('${bucket}',created_datetime) bk, count(*)::int c FROM tickets_cache
+            WHERE NOT spam AND created_datetime >= $1 AND created_datetime < $2 GROUP BY 1),
+     cl AS (SELECT date_trunc('${bucket}',closed_datetime) bk, count(*)::int c FROM tickets_cache
+            WHERE NOT spam AND closed_datetime >= $1 AND closed_datetime < $2 GROUP BY 1),
+     open0 AS (SELECT (SELECT count(*) FROM tickets_cache WHERE NOT spam AND created_datetime < $1)
+                    - (SELECT count(*) FROM tickets_cache WHERE NOT spam AND closed_datetime < $1) v)
+     SELECT to_char(b.bk::date,'YYYY-MM-DD') d,
+       ((SELECT v FROM open0) + sum(coalesce(cr.c,0)) OVER (ORDER BY b.bk) - sum(coalesce(cl.c,0)) OVER (ORDER BY b.bk))::int c
+     FROM b LEFT JOIN cr ON cr.bk=b.bk LEFT JOIN cl ON cl.bk=b.bk
+     ORDER BY b.bk`;
   // Per-bucket category & tag breakdowns feed the daily hover tooltip and each scans every ticket
   // in the window (the tag ones unnest JSON) — that cost scales with window width and is what made
   // the wide/weekly views (90/180/365d) time out. They add little on a weekly chart, so skip them
