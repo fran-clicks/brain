@@ -54,6 +54,7 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   if (s === 'fulfillment') loadFulfillment();
   if (s === 'freight') loadFreight();
   if (s === 'communicator') loadCommunicator();
+  if (s === 'repairs') loadRepairs();
   if (s === 'conn') { loadConnectorTypes(); loadConnectors(); loadRequests(); loadMembers(); loadHealth(); }
   try { history.replaceState(null, '', '#' + s); } catch (e) {}
 });
@@ -2064,6 +2065,63 @@ async function commSnapshot() {
     const el = document.getElementById('gCommSnapText') || document.getElementById('shCommSnapText');
     if (el) el.textContent = 'stats unavailable';
   }
+}
+// ---------- Repairs (Gorgias tickets tagged "repair") ----------
+let repDays = 365, repData = [], repGorgiasDomain = null;
+document.querySelectorAll('#repPeriods button[data-d]').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#repPeriods button[data-d]').forEach(x => x.classList.remove('active'));
+  b.classList.add('active'); repDays = +b.dataset.d; loadRepairs();
+});
+document.getElementById('repSearch').oninput = renderRepairs;
+async function loadRepairs() {
+  document.getElementById('repUpdating').classList.add('on');
+  try {
+    const r = await api('/api/repairs?days=' + repDays);
+    repData = r.tickets || []; repGorgiasDomain = r.gorgias_domain;
+    renderRepairs();
+    document.getElementById('repNote').textContent = `${repData.length} repair ticket${repData.length === 1 ? '' : 's'} in range.`;
+  } catch (e) { document.getElementById('repNote').textContent = '⚠️ ' + e.message; }
+  finally { document.getElementById('repUpdating').classList.remove('on'); }
+}
+function renderRepairs() {
+  const q = (document.getElementById('repSearch').value || '').toLowerCase();
+  const rows = repData.filter(t => [t.customer_name, t.customer_email, t.subject, t.cf_model, t.cf_colour].join(' ').toLowerCase().includes(q));
+  const tk = (id, label) => repGorgiasDomain ? `<a href="https://${esc(repGorgiasDomain)}.gorgias.com/app/ticket/${id}" target="_blank">${label}</a>` : label;
+  document.querySelector('#repTable tbody').innerHTML = rows.length ? rows.map(t => {
+    const device = [t.cf_model, t.cf_colour].filter(Boolean).map(esc).join(' · ') || '—';
+    return `<tr>
+      <td>${tk(t.gorgias_id, '<b>#' + t.gorgias_id + '</b>')}</td>
+      <td>${esc(t.customer_name || '—')}<br><span style="color:var(--muted);font-size:12px">${esc(t.customer_email || '')}</span></td>
+      <td>${device}</td>
+      <td style="max-width:320px">${esc(t.subject || '(no subject)')}</td>
+      <td><span class="tag ${t.status === 'open' ? 'pending' : 'approved'}">${esc(t.status)}</span></td>
+      <td style="white-space:nowrap">${esc(t.d)}</td>
+      <td><button class="btn" style="margin:0;padding:4px 10px;font-size:12px;background:#fff;color:var(--ink);border:1px solid var(--line);box-shadow:none" onclick="repDetail(${t.gorgias_id}, this)">Details ▾</button></td>
+    </tr>
+    <tr id="repd-${t.gorgias_id}" style="display:none"><td colspan="7" style="background:var(--bg)"><div class="rep-detail">Loading…</div></td></tr>`;
+  }).join('') : '<tr><td colspan="7" class="empty">No repair-tagged tickets in this range.</td></tr>';
+}
+async function repDetail(id, btn) {
+  const row = document.getElementById('repd-' + id);
+  if (!row) return;
+  if (row.style.display !== 'none') { row.style.display = 'none'; btn.textContent = 'Details ▾'; return; }
+  row.style.display = 'table-row'; btn.textContent = 'Hide ▴';
+  const box = row.querySelector('.rep-detail'); box.textContent = 'Loading…';
+  try {
+    const d = await api('/api/repairs/' + id);
+    const issue = `<div style="margin-bottom:10px"><b>Customer issue</b><div class="note" style="margin-top:4px;white-space:pre-wrap">${d.body ? esc(d.body) : (d.bodyErr ? '⚠️ ' + esc(d.bodyErr) : 'No message text found.')}</div></div>`;
+    const ords = (d.orders || []).length
+      ? `<b>Shopify orders for ${esc(d.customer_email || 'this customer')}</b>` + d.orders.map(o => `
+          <div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:6px;font-size:13px">
+            <div>${o.admin_url ? `<a href="${o.admin_url}" target="_blank"><b>${esc(o.order_number)}</b></a>` : '<b>' + esc(o.order_number) + '</b>'}
+              · ${esc(o.date)} · ${esc(money(o.total, o.currency))}
+              · <span class="tag ${o.fulfillment_status === 'fulfilled' ? 'approved' : 'pending'}">${esc(o.fulfillment_status || '—')}</span></div>
+            <div style="color:var(--muted);margin-top:3px">${esc(o.ship_name || '')}${o.ship_city ? ' · ' + esc(o.ship_city) : ''}${o.country ? ', ' + esc(o.country) : ''}</div>
+            <div style="margin-top:3px">${(o.items || []).map(i => `${esc(i.title)}${i.variant ? ' <span style="color:var(--muted)">(' + esc(i.variant) + ')</span>' : ''} ×${i.qty}`).join('<br>')}</div>
+          </div>`).join('')
+      : `<b>Shopify orders</b><div class="note" style="margin-top:4px">${d.ordersErr ? '⚠️ ' + esc(d.ordersErr) : 'No orders found for ' + esc(d.customer_email || 'this customer') + '.'}</div>`;
+    box.innerHTML = `<div style="padding:4px 2px">${issue}${ords}</div>`;
+  } catch (e) { box.textContent = '⚠️ ' + e.message; }
 }
 // ---------- Communicator device (Gorgias tickets tagged Communicator) ----------
 let commDays = 30, commChart;

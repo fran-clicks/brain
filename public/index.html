@@ -192,6 +192,7 @@ footer{color:rgba(16,17,20,.45)}
   <button data-s="home" class="active">🏠 Overview</button>
   <button data-s="gorgias">🎧 Gorgias</button>
   <button data-s="communicator">📟 Communicator</button>
+  <button data-s="repairs">🔧 Repairs</button>
   <button data-s="klaviyo">✉️ Klaviyo</button>
   <button data-s="sales">🛒 Shopify</button>
   <button data-s="redo">↩️ Returns</button>
@@ -562,6 +563,27 @@ footer{color:rgba(16,17,20,.45)}
     <h2>Latest Communicator tickets</h2>
     <table id="commRecent"><thead><tr><th>Subject</th><th>Category</th><th>Colour</th><th>Status</th><th>Date</th></tr></thead><tbody></tbody></table>
     <div class="note" id="commNote" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<!-- REPAIRS (Gorgias tickets tagged "repair") -->
+<div class="section" id="s-repairs">
+  <div class="synchead">
+    <div>
+      <div style="font-size:22px;font-weight:800;letter-spacing:-.01em">🔧 Repairs</div>
+      <div style="color:var(--muted);font-size:13px;margin-top:2px">Gorgias tickets tagged <b>repair</b>, with customer &amp; order details for processing repairs/returns. <span class="updating-pill" id="repUpdating"><div class="spin"></div>Loading…</span></div>
+    </div>
+  </div>
+  <div class="periods" id="repPeriods">
+    <button data-d="90">3 months</button>
+    <button data-d="180">6 months</button>
+    <button data-d="365" class="active">1 year</button>
+    <button data-d="1200">All</button>
+  </div>
+  <input class="search" id="repSearch" placeholder="Search customer, email, subject, model…">
+  <div class="card">
+    <table id="repTable"><thead><tr><th>Ticket</th><th>Customer</th><th>Device</th><th>Issue</th><th>Status</th><th>Date</th><th></th></tr></thead><tbody></tbody></table>
+    <div class="note" id="repNote" style="margin-top:8px"></div>
   </div>
 </div>
 

@@ -1651,6 +1651,67 @@ app.get('/api/communicator/stats', async (req, res) => {
   } catch (e) { send500(res, e); }
 });
 
+// ---------- Repairs (Gorgias tickets tagged "repair") ----------
+// A workspace for Communicator repairs/returns: the repair-tagged tickets with customer + model info,
+// and a per-ticket drill-down that pulls the full customer message (live from Gorgias) and that
+// customer's Shopify orders (live by email — orders_cache has no email, and this avoids a re-backfill).
+app.get('/api/repairs', async (req, res) => {
+  try {
+    const days = Math.max(parseInt(req.query.days) || 365, 1); // allow large values (e.g. "All") — not capped like resolveWindow
+    const start = days >= 1000 ? new Date('2020-01-01T00:00:00Z') : new Date(Date.now() - days * 864e5);
+    const p = [start.toISOString(), new Date(Date.now() + 864e5).toISOString()];
+    const out = await aggCached('repairs|' + JSON.stringify(req.query), 60000, async () => {
+      const rows = (await pool.query(
+        `SELECT gorgias_id, subject, status, channel, to_char(created_datetime,'YYYY-MM-DD') d,
+                customer_name, customer_email, cf_model, cf_colour, cf_country
+         FROM tickets_cache
+         WHERE NOT spam AND created_datetime >= $1 AND created_datetime < $2
+           AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE t ILIKE '%repair%')
+         ORDER BY created_datetime DESC LIMIT 500`, p)).rows;
+      const cfg = (await getConnector('gorgias'))?.config;
+      return { days, from: p[0], to: p[1],
+        gorgias_domain: cfg?.domain || process.env.GORGIAS_DOMAIN || null, count: rows.length, tickets: rows };
+    });
+    res.json(out);
+  } catch (e) { send500(res, e); }
+});
+// per-ticket detail: full customer message + their Shopify orders (live lookups)
+app.get('/api/repairs/:id', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const t = (await pool.query(`SELECT gorgias_id, customer_email, customer_name FROM tickets_cache WHERE gorgias_id=$1`, [id])).rows[0];
+    if (!t) return res.status(404).json({ error: 'ticket not found' });
+    let body = '', bodyErr = null;
+    const gcfg = (await getConnector('gorgias'))?.config;
+    if (gcfg) {
+      try {
+        const m = await gorgiasRequest(gcfg, `/api/tickets/${id}/messages?limit=30`);
+        const msgs = m?.data || [];
+        const first = msgs.find(x => x.from_agent === false) || msgs[0];
+        const raw = first?.body_text || first?.stripped_text || (first?.body_html ? String(first.body_html).replace(/<[^>]+>/g, ' ') : '');
+        body = String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
+      } catch (e) { bodyErr = e.message; }
+    }
+    let orders = [], ordersErr = null;
+    const scfg = (await getConnector('shopify'))?.config;
+    if (scfg && t.customer_email) {
+      try {
+        const d = await shopifyGraphql(scfg, ORDERS_QUERY, { q: `email:${t.customer_email}`, sortKey: 'CREATED_AT' });
+        const base = shopifyAdminOrderBase(scfg.store_domain);
+        orders = (d.orders?.nodes || []).map(normalizeOrder).slice(0, 10).map(o => ({
+          order_number: o.name, date: String(o.created_at || '').slice(0, 10),
+          total: o.total_price, currency: o.currency, fulfillment_status: o.fulfillment_status,
+          financial_status: o.financial_status,
+          ship_name: o.ship_address?.name || '', ship_city: o.ship_address?.city || '', country: o.country || '',
+          admin_url: base ? base + o.id : null,
+          items: (o.line_items || []).map(li => ({ title: li.title, variant: li.variant, qty: li.quantity }))
+        }));
+      } catch (e) { ordersErr = e.message; }
+    }
+    res.json({ gorgias_id: id, customer_name: t.customer_name, customer_email: t.customer_email, body, bodyErr, orders, ordersErr });
+  } catch (e) { send500(res, e); }
+});
+
 // ---------- Redo (returns) ----------
 async function redoRequest(cfg, pathAndQuery, pageHeaders = {}) {
   const r = await fetch(`https://api.getredo.com/v2.2${pathAndQuery}`, {
