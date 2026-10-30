@@ -447,6 +447,9 @@ async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_oc_fulfilled ON orders_cache (fulfilled_at);
     CREATE TABLE IF NOT EXISTS consistency_dismissed (
       order_number TEXT PRIMARY KEY, dismissed_by TEXT DEFAULT '', dismissed_at TIMESTAMPTZ DEFAULT now());
+    CREATE TABLE IF NOT EXISTS repair_tickets (
+      gorgias_id BIGINT PRIMARY KEY, stage TEXT DEFAULT 'troubleshooting',
+      updated_by TEXT DEFAULT '', updated_at TIMESTAMPTZ DEFAULT now());
     CREATE TABLE IF NOT EXISTS product_images (
       sku TEXT PRIMARY KEY, title TEXT DEFAULT '', image_url TEXT, updated_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE product_images ADD COLUMN IF NOT EXISTS variant_title TEXT DEFAULT '';
@@ -1651,10 +1654,11 @@ app.get('/api/communicator/stats', async (req, res) => {
   } catch (e) { send500(res, e); }
 });
 
-// ---------- Repairs (Gorgias tickets tagged "repair") ----------
-// A workspace for Communicator repairs/returns: the repair-tagged tickets with customer + model info,
-// and a per-ticket drill-down that pulls the full customer message (live from Gorgias) and that
-// customer's Shopify orders (live by email — orders_cache has no email, and this avoids a re-backfill).
+// ---------- Communicator repairs (Gorgias tickets tagged "repair") ----------
+// A workflow board for Communicator repairs/returns: repair-tagged tickets shown as cards with a
+// settable repair stage, a per-ticket drill-down (full customer message + their Shopify orders, both
+// live), and an admin reply box that posts an outgoing message back to the customer via Gorgias.
+const REPAIR_STAGES = ['troubleshooting', 'shipping', 'received', 'fixed', 'returning', 'arrived'];
 app.get('/api/repairs', async (req, res) => {
   try {
     const days = Math.max(parseInt(req.query.days) || 365, 1); // allow large values (e.g. "All") — not capped like resolveWindow
@@ -1662,17 +1666,71 @@ app.get('/api/repairs', async (req, res) => {
     const p = [start.toISOString(), new Date(Date.now() + 864e5).toISOString()];
     const out = await aggCached('repairs|' + JSON.stringify(req.query), 60000, async () => {
       const rows = (await pool.query(
-        `SELECT gorgias_id, subject, status, channel, to_char(created_datetime,'YYYY-MM-DD') d,
-                customer_name, customer_email, cf_model, cf_colour, cf_country
-         FROM tickets_cache
-         WHERE NOT spam AND created_datetime >= $1 AND created_datetime < $2
-           AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE t ILIKE '%repair%')
-         ORDER BY created_datetime DESC LIMIT 500`, p)).rows;
+        `SELECT t.gorgias_id, t.subject, t.status, t.channel, to_char(t.created_datetime,'YYYY-MM-DD') d,
+                t.customer_name, t.customer_email, t.cf_model, t.cf_colour, t.cf_country,
+                r.stage, r.updated_by AS stage_by, to_char(r.updated_at,'YYYY-MM-DD HH24:MI') AS stage_at
+         FROM tickets_cache t
+         LEFT JOIN repair_tickets r ON r.gorgias_id = t.gorgias_id
+         WHERE NOT t.spam AND t.created_datetime >= $1 AND t.created_datetime < $2
+           AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(t.tags) tg WHERE tg ILIKE '%repair%')
+         ORDER BY t.created_datetime DESC LIMIT 500`, p)).rows;
       const cfg = (await getConnector('gorgias'))?.config;
-      return { days, from: p[0], to: p[1],
+      return { days, from: p[0], to: p[1], stages: REPAIR_STAGES,
         gorgias_domain: cfg?.domain || process.env.GORGIAS_DOMAIN || null, count: rows.length, tickets: rows };
     });
     res.json(out);
+  } catch (e) { send500(res, e); }
+});
+// set the repair stage for a ticket (admin only)
+app.post('/api/repairs/:id/stage', async (req, res) => {
+  try {
+    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+    const id = parseInt(req.params.id);
+    const stage = String(req.body?.stage || '').toLowerCase();
+    if (!REPAIR_STAGES.includes(stage)) return res.status(400).json({ error: 'invalid stage' });
+    await pool.query(
+      `INSERT INTO repair_tickets (gorgias_id, stage, updated_by, updated_at) VALUES ($1,$2,$3,now())
+       ON CONFLICT (gorgias_id) DO UPDATE SET stage=$2, updated_by=$3, updated_at=now()`,
+      [id, stage, req.userEmail || '']);
+    aggCache.clear(); // list is cached — drop it so the new stage shows immediately
+    res.json({ ok: true, gorgias_id: id, stage });
+  } catch (e) { send500(res, e); }
+});
+// post an outgoing reply to the customer via Gorgias (admin only)
+app.post('/api/repairs/:id/reply', async (req, res) => {
+  try {
+    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+    const id = parseInt(req.params.id);
+    const text = String(req.body?.body || '').trim();
+    if (!text) return res.status(400).json({ error: 'empty message' });
+    if (text.length > 10000) return res.status(400).json({ error: 'message too long' });
+    const gcfg = (await getConnector('gorgias'))?.config;
+    if (!gcfg) return res.status(400).json({ error: 'Gorgias is not connected' });
+    // Derive the email addresses from the ticket's latest inbound customer message so the reply
+    // threads correctly: customer = who we send to, support address = the integration they wrote to.
+    const m = await gorgiasRequest(gcfg, `/api/tickets/${id}/messages?limit=30`);
+    const msgs = m?.data || [];
+    const inbound = [...msgs].reverse().find(x => x.from_agent === false) || msgs[msgs.length - 1] || null;
+    if (!inbound) return res.status(400).json({ error: 'no messages found on this ticket' });
+    const channel = inbound.channel || 'email';
+    if (channel !== 'email') return res.status(400).json({ error: `this ticket's channel is "${channel}" — reply directly in Gorgias` });
+    const customerAddr = inbound.source?.from?.address || inbound.sender?.email || null;
+    const supportAddr = inbound.source?.to?.[0]?.address || null;
+    if (!customerAddr) return res.status(400).json({ error: 'could not determine the customer email from the ticket' });
+    if (!supportAddr) return res.status(400).json({ error: 'could not determine the support (from) address from the ticket' });
+    const subject = inbound.subject || (await pool.query(`SELECT subject FROM tickets_cache WHERE gorgias_id=$1`, [id])).rows[0]?.subject || 'Your Clicks repair';
+    const escHtml = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    const bodyHtml = text.split(/\n{2,}/).map(par => '<p>' + escHtml(par).replace(/\n/g, '<br>') + '</p>').join('');
+    const payload = {
+      receiver: { email: customerAddr },
+      sender: { email: gcfg.email }, // the API user — an existing Gorgias agent
+      source: { to: [{ address: customerAddr }], from: { address: supportAddr } },
+      body_html: bodyHtml, body_text: text,
+      channel: 'email', from_agent: true, via: 'api',
+      subject: /^re:/i.test(subject) ? subject : 'Re: ' + subject
+    };
+    const created = await gorgiasRequest(gcfg, `/api/tickets/${id}/messages`, { method: 'POST', body: JSON.stringify(payload) });
+    res.json({ ok: true, gorgias_id: id, message_id: created?.id || null, to: customerAddr });
   } catch (e) { send500(res, e); }
 });
 // per-ticket detail: full customer message + their Shopify orders (live lookups)

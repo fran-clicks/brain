@@ -2066,8 +2066,9 @@ async function commSnapshot() {
     if (el) el.textContent = 'stats unavailable';
   }
 }
-// ---------- Repairs (Gorgias tickets tagged "repair") ----------
+// ---------- Communicator repairs (Gorgias tickets tagged "repair") ----------
 let repDays = 365, repData = [], repGorgiasDomain = null;
+let repStages = ['troubleshooting', 'shipping', 'received', 'fixed', 'returning', 'arrived'];
 document.querySelectorAll('#repPeriods button[data-d]').forEach(b => b.onclick = () => {
   document.querySelectorAll('#repPeriods button[data-d]').forEach(x => x.classList.remove('active'));
   b.classList.add('active'); repDays = +b.dataset.d; loadRepairs();
@@ -2078,50 +2079,112 @@ async function loadRepairs() {
   try {
     const r = await api('/api/repairs?days=' + repDays);
     repData = r.tickets || []; repGorgiasDomain = r.gorgias_domain;
+    if (Array.isArray(r.stages) && r.stages.length) repStages = r.stages;
     renderRepairs();
     document.getElementById('repNote').textContent = `${repData.length} repair ticket${repData.length === 1 ? '' : 's'} in range.`;
   } catch (e) { document.getElementById('repNote').textContent = '⚠️ ' + e.message; }
   finally { document.getElementById('repUpdating').classList.remove('on'); }
 }
+const repTk = (id, label) => repGorgiasDomain ? `<a href="https://${esc(repGorgiasDomain)}.gorgias.com/app/ticket/${id}" target="_blank">${label}</a>` : label;
+function repStepper(t) {
+  const cur = repStages.indexOf(t.stage); // -1 when unset
+  const admin = window.isAdmin;
+  return `<div class="stepper" id="repstep-${t.gorgias_id}">` + repStages.map((st, i) => {
+    const done = cur >= 0 && i <= cur;
+    const cls = ['fstep', done ? 'done' : '', i === cur ? 'cur' : '',
+      (cur >= 0 && i <= cur && i > 0) ? 'fillL' : '', (cur >= 0 && i < cur) ? 'fillR' : '',
+      admin ? 'clk' : ''].filter(Boolean).join(' ');
+    const onclick = admin ? ` onclick="setRepairStage(${t.gorgias_id}, '${st}')"` : '';
+    return `<div class="${cls}"${onclick} title="${admin ? 'Set stage to ' + st : st}"><div class="dot">${done ? '✓' : i + 1}</div>${esc(st)}</div>`;
+  }).join('') + `</div>`;
+}
+function repChip(t) {
+  return t.stage
+    ? `<span class="rep-chip" id="repchip-${t.gorgias_id}">${esc(t.stage)}</span>`
+    : `<span class="rep-chip unset" id="repchip-${t.gorgias_id}">stage not set</span>`;
+}
 function renderRepairs() {
   const q = (document.getElementById('repSearch').value || '').toLowerCase();
-  const rows = repData.filter(t => [t.customer_name, t.customer_email, t.subject, t.cf_model, t.cf_colour].join(' ').toLowerCase().includes(q));
-  const tk = (id, label) => repGorgiasDomain ? `<a href="https://${esc(repGorgiasDomain)}.gorgias.com/app/ticket/${id}" target="_blank">${label}</a>` : label;
-  document.querySelector('#repTable tbody').innerHTML = rows.length ? rows.map(t => {
-    const device = [t.cf_model, t.cf_colour].filter(Boolean).map(esc).join(' · ') || '—';
-    return `<tr>
-      <td>${tk(t.gorgias_id, '<b>#' + t.gorgias_id + '</b>')}</td>
-      <td>${esc(t.customer_name || '—')}<br><span style="color:var(--muted);font-size:12px">${esc(t.customer_email || '')}</span></td>
-      <td>${device}</td>
-      <td style="max-width:320px">${esc(t.subject || '(no subject)')}</td>
-      <td><span class="tag ${t.status === 'open' ? 'pending' : 'approved'}">${esc(t.status)}</span></td>
-      <td style="white-space:nowrap">${esc(t.d)}</td>
-      <td><button class="btn" style="margin:0;padding:4px 10px;font-size:12px;background:#fff;color:var(--ink);border:1px solid var(--line);box-shadow:none" onclick="repDetail(${t.gorgias_id}, this)">Details ▾</button></td>
-    </tr>
-    <tr id="repd-${t.gorgias_id}" style="display:none"><td colspan="7" style="background:var(--bg)"><div class="rep-detail">Loading…</div></td></tr>`;
-  }).join('') : '<tr><td colspan="7" class="empty">No repair-tagged tickets in this range.</td></tr>';
+  const rows = repData.filter(t => [t.customer_name, t.customer_email, t.subject, t.cf_model, t.cf_colour, t.stage].join(' ').toLowerCase().includes(q));
+  const box = document.getElementById('repCards');
+  if (!rows.length) { box.innerHTML = '<div class="empty" style="padding:24px">No repair-tagged tickets in this range.</div>'; return; }
+  box.innerHTML = rows.map(t => {
+    const device = [t.cf_model, t.cf_colour, t.cf_country].filter(Boolean).map(esc).join(' · ');
+    return `<div class="rep-card" id="repc-${t.gorgias_id}">
+      <div class="rc-top">
+        <div class="rc-id">${repTk(t.gorgias_id, '#' + t.gorgias_id)} ${repChip(t)}</div>
+        <div class="rc-date"><span class="tag ${t.status === 'open' ? 'pending' : 'approved'}">${esc(t.status)}</span> · ${esc(t.d)}</div>
+      </div>
+      <div class="rc-cust">${esc(t.customer_name || '—')}</div>
+      <div class="rc-meta">${esc(t.customer_email || '')}${device ? ' · ' + device : ''}</div>
+      <div class="rc-subj">${esc(t.subject || '(no subject)')}</div>
+      ${repStepper(t)}
+      <div class="rc-actions">
+        <button class="btn" style="margin:0;padding:5px 12px;font-size:12px;background:#fff;color:var(--ink);border:1px solid var(--line);box-shadow:none" onclick="repToggle(${t.gorgias_id}, this)">Open details ▾</button>
+      </div>
+      <div class="rc-detail" id="repd-${t.gorgias_id}"></div>
+    </div>`;
+  }).join('');
 }
-async function repDetail(id, btn) {
-  const row = document.getElementById('repd-' + id);
-  if (!row) return;
-  if (row.style.display !== 'none') { row.style.display = 'none'; btn.textContent = 'Details ▾'; return; }
-  row.style.display = 'table-row'; btn.textContent = 'Hide ▴';
-  const box = row.querySelector('.rep-detail'); box.textContent = 'Loading…';
+async function setRepairStage(id, stage) {
+  try {
+    await api('/api/repairs/' + id + '/stage', { method: 'POST', body: JSON.stringify({ stage }) });
+    const t = repData.find(x => x.gorgias_id === id);
+    if (t) {
+      t.stage = stage;
+      const step = document.getElementById('repstep-' + id);
+      if (step) step.outerHTML = repStepper(t);
+      const chip = document.getElementById('repchip-' + id);
+      if (chip) chip.outerHTML = repChip(t);
+    }
+    toast('Stage set to “' + stage + '”', 'ok');
+  } catch (e) { toast(e.message); }
+}
+async function repToggle(id, btn) {
+  const card = document.getElementById('repc-' + id);
+  const box = document.getElementById('repd-' + id);
+  if (!card || !box) return;
+  if (card.classList.contains('open')) { card.classList.remove('open'); btn.textContent = 'Open details ▾'; return; }
+  card.classList.add('open'); btn.textContent = 'Hide details ▴';
+  if (box.dataset.loaded) return; // keep what we fetched (incl. a draft reply)
+  box.innerHTML = '<div class="note">Loading…</div>';
   try {
     const d = await api('/api/repairs/' + id);
-    const issue = `<div style="margin-bottom:10px"><b>Customer issue</b><div class="note" style="margin-top:4px;white-space:pre-wrap">${d.body ? esc(d.body) : (d.bodyErr ? '⚠️ ' + esc(d.bodyErr) : 'No message text found.')}</div></div>`;
+    box.dataset.loaded = '1';
+    const issue = `<h4>Customer issue</h4><div class="rc-body">${d.body ? esc(d.body) : (d.bodyErr ? '⚠️ ' + esc(d.bodyErr) : 'No message text found.')}</div>`;
     const ords = (d.orders || []).length
-      ? `<b>Shopify orders for ${esc(d.customer_email || 'this customer')}</b>` + d.orders.map(o => `
-          <div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:6px;font-size:13px">
-            <div>${o.admin_url ? `<a href="${o.admin_url}" target="_blank"><b>${esc(o.order_number)}</b></a>` : '<b>' + esc(o.order_number) + '</b>'}
-              · ${esc(o.date)} · ${esc(money(o.total, o.currency))}
-              · <span class="tag ${o.fulfillment_status === 'fulfilled' ? 'approved' : 'pending'}">${esc(o.fulfillment_status || '—')}</span></div>
-            <div style="color:var(--muted);margin-top:3px">${esc(o.ship_name || '')}${o.ship_city ? ' · ' + esc(o.ship_city) : ''}${o.country ? ', ' + esc(o.country) : ''}</div>
+      ? `<h4 style="margin-top:14px">Shopify orders — ${esc(d.customer_email || 'this customer')}</h4>` + d.orders.map(o => `
+          <div class="rc-order">
+            <div class="ro-top"><span>${o.admin_url ? `<a href="${o.admin_url}" target="_blank">${esc(o.order_number)}</a>` : esc(o.order_number)}</span>
+              <span class="tag ${o.fulfillment_status === 'fulfilled' ? 'approved' : 'pending'}">${esc(o.fulfillment_status || '—')}</span></div>
+            <div style="color:var(--muted);margin-top:2px">${esc(o.date)} · ${esc(money(o.total, o.currency))}${o.ship_city ? ' · ' + esc(o.ship_city) : ''}${o.country ? ', ' + esc(o.country) : ''}</div>
             <div style="margin-top:3px">${(o.items || []).map(i => `${esc(i.title)}${i.variant ? ' <span style="color:var(--muted)">(' + esc(i.variant) + ')</span>' : ''} ×${i.qty}`).join('<br>')}</div>
           </div>`).join('')
-      : `<b>Shopify orders</b><div class="note" style="margin-top:4px">${d.ordersErr ? '⚠️ ' + esc(d.ordersErr) : 'No orders found for ' + esc(d.customer_email || 'this customer') + '.'}</div>`;
-    box.innerHTML = `<div style="padding:4px 2px">${issue}${ords}</div>`;
-  } catch (e) { box.textContent = '⚠️ ' + e.message; }
+      : `<h4 style="margin-top:14px">Shopify orders</h4><div class="note">${d.ordersErr ? '⚠️ ' + esc(d.ordersErr) : 'No orders found for ' + esc(d.customer_email || 'this customer') + '.'}</div>`;
+    const reply = window.isAdmin ? `
+      <div class="rc-reply" style="margin-top:14px">
+        <h4>Reply to customer <span style="text-transform:none;font-weight:500;color:var(--muted)">(sends via Gorgias)</span></h4>
+        <textarea id="reptext-${id}" placeholder="Write your reply to ${esc(d.customer_email || 'the customer')}…"></textarea>
+        <div class="rr-row">
+          <button class="btn" style="margin:0" onclick="repSendReply(${id}, this)">Send via Gorgias</button>
+          <span class="rr-hint">Posts an outgoing email on ticket #${id}. Double-check before sending — it goes to the customer.</span>
+        </div>
+      </div>` : '';
+    box.innerHTML = issue + ords + reply;
+  } catch (e) { box.innerHTML = '<div class="note">⚠️ ' + esc(e.message) + '</div>'; }
+}
+async function repSendReply(id, btn) {
+  const ta = document.getElementById('reptext-' + id);
+  const body = (ta?.value || '').trim();
+  if (!body) { toast('Write a reply first.'); return; }
+  if (!confirm('Send this reply to the customer via Gorgias (ticket #' + id + ')?')) return;
+  btn.disabled = true; const old = btn.textContent; btn.textContent = 'Sending…';
+  try {
+    const r = await api('/api/repairs/' + id + '/reply', { method: 'POST', body: JSON.stringify({ body }) });
+    ta.value = '';
+    toast('Reply sent to ' + (r.to || 'customer'), 'ok');
+  } catch (e) { toast(e.message); }
+  finally { btn.disabled = false; btn.textContent = old; }
 }
 // ---------- Communicator device (Gorgias tickets tagged Communicator) ----------
 let commDays = 30, commChart;
