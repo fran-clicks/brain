@@ -49,8 +49,10 @@ app.use((req, res, next) => {
   res.redirect('/login.html');
 });
 app.use(express.static(path.join(__dirname, 'public'), {
+  etag: true, lastModified: true,
   setHeaders(res, filePath) {
-    if (filePath.endsWith('.html')) res.set('Cache-Control', 'no-cache'); // always revalidate pages after deploys
+    // Always revalidate pages AND app assets so deploys take effect immediately (no stale app.js/css).
+    if (/\.(html|js|css)$/.test(filePath)) res.set('Cache-Control', 'no-cache');
   }
 }));
 
