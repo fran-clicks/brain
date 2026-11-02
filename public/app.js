@@ -2157,14 +2157,12 @@ function repChip(t) {
     ? `<span class="rep-chip" id="repchip-${t.gorgias_id}">${esc(t.stage)}</span>`
     : `<span class="rep-chip unset" id="repchip-${t.gorgias_id}">stage not set</span>`;
 }
-function renderRepairs() {
-  const q = (document.getElementById('repSearch').value || '').toLowerCase();
-  const rows = repData.filter(t => [t.customer_name, t.customer_email, t.subject, t.cf_model, t.cf_colour, t.stage, t.topic].join(' ').toLowerCase().includes(q));
-  const box = document.getElementById('repCards');
-  if (!rows.length) { box.innerHTML = '<div class="empty" style="padding:24px">No repair-tagged tickets in this range.</div>'; return; }
-  box.innerHTML = rows.map(t => {
-    const device = [t.cf_model, t.cf_colour, t.cf_country].filter(Boolean).map(esc).join(' · ');
-    return `<div class="rep-card" id="repc-${t.gorgias_id}">
+// Everything inside a card except the lazily-loaded detail. Re-rendered wholesale on stage change
+// so the stepper animation and the inline tracking fields always reflect the current stage.
+function repBodyInner(t) {
+  const device = [t.cf_model, t.cf_colour, t.cf_country].filter(Boolean).map(esc).join(' · ');
+  const open = document.getElementById('repc-' + t.gorgias_id)?.classList.contains('open');
+  return `
       <div class="rc-top">
         <div class="rc-id">${repTk(t.gorgias_id, '#' + t.gorgias_id)} ${repChip(t)}</div>
         <div class="rc-date"><span class="tag ${t.status === 'open' ? 'pending' : 'approved'}">${esc(t.status)}</span> · ${esc(t.d)}</div>
@@ -2173,9 +2171,19 @@ function renderRepairs() {
       <div class="rc-meta">${esc(t.customer_email || '')}${device ? ' · ' + device : ''}</div>
       <div class="rc-subj">${esc(t.subject || '(no subject)')}</div>
       ${repStepper(t)}
+      ${repTrackingBlock(t)}
       <div class="rc-actions">
-        <button class="btn" style="margin:0;padding:5px 12px;font-size:12px;background:#fff;color:var(--ink);border:1px solid var(--line);box-shadow:none" onclick="repToggle(${t.gorgias_id}, this)">Open details ▾</button>
-      </div>
+        <button class="btn" style="margin:0;padding:5px 12px;font-size:12px;background:#fff;color:var(--ink);border:1px solid var(--line);box-shadow:none" onclick="repToggle(${t.gorgias_id}, this)">${open ? 'Hide details ▴' : 'Open details ▾'}</button>
+      </div>`;
+}
+function renderRepairs() {
+  const q = (document.getElementById('repSearch').value || '').toLowerCase();
+  const rows = repData.filter(t => [t.customer_name, t.customer_email, t.subject, t.cf_model, t.cf_colour, t.stage, t.topic].join(' ').toLowerCase().includes(q));
+  const box = document.getElementById('repCards');
+  if (!rows.length) { box.innerHTML = '<div class="empty" style="padding:24px">No repair-tagged tickets in this range.</div>'; return; }
+  box.innerHTML = rows.map(t => {
+    return `<div class="rep-card" id="repc-${t.gorgias_id}">
+      <div id="repbody-${t.gorgias_id}">${repBodyInner(t)}</div>
       <div class="rc-detail" id="repd-${t.gorgias_id}"></div>
     </div>`;
   }).join('');
@@ -2186,26 +2194,17 @@ async function setRepairStage(id, stage) {
     const t = repData.find(x => x.gorgias_id === id);
     if (t) {
       t.stage = stage;
-      const step = document.getElementById('repstep-' + id);
-      if (step) step.outerHTML = repStepper(t);
-      const chip = document.getElementById('repchip-' + id);
-      if (chip) chip.outerHTML = repChip(t);
-      const trk = document.getElementById('reptrack-' + id); // reveal/hide the tracking input as the stage changes
-      if (trk) trk.outerHTML = repTrackingBlock(t);
+      const body = document.getElementById('repbody-' + id);
+      if (body) body.innerHTML = repBodyInner(t); // rebuilds stepper + inline tracking for the new stage
     }
     toast('Stage set to “' + stage + '”', 'ok');
-    // Shipping / returning need a tracking code — open the card's details and focus the field.
+    // Shipping / returning expose their tracking field right on the card — focus it.
     if (stage === 'shipping' || stage === 'returning') {
-      const card = document.getElementById('repc-' + id);
-      if (card && !card.classList.contains('open')) {
-        const btn = card.querySelector('.rc-actions button');
-        if (btn) await repToggle(id, btn);
-      }
       const kind = stage === 'returning' ? 'return' : 'ship';
       setTimeout(() => {
         const inp = document.getElementById('reptrack-input-' + kind + '-' + id);
         if (inp) { inp.scrollIntoView({ block: 'center', behavior: 'smooth' }); inp.focus(); }
-      }, 120);
+      }, 60);
     }
   } catch (e) { toast(e.message); }
 }
@@ -2219,8 +2218,8 @@ async function saveRepairTracking(id, btn, kind) {
     const t = repData.find(x => x.gorgias_id === id);
     if (t) {
       if (kind === 'return') t.return_tracking = tracking; else t.tracking = tracking;
-      const trk = document.getElementById('reptrack-' + id);
-      if (trk) trk.outerHTML = repTrackingBlock(t);
+      const body = document.getElementById('repbody-' + id);
+      if (body) body.innerHTML = repBodyInner(t);
     }
     toast(tracking ? 'Tracking saved' : 'Tracking cleared', 'ok');
   } catch (e) { toast(e.message); }
@@ -2254,7 +2253,6 @@ async function repToggle(id, btn) {
     box.dataset.loaded = '1';
     const t = repData.find(x => x.gorgias_id === id);
     const topic = (window.isAdmin && t) ? `<h4>Repair topic</h4>${repTopicPicker(t)}` : '';
-    const tracking = t ? repTrackingBlock(t) : '';
     const cc = d.clicksCare
       ? (d.clicksCare.has
           ? `<div class="rc-care yes">🛡️ Clicks Care coverage — <b>yes</b> (${d.clicksCare.orders.map(esc).join(', ')})</div>`
@@ -2279,7 +2277,7 @@ async function repToggle(id, btn) {
           <span class="rr-hint">Posts an outgoing email on ticket #${id}. Double-check before sending — it goes to the customer.</span>
         </div>
       </div>` : '';
-    box.innerHTML = topic + cc + tracking + issue + ords + reply;
+    box.innerHTML = topic + cc + issue + ords + reply;
   } catch (e) { box.innerHTML = '<div class="note">⚠️ ' + esc(e.message) + '</div>'; }
 }
 async function repSendReply(id, btn) {
