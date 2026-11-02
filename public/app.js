@@ -2106,7 +2106,7 @@ let repTopics = ['screen', 'keys', 'dead', 'physical damage', 'clicks care'];
 function repTopicBadge(t) {
   const id = `reptopic-${t.gorgias_id}`;
   const m = t.topic && REP_TOPIC_META[t.topic];
-  if (!m) return `<span id="${id}"></span>`;
+  if (!m) return `<span id="${id}" class="rep-topic to-assign">to assign</span>`;
   return `<span id="${id}" class="rep-topic" style="--tc:${m.color};background:${m.bg};border-color:${m.border}">${REP_ICON[t.topic] || ''}${esc(m.label)}</span>`;
 }
 function repTopicPicker(t) {
@@ -2118,7 +2118,7 @@ function repTopicPicker(t) {
     const style = on ? `background:${m.color};border-color:${m.color};color:#fff` : `color:${m.color}`;
     return `<button type="button" class="${on ? 'on' : ''}" style="${style}" title="${on ? 'Click to clear' : 'Assign ' + m.label}" onclick="setRepairTopic(${t.gorgias_id}, '${tp.replace(/'/g, "\\'")}')">${REP_ICON[tp] || ''}${esc(m.label)}</button>`;
   }).join('');
-  return `<div class="rep-topicpick" id="reppick-${t.gorgias_id}"><span class="rp-lbl">Topic:</span>${btns}</div>`;
+  return `<div class="rep-topicpick" id="reppick-${t.gorgias_id}">${btns}</div>`;
 }
 function repStepper(t) {
   const cur = repStages.indexOf(t.stage); // -1 when unset
@@ -2153,7 +2153,6 @@ function renderRepairs() {
       <div class="rc-meta">${esc(t.customer_email || '')}${device ? ' · ' + device : ''}</div>
       <div class="rc-subj">${esc(t.subject || '(no subject)')}</div>
       ${repStepper(t)}
-      ${repTopicPicker(t)}
       <div class="rc-actions">
         <button class="btn" style="margin:0;padding:5px 12px;font-size:12px;background:#fff;color:var(--ink);border:1px solid var(--line);box-shadow:none" onclick="repToggle(${t.gorgias_id}, this)">Open details ▾</button>
       </div>
@@ -2201,7 +2200,9 @@ async function repToggle(id, btn) {
   try {
     const d = await api('/api/repairs/' + id);
     box.dataset.loaded = '1';
-    const issue = `<h4>Customer issue</h4><div class="rc-body">${d.body ? esc(d.body) : (d.bodyErr ? '⚠️ ' + esc(d.bodyErr) : 'No message text found.')}</div>`;
+    const t = repData.find(x => x.gorgias_id === id);
+    const topic = (window.isAdmin && t) ? `<h4>Repair topic</h4>${repTopicPicker(t)}` : '';
+    const issue = `<h4 style="margin-top:14px">Customer issue</h4><div class="rc-body">${d.body ? esc(d.body) : (d.bodyErr ? '⚠️ ' + esc(d.bodyErr) : 'No message text found.')}</div>`;
     const ords = (d.orders || []).length
       ? `<h4 style="margin-top:14px">Shopify orders — ${esc(d.customer_email || 'this customer')}</h4>` + d.orders.map(o => `
           <div class="rc-order">
@@ -2220,7 +2221,7 @@ async function repToggle(id, btn) {
           <span class="rr-hint">Posts an outgoing email on ticket #${id}. Double-check before sending — it goes to the customer.</span>
         </div>
       </div>` : '';
-    box.innerHTML = issue + ords + reply;
+    box.innerHTML = topic + issue + ords + reply;
   } catch (e) { box.innerHTML = '<div class="note">⚠️ ' + esc(e.message) + '</div>'; }
 }
 async function repSendReply(id, btn) {
