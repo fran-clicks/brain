@@ -2118,7 +2118,24 @@ function repTopicPicker(t) {
     const style = on ? `background:${m.color};border-color:${m.color};color:#fff` : `color:${m.color}`;
     return `<button type="button" class="${on ? 'on' : ''}" style="${style}" title="${on ? 'Click to clear' : 'Assign ' + m.label}" onclick="setRepairTopic(${t.gorgias_id}, '${tp.replace(/'/g, "\\'")}')">${REP_ICON[tp] || ''}${esc(m.label)}</button>`;
   }).join('');
-  return `<div class="rep-topicpick" id="reppick-${t.gorgias_id}">${btns}</div>`;
+  return `<div class="rep-topicpick" id="reppick-${t.gorgias_id}">${btns}</div>
+    <div class="rr-hint" style="margin-top:4px">Click any topic to assign or change it; click the highlighted one to clear.</div>`;
+}
+// Tracking code — editable while the repair is at the "shipping" stage (or if one is already set), else read-only.
+function repTrackingBlock(t) {
+  const id = t.gorgias_id;
+  const canEdit = window.isAdmin && (t.stage === 'shipping' || t.tracking);
+  let inner = '';
+  if (canEdit) {
+    inner = `<h4>Tracking code${t.stage === 'shipping' ? '' : ''}</h4>
+      <div class="rc-track-row">
+        <input id="reptrack-input-${id}" class="rc-track-input" placeholder="Carrier tracking number…" value="${esc(t.tracking || '')}">
+        <button class="btn" style="margin:0;padding:6px 12px;font-size:12px" onclick="saveRepairTracking(${id}, this)">Save</button>
+      </div>`;
+  } else if (t.tracking) {
+    inner = `<h4>Tracking code</h4><div class="rc-track-view">📦 ${esc(t.tracking)}</div>`;
+  }
+  return `<div id="reptrack-${id}" class="rc-track">${inner}</div>`;
 }
 function repStepper(t) {
   const cur = repStages.indexOf(t.stage); // -1 when unset
@@ -2170,9 +2187,27 @@ async function setRepairStage(id, stage) {
       if (step) step.outerHTML = repStepper(t);
       const chip = document.getElementById('repchip-' + id);
       if (chip) chip.outerHTML = repChip(t);
+      const trk = document.getElementById('reptrack-' + id); // reveal/hide the tracking input as the stage changes
+      if (trk) trk.outerHTML = repTrackingBlock(t);
     }
     toast('Stage set to “' + stage + '”', 'ok');
   } catch (e) { toast(e.message); }
+}
+async function saveRepairTracking(id, btn) {
+  const inp = document.getElementById('reptrack-input-' + id);
+  const tracking = (inp?.value || '').trim();
+  btn.disabled = true;
+  try {
+    await api('/api/repairs/' + id + '/tracking', { method: 'POST', body: JSON.stringify({ tracking }) });
+    const t = repData.find(x => x.gorgias_id === id);
+    if (t) {
+      t.tracking = tracking;
+      const trk = document.getElementById('reptrack-' + id);
+      if (trk) trk.outerHTML = repTrackingBlock(t);
+    }
+    toast(tracking ? 'Tracking saved' : 'Tracking cleared', 'ok');
+  } catch (e) { toast(e.message); }
+  finally { btn.disabled = false; }
 }
 async function setRepairTopic(id, topic) {
   const t = repData.find(x => x.gorgias_id === id);
@@ -2202,6 +2237,7 @@ async function repToggle(id, btn) {
     box.dataset.loaded = '1';
     const t = repData.find(x => x.gorgias_id === id);
     const topic = (window.isAdmin && t) ? `<h4>Repair topic</h4>${repTopicPicker(t)}` : '';
+    const tracking = t ? repTrackingBlock(t) : '';
     const issue = `<h4 style="margin-top:14px">Customer issue</h4><div class="rc-body">${d.body ? esc(d.body) : (d.bodyErr ? '⚠️ ' + esc(d.bodyErr) : 'No message text found.')}</div>`;
     const ords = (d.orders || []).length
       ? `<h4 style="margin-top:14px">Shopify orders — ${esc(d.customer_email || 'this customer')}</h4>` + d.orders.map(o => `
@@ -2221,7 +2257,7 @@ async function repToggle(id, btn) {
           <span class="rr-hint">Posts an outgoing email on ticket #${id}. Double-check before sending — it goes to the customer.</span>
         </div>
       </div>` : '';
-    box.innerHTML = topic + issue + ords + reply;
+    box.innerHTML = topic + tracking + issue + ords + reply;
   } catch (e) { box.innerHTML = '<div class="note">⚠️ ' + esc(e.message) + '</div>'; }
 }
 async function repSendReply(id, btn) {
