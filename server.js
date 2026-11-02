@@ -1567,6 +1567,8 @@ app.get('/api/gorgias/cancel-refund', async (req, res) => {
 const COMMUNICATOR_PRODUCT_ID = '15906286371185';
 // Communicator accessories (cases etc.) — separate products, shown in the tab's own "Accessories" section.
 const COMMUNICATOR_ACCESSORY_IDS = ['15906302329201', '15942233817457', '15991068393841', '15924450034033', '15991068655985'];
+// Clicks Care Coverage for Communicator (AKKO warranty). Used on repair cards to flag covered customers.
+const CLICKS_CARE_PRODUCT_ID = '16001846575473';
 app.get('/api/communicator/stats', async (req, res) => {
   try {
     const out = await aggCached('comm|' + JSON.stringify(req.query), 120000, async () => {
@@ -1784,13 +1786,22 @@ app.get('/api/repairs/:id', async (req, res) => {
         body = String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 4000);
       } catch (e) { bodyErr = e.message; }
     }
-    let orders = [], ordersErr = null;
+    let orders = [], ordersErr = null, clicksCare = null;
     const scfg = (await getConnector('shopify'))?.config;
     if (scfg && t.customer_email) {
       try {
         const d = await shopifyGraphql(scfg, ORDERS_QUERY, { q: `email:${t.customer_email}`, sortKey: 'CREATED_AT' });
         const base = shopifyAdminOrderBase(scfg.store_domain);
-        orders = (d.orders?.nodes || []).map(normalizeOrder).slice(0, 10).map(o => ({
+        const norm = (d.orders?.nodes || []).map(normalizeOrder);
+        // Clicks Care Coverage for Communicator — match by product id or the akko SKU.
+        clicksCare = { has: false, orders: [] };
+        for (const o of norm) {
+          const hit = (o.line_items || []).some(li =>
+            String(li.product_id) === CLICKS_CARE_PRODUCT_ID ||
+            String(li.sku || '').toLowerCase().startsWith('akko'));
+          if (hit) { clicksCare.has = true; clicksCare.orders.push(o.name); }
+        }
+        orders = norm.slice(0, 10).map(o => ({
           order_number: o.name, date: String(o.created_at || '').slice(0, 10),
           total: o.total_price, currency: o.currency, fulfillment_status: o.fulfillment_status,
           financial_status: o.financial_status,
@@ -1800,7 +1811,7 @@ app.get('/api/repairs/:id', async (req, res) => {
         }));
       } catch (e) { ordersErr = e.message; }
     }
-    res.json({ gorgias_id: id, customer_name: t.customer_name, customer_email: t.customer_email, body, bodyErr, orders, ordersErr });
+    res.json({ gorgias_id: id, customer_name: t.customer_name, customer_email: t.customer_email, body, bodyErr, orders, ordersErr, clicksCare });
   } catch (e) { send500(res, e); }
 });
 

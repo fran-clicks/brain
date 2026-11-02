@@ -2255,6 +2255,11 @@ async function repToggle(id, btn) {
     const t = repData.find(x => x.gorgias_id === id);
     const topic = (window.isAdmin && t) ? `<h4>Repair topic</h4>${repTopicPicker(t)}` : '';
     const tracking = t ? repTrackingBlock(t) : '';
+    const cc = d.clicksCare
+      ? (d.clicksCare.has
+          ? `<div class="rc-care yes">🛡️ Clicks Care coverage — <b>yes</b> (${d.clicksCare.orders.map(esc).join(', ')})</div>`
+          : `<div class="rc-care no">🛡️ Clicks Care coverage — <b>none found</b></div>`)
+      : '';
     const issue = `<h4 style="margin-top:14px">Customer issue</h4><div class="rc-body">${d.body ? esc(d.body) : (d.bodyErr ? '⚠️ ' + esc(d.bodyErr) : 'No message text found.')}</div>`;
     const ords = (d.orders || []).length
       ? `<h4 style="margin-top:14px">Shopify orders — ${esc(d.customer_email || 'this customer')}</h4>` + d.orders.map(o => `
@@ -2274,7 +2279,7 @@ async function repToggle(id, btn) {
           <span class="rr-hint">Posts an outgoing email on ticket #${id}. Double-check before sending — it goes to the customer.</span>
         </div>
       </div>` : '';
-    box.innerHTML = topic + tracking + issue + ords + reply;
+    box.innerHTML = topic + cc + tracking + issue + ords + reply;
   } catch (e) { box.innerHTML = '<div class="note">⚠️ ' + esc(e.message) + '</div>'; }
 }
 async function repSendReply(id, btn) {
