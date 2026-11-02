@@ -2122,20 +2122,23 @@ function repTopicPicker(t) {
     <div class="rr-hint" style="margin-top:4px">Click any topic to assign or change it; click the highlighted one to clear.</div>`;
 }
 // Tracking code — editable while the repair is at the "shipping" stage (or if one is already set), else read-only.
+function repTrackOne(id, kind, label, value, editable) {
+  if (editable) {
+    return `<h4>${label}</h4>
+      <div class="rc-track-row">
+        <input id="reptrack-input-${kind}-${id}" class="rc-track-input" placeholder="Carrier tracking number…" value="${esc(value || '')}">
+        <button class="btn" style="margin:0;padding:6px 12px;font-size:12px" onclick="saveRepairTracking(${id}, this, '${kind}')">Save</button>
+      </div>`;
+  }
+  if (value) return `<h4>${label}</h4><div class="rc-track-view">📦 ${esc(value)}</div>`;
+  return '';
+}
 function repTrackingBlock(t) {
   const id = t.gorgias_id;
-  const canEdit = window.isAdmin && (t.stage === 'shipping' || t.tracking);
-  let inner = '';
-  if (canEdit) {
-    inner = `<h4>Tracking code${t.stage === 'shipping' ? '' : ''}</h4>
-      <div class="rc-track-row">
-        <input id="reptrack-input-${id}" class="rc-track-input" placeholder="Carrier tracking number…" value="${esc(t.tracking || '')}">
-        <button class="btn" style="margin:0;padding:6px 12px;font-size:12px" onclick="saveRepairTracking(${id}, this)">Save</button>
-      </div>`;
-  } else if (t.tracking) {
-    inner = `<h4>Tracking code</h4><div class="rc-track-view">📦 ${esc(t.tracking)}</div>`;
-  }
-  return `<div id="reptrack-${id}" class="rc-track">${inner}</div>`;
+  const admin = window.isAdmin;
+  const ship = repTrackOne(id, 'ship', 'Shipping tracking', t.tracking, admin && (t.stage === 'shipping' || t.tracking));
+  const ret = repTrackOne(id, 'return', 'Return tracking', t.return_tracking, admin && (t.stage === 'returning' || t.return_tracking));
+  return `<div id="reptrack-${id}" class="rc-track">${[ship, ret].filter(Boolean).join('')}</div>`;
 }
 function repStepper(t) {
   const cur = repStages.indexOf(t.stage); // -1 when unset
@@ -2191,29 +2194,31 @@ async function setRepairStage(id, stage) {
       if (trk) trk.outerHTML = repTrackingBlock(t);
     }
     toast('Stage set to “' + stage + '”', 'ok');
-    // Shipping needs a tracking code — open the card's details and focus the field.
-    if (stage === 'shipping') {
+    // Shipping / returning need a tracking code — open the card's details and focus the field.
+    if (stage === 'shipping' || stage === 'returning') {
       const card = document.getElementById('repc-' + id);
       if (card && !card.classList.contains('open')) {
         const btn = card.querySelector('.rc-actions button');
         if (btn) await repToggle(id, btn);
       }
+      const kind = stage === 'returning' ? 'return' : 'ship';
       setTimeout(() => {
-        const inp = document.getElementById('reptrack-input-' + id);
+        const inp = document.getElementById('reptrack-input-' + kind + '-' + id);
         if (inp) { inp.scrollIntoView({ block: 'center', behavior: 'smooth' }); inp.focus(); }
       }, 120);
     }
   } catch (e) { toast(e.message); }
 }
-async function saveRepairTracking(id, btn) {
-  const inp = document.getElementById('reptrack-input-' + id);
+async function saveRepairTracking(id, btn, kind) {
+  kind = kind || 'ship';
+  const inp = document.getElementById('reptrack-input-' + kind + '-' + id);
   const tracking = (inp?.value || '').trim();
   btn.disabled = true;
   try {
-    await api('/api/repairs/' + id + '/tracking', { method: 'POST', body: JSON.stringify({ tracking }) });
+    await api('/api/repairs/' + id + '/tracking', { method: 'POST', body: JSON.stringify({ tracking, kind: kind === 'return' ? 'return' : 'ship' }) });
     const t = repData.find(x => x.gorgias_id === id);
     if (t) {
-      t.tracking = tracking;
+      if (kind === 'return') t.return_tracking = tracking; else t.tracking = tracking;
       const trk = document.getElementById('reptrack-' + id);
       if (trk) trk.outerHTML = repTrackingBlock(t);
     }

@@ -452,6 +452,7 @@ async function initDb() {
       updated_by TEXT DEFAULT '', updated_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE repair_tickets ADD COLUMN IF NOT EXISTS topic TEXT DEFAULT '';
     ALTER TABLE repair_tickets ADD COLUMN IF NOT EXISTS tracking TEXT DEFAULT '';
+    ALTER TABLE repair_tickets ADD COLUMN IF NOT EXISTS return_tracking TEXT DEFAULT '';
     CREATE TABLE IF NOT EXISTS product_images (
       sku TEXT PRIMARY KEY, title TEXT DEFAULT '', image_url TEXT, updated_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE product_images ADD COLUMN IF NOT EXISTS variant_title TEXT DEFAULT '';
@@ -1671,7 +1672,7 @@ app.get('/api/repairs', async (req, res) => {
       const rows = (await pool.query(
         `SELECT t.gorgias_id, t.subject, t.status, t.channel, to_char(t.created_datetime,'YYYY-MM-DD') d,
                 t.customer_name, t.customer_email, t.cf_model, t.cf_colour, t.cf_country,
-                r.stage, r.topic, r.tracking, r.updated_by AS stage_by, to_char(r.updated_at,'YYYY-MM-DD HH24:MI') AS stage_at
+                r.stage, r.topic, r.tracking, r.return_tracking, r.updated_by AS stage_by, to_char(r.updated_at,'YYYY-MM-DD HH24:MI') AS stage_at
          FROM tickets_cache t
          LEFT JOIN repair_tickets r ON r.gorgias_id = t.gorgias_id
          WHERE NOT t.spam AND t.created_datetime >= $1 AND t.created_datetime < $2
@@ -1720,12 +1721,13 @@ app.post('/api/repairs/:id/tracking', async (req, res) => {
     if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
     const id = parseInt(req.params.id);
     const tracking = String(req.body?.tracking || '').trim().slice(0, 120);
+    const col = req.body?.kind === 'return' ? 'return_tracking' : 'tracking'; // outbound vs return shipment
     await pool.query(
-      `INSERT INTO repair_tickets (gorgias_id, tracking, updated_by, updated_at) VALUES ($1,$2,$3,now())
-       ON CONFLICT (gorgias_id) DO UPDATE SET tracking=$2, updated_by=$3, updated_at=now()`,
+      `INSERT INTO repair_tickets (gorgias_id, ${col}, updated_by, updated_at) VALUES ($1,$2,$3,now())
+       ON CONFLICT (gorgias_id) DO UPDATE SET ${col}=$2, updated_by=$3, updated_at=now()`,
       [id, tracking, req.userEmail || '']);
     aggCache.clear();
-    res.json({ ok: true, gorgias_id: id, tracking });
+    res.json({ ok: true, gorgias_id: id, kind: col, tracking });
   } catch (e) { send500(res, e); }
 });
 // post an outgoing reply to the customer via Gorgias (admin only)
