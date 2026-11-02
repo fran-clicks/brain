@@ -2191,6 +2191,18 @@ async function setRepairStage(id, stage) {
       if (trk) trk.outerHTML = repTrackingBlock(t);
     }
     toast('Stage set to “' + stage + '”', 'ok');
+    // Shipping needs a tracking code — open the card's details and focus the field.
+    if (stage === 'shipping') {
+      const card = document.getElementById('repc-' + id);
+      if (card && !card.classList.contains('open')) {
+        const btn = card.querySelector('.rc-actions button');
+        if (btn) await repToggle(id, btn);
+      }
+      setTimeout(() => {
+        const inp = document.getElementById('reptrack-input-' + id);
+        if (inp) { inp.scrollIntoView({ block: 'center', behavior: 'smooth' }); inp.focus(); }
+      }, 120);
+    }
   } catch (e) { toast(e.message); }
 }
 async function saveRepairTracking(id, btn) {
