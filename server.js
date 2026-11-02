@@ -450,6 +450,7 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS repair_tickets (
       gorgias_id BIGINT PRIMARY KEY, stage TEXT DEFAULT 'troubleshooting',
       updated_by TEXT DEFAULT '', updated_at TIMESTAMPTZ DEFAULT now());
+    ALTER TABLE repair_tickets ADD COLUMN IF NOT EXISTS topic TEXT DEFAULT '';
     CREATE TABLE IF NOT EXISTS product_images (
       sku TEXT PRIMARY KEY, title TEXT DEFAULT '', image_url TEXT, updated_at TIMESTAMPTZ DEFAULT now());
     ALTER TABLE product_images ADD COLUMN IF NOT EXISTS variant_title TEXT DEFAULT '';
@@ -1659,6 +1660,7 @@ app.get('/api/communicator/stats', async (req, res) => {
 // settable repair stage, a per-ticket drill-down (full customer message + their Shopify orders, both
 // live), and an admin reply box that posts an outgoing message back to the customer via Gorgias.
 const REPAIR_STAGES = ['troubleshooting', 'shipping', 'received', 'fixed', 'returning', 'arrived'];
+const REPAIR_TOPICS = ['screen', 'keys', 'dead', 'physical damage', 'clicks care'];
 app.get('/api/repairs', async (req, res) => {
   try {
     const days = Math.max(parseInt(req.query.days) || 365, 1); // allow large values (e.g. "All") — not capped like resolveWindow
@@ -1668,14 +1670,14 @@ app.get('/api/repairs', async (req, res) => {
       const rows = (await pool.query(
         `SELECT t.gorgias_id, t.subject, t.status, t.channel, to_char(t.created_datetime,'YYYY-MM-DD') d,
                 t.customer_name, t.customer_email, t.cf_model, t.cf_colour, t.cf_country,
-                r.stage, r.updated_by AS stage_by, to_char(r.updated_at,'YYYY-MM-DD HH24:MI') AS stage_at
+                r.stage, r.topic, r.updated_by AS stage_by, to_char(r.updated_at,'YYYY-MM-DD HH24:MI') AS stage_at
          FROM tickets_cache t
          LEFT JOIN repair_tickets r ON r.gorgias_id = t.gorgias_id
          WHERE NOT t.spam AND t.created_datetime >= $1 AND t.created_datetime < $2
            AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(t.tags) tg WHERE tg ILIKE '%repair%')
          ORDER BY t.created_datetime DESC LIMIT 500`, p)).rows;
       const cfg = (await getConnector('gorgias'))?.config;
-      return { days, from: p[0], to: p[1], stages: REPAIR_STAGES,
+      return { days, from: p[0], to: p[1], stages: REPAIR_STAGES, topics: REPAIR_TOPICS,
         gorgias_domain: cfg?.domain || process.env.GORGIAS_DOMAIN || null, count: rows.length, tickets: rows };
     });
     res.json(out);
@@ -1694,6 +1696,21 @@ app.post('/api/repairs/:id/stage', async (req, res) => {
       [id, stage, req.userEmail || '']);
     aggCache.clear(); // list is cached — drop it so the new stage shows immediately
     res.json({ ok: true, gorgias_id: id, stage });
+  } catch (e) { send500(res, e); }
+});
+// set (or clear, with "") the repair topic for a ticket (admin only)
+app.post('/api/repairs/:id/topic', async (req, res) => {
+  try {
+    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+    const id = parseInt(req.params.id);
+    const topic = String(req.body?.topic || '').toLowerCase();
+    if (topic && !REPAIR_TOPICS.includes(topic)) return res.status(400).json({ error: 'invalid topic' });
+    await pool.query(
+      `INSERT INTO repair_tickets (gorgias_id, topic, updated_by, updated_at) VALUES ($1,$2,$3,now())
+       ON CONFLICT (gorgias_id) DO UPDATE SET topic=$2, updated_by=$3, updated_at=now()`,
+      [id, topic, req.userEmail || '']);
+    aggCache.clear();
+    res.json({ ok: true, gorgias_id: id, topic });
   } catch (e) { send500(res, e); }
 });
 // post an outgoing reply to the customer via Gorgias (admin only)

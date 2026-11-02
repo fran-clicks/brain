@@ -2080,12 +2080,46 @@ async function loadRepairs() {
     const r = await api('/api/repairs?days=' + repDays);
     repData = r.tickets || []; repGorgiasDomain = r.gorgias_domain;
     if (Array.isArray(r.stages) && r.stages.length) repStages = r.stages;
+    if (Array.isArray(r.topics) && r.topics.length) repTopics = r.topics;
     renderRepairs();
     document.getElementById('repNote').textContent = `${repData.length} repair ticket${repData.length === 1 ? '' : 's'} in range.`;
   } catch (e) { document.getElementById('repNote').textContent = '⚠️ ' + e.message; }
   finally { document.getElementById('repUpdating').classList.remove('on'); }
 }
 const repTk = (id, label) => repGorgiasDomain ? `<a href="https://${esc(repGorgiasDomain)}.gorgias.com/app/ticket/${id}" target="_blank">${label}</a>` : label;
+// repair topics: label, colours and a small inline-SVG "logo" per topic
+const REP_ICON = {
+  screen: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+  keys: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg>',
+  dead: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="18" height="10" rx="2"/><path d="M22 10v4M7 12h6"/></svg>',
+  'physical damage': '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg>',
+  'clicks care': '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4-3 7-7 9-4-2-7-5-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg>'
+};
+const REP_TOPIC_META = {
+  screen: { label: 'Screen', color: '#2563eb', bg: '#eff6ff', border: '#bfdbfe' },
+  keys: { label: 'Keys', color: '#7c3aed', bg: '#f5f3ff', border: '#ddd6fe' },
+  dead: { label: 'Dead', color: '#4b5563', bg: '#f3f4f6', border: '#d1d5db' },
+  'physical damage': { label: 'Physical damage', color: '#ea580c', bg: '#fff7ed', border: '#fed7aa' },
+  'clicks care': { label: 'Clicks Care', color: '#16a34a', bg: '#f0fdf4', border: '#bbf7d0' }
+};
+let repTopics = ['screen', 'keys', 'dead', 'physical damage', 'clicks care'];
+function repTopicBadge(t) {
+  const id = `reptopic-${t.gorgias_id}`;
+  const m = t.topic && REP_TOPIC_META[t.topic];
+  if (!m) return `<span id="${id}"></span>`;
+  return `<span id="${id}" class="rep-topic" style="--tc:${m.color};background:${m.bg};border-color:${m.border}">${REP_ICON[t.topic] || ''}${esc(m.label)}</span>`;
+}
+function repTopicPicker(t) {
+  if (!window.isAdmin) return '';
+  const cur = t.topic || '';
+  const btns = repTopics.map(tp => {
+    const m = REP_TOPIC_META[tp] || { label: tp, color: '#6b7280' };
+    const on = tp === cur;
+    const style = on ? `background:${m.color};border-color:${m.color};color:#fff` : `color:${m.color}`;
+    return `<button type="button" class="${on ? 'on' : ''}" style="${style}" title="${on ? 'Click to clear' : 'Assign ' + m.label}" onclick="setRepairTopic(${t.gorgias_id}, '${tp.replace(/'/g, "\\'")}')">${REP_ICON[tp] || ''}${esc(m.label)}</button>`;
+  }).join('');
+  return `<div class="rep-topicpick" id="reppick-${t.gorgias_id}"><span class="rp-lbl">Topic:</span>${btns}</div>`;
+}
 function repStepper(t) {
   const cur = repStages.indexOf(t.stage); // -1 when unset
   const admin = window.isAdmin;
@@ -2105,7 +2139,7 @@ function repChip(t) {
 }
 function renderRepairs() {
   const q = (document.getElementById('repSearch').value || '').toLowerCase();
-  const rows = repData.filter(t => [t.customer_name, t.customer_email, t.subject, t.cf_model, t.cf_colour, t.stage].join(' ').toLowerCase().includes(q));
+  const rows = repData.filter(t => [t.customer_name, t.customer_email, t.subject, t.cf_model, t.cf_colour, t.stage, t.topic].join(' ').toLowerCase().includes(q));
   const box = document.getElementById('repCards');
   if (!rows.length) { box.innerHTML = '<div class="empty" style="padding:24px">No repair-tagged tickets in this range.</div>'; return; }
   box.innerHTML = rows.map(t => {
@@ -2115,10 +2149,11 @@ function renderRepairs() {
         <div class="rc-id">${repTk(t.gorgias_id, '#' + t.gorgias_id)} ${repChip(t)}</div>
         <div class="rc-date"><span class="tag ${t.status === 'open' ? 'pending' : 'approved'}">${esc(t.status)}</span> · ${esc(t.d)}</div>
       </div>
-      <div class="rc-cust">${esc(t.customer_name || '—')}</div>
+      <div class="rc-cust">${esc(t.customer_name || '—')} ${repTopicBadge(t)}</div>
       <div class="rc-meta">${esc(t.customer_email || '')}${device ? ' · ' + device : ''}</div>
       <div class="rc-subj">${esc(t.subject || '(no subject)')}</div>
       ${repStepper(t)}
+      ${repTopicPicker(t)}
       <div class="rc-actions">
         <button class="btn" style="margin:0;padding:5px 12px;font-size:12px;background:#fff;color:var(--ink);border:1px solid var(--line);box-shadow:none" onclick="repToggle(${t.gorgias_id}, this)">Open details ▾</button>
       </div>
@@ -2138,6 +2173,21 @@ async function setRepairStage(id, stage) {
       if (chip) chip.outerHTML = repChip(t);
     }
     toast('Stage set to “' + stage + '”', 'ok');
+  } catch (e) { toast(e.message); }
+}
+async function setRepairTopic(id, topic) {
+  const t = repData.find(x => x.gorgias_id === id);
+  const next = (t && t.topic === topic) ? '' : topic; // click the active topic again to clear it
+  try {
+    await api('/api/repairs/' + id + '/topic', { method: 'POST', body: JSON.stringify({ topic: next }) });
+    if (t) {
+      t.topic = next;
+      const badge = document.getElementById('reptopic-' + id);
+      if (badge) badge.outerHTML = repTopicBadge(t);
+      const pick = document.getElementById('reppick-' + id);
+      if (pick) pick.outerHTML = repTopicPicker(t);
+    }
+    toast(next ? 'Topic set to “' + (REP_TOPIC_META[next]?.label || next) + '”' : 'Topic cleared', 'ok');
   } catch (e) { toast(e.message); }
 }
 async function repToggle(id, btn) {
