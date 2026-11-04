@@ -4619,10 +4619,10 @@ async function buildDailyReport() {
     WHERE cancelled_at IS NULL AND ${DAY} = ${TODAY} AND it->>'product_id' = '${COMMUNICATOR_PRODUCT_ID}'
     GROUP BY 1 ORDER BY 2 DESC`)).rows;
   const commAcc = (await pool.query(`
-    SELECT it->>'title' title, sum((it->>'qty')::int)::int u
+    SELECT it->>'title' title, it->>'variant' variant, sum((it->>'qty')::int)::int u
     FROM orders_cache, LATERAL jsonb_array_elements(items) it
     WHERE cancelled_at IS NULL AND ${DAY} = ${TODAY} AND it->>'product_id' IN (${accIn})
-    GROUP BY 1 ORDER BY 2 DESC`)).rows;
+    GROUP BY 1, 2 ORDER BY 3 DESC`)).rows;
   const commCare = (await pool.query(`
     SELECT coalesce(sum((it->>'qty')::int),0)::int u
     FROM orders_cache, LATERAL jsonb_array_elements(items) it
@@ -4630,7 +4630,7 @@ async function buildDailyReport() {
       AND (it->>'product_id' = '${CLICKS_CARE_PRODUCT_ID}' OR lower(it->>'sku') LIKE 'akko%')`)).rows[0]?.u || 0;
   const commUnits = commCol.reduce((t, r) => t + r.u, 0);
   const commColText = commCol.length ? commCol.map(r => `${slackEsc(r.colour || '—')} ×${r.u}`).join(' · ') : '_none today_';
-  const commAccText = commAcc.length ? commAcc.map(r => `${slackEsc(r.title)} ×${r.u}`).join(' · ') : '_none today_';
+  const commAccText = commAcc.length ? commAcc.map(r => `${slackEsc(r.title)}${r.variant ? ` (${slackEsc(r.variant)})` : ''} ×${r.u}`).join(' · ') : '_none today_';
   const commAttach = commUnits > 0 ? Math.round(commCare / commUnits * 100) : 0;
 
   const g = (await pool.query(`SELECT
