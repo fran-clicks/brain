@@ -4660,7 +4660,7 @@ async function buildDailyReport() {
            percentile_cont(0.5) WITHIN GROUP (ORDER BY res) median_res,
            avg(res) avg_res
     FROM (
-      SELECT (cf_solved_by ILIKE '%siena%') siena,   -- resolver = Siena, i.e. she closed it herself (not just first-responded)
+      SELECT EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t) = 'handled-by-siena') siena, -- Siena resolved it herself (not escalated/assisted)
              extract(epoch FROM (closed_datetime - created_datetime)) res
       FROM tickets_cache
       WHERE NOT coalesce(spam,false) AND closed_datetime IS NOT NULL
