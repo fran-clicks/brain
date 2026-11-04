@@ -4660,7 +4660,7 @@ async function buildDailyReport() {
            percentile_cont(0.5) WITHIN GROUP (ORDER BY res) median_res,
            avg(res) avg_res
     FROM (
-      SELECT (EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE t ILIKE '%siena%') OR cf_solved_by ILIKE '%siena%') siena,
+      SELECT (cf_solved_by ILIKE '%siena%') siena,   -- resolver = Siena, i.e. she closed it herself (not just first-responded)
              extract(epoch FROM (closed_datetime - created_datetime)) res
       FROM tickets_cache
       WHERE NOT coalesce(spam,false) AND closed_datetime IS NOT NULL
@@ -4694,6 +4694,18 @@ async function buildDailyReport() {
     frOverdue.length ? `⚠️ Overdue: ${frOverdue.map(x => `${slackEsc(x.name)} (${x.eta})`).join(', ')}` : ''
   ].filter(Boolean).join('\n') || '_no shipments arriving in the next 7 days_';
 
+  // CSAT (latest satisfaction scores, best-effort live from Gorgias)
+  let csat = null, csatN = 0;
+  try {
+    const gcfg = await getGorgiasConfig();
+    if (gcfg) {
+      const sv = await gorgiasRequest(gcfg, '/api/satisfaction-surveys?limit=100');
+      const scored = (sv.data || []).filter(x => typeof x.score === 'number');
+      csatN = scored.length;
+      csat = scored.length ? +(scored.reduce((a, x) => a + x.score, 0) / scored.length).toFixed(2) : null;
+    }
+  } catch (e) { /* best-effort: shows "—" */ }
+
   const today = new Date().toLocaleDateString('en-GB', { timeZone: REPORT_TZ, weekday: 'long', day: 'numeric', month: 'long' });
   const appUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || 'https://clicks-brain.onrender.com').replace(/\/$/, '');
   const blocks = [
@@ -4721,8 +4733,9 @@ async function buildDailyReport() {
     { type: 'section', fields: [
       { type: 'mrkdwn', text: `*🎧 New tickets*\n${g.new_today || 0}` },
       { type: 'mrkdwn', text: `*✅ Closed today*\n${closedToday}` },
-      { type: 'mrkdwn', text: `*🤖 Handled by Siena*\n${sienaClosed}  _(${sienaPct}% · ${teamClosed} by team)_` },
+      { type: 'mrkdwn', text: `*🤖 Resolved by Siena*\n${sienaClosed}  _(${sienaPct}% · ${teamClosed} by team)_` },
       { type: 'mrkdwn', text: `*⏱️ Resolution (med · avg)*\n${dur(tc.median_res)} · ${dur(tc.avg_res)}` },
+      { type: 'mrkdwn', text: `*😊 CSAT (last ${csatN})*\n${csat != null ? csat + '/5' : '—'}` },
       { type: 'mrkdwn', text: `*🔴 Difficult (open, 10+ msgs)*\n${g.difficult || 0}` },
       { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
     ] },
