@@ -4658,7 +4658,7 @@ async function buildDailyReport() {
     SELECT count(*)::int closed,
            count(*) FILTER (WHERE siena)::int closed_siena,
            percentile_cont(0.5) WITHIN GROUP (ORDER BY res) median_res,
-           avg(res) avg_res
+           avg(least(res, 604800)) avg_res   -- cap each ticket at 7d so stale tickets closed today don't skew the mean
     FROM (
       SELECT EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t) = 'handled-by-siena') siena, -- Siena resolved it herself (not escalated/assisted)
              extract(epoch FROM (closed_datetime - created_datetime)) res
