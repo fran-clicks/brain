@@ -4694,18 +4694,6 @@ async function buildDailyReport() {
     frOverdue.length ? `⚠️ Overdue: ${frOverdue.map(x => `${slackEsc(x.name)} (${x.eta})`).join(', ')}` : ''
   ].filter(Boolean).join('\n') || '_no shipments arriving in the next 7 days_';
 
-  // CSAT (latest satisfaction scores, best-effort live from Gorgias)
-  let csat = null, csatN = 0;
-  try {
-    const gcfg = await getGorgiasConfig();
-    if (gcfg) {
-      const sv = await gorgiasRequest(gcfg, '/api/satisfaction-surveys?limit=100');
-      const scored = (sv.data || []).filter(x => typeof x.score === 'number');
-      csatN = scored.length;
-      csat = scored.length ? +(scored.reduce((a, x) => a + x.score, 0) / scored.length).toFixed(2) : null;
-    }
-  } catch (e) { /* best-effort: shows "—" */ }
-
   const today = new Date().toLocaleDateString('en-GB', { timeZone: REPORT_TZ, weekday: 'long', day: 'numeric', month: 'long' });
   const appUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || 'https://clicks-brain.onrender.com').replace(/\/$/, '');
   const blocks = [
@@ -4735,7 +4723,6 @@ async function buildDailyReport() {
       { type: 'mrkdwn', text: `*✅ Closed today*\n${closedToday}` },
       { type: 'mrkdwn', text: `*🤖 Resolved by Siena*\n${sienaClosed}  _(${sienaPct}% · ${teamClosed} by team)_` },
       { type: 'mrkdwn', text: `*⏱️ Resolution*\n${dur(tc.median_res)} median · 90% ≤ ${dur(tc.p90_res)}` },
-      { type: 'mrkdwn', text: `*😊 CSAT (last ${csatN})*\n${csat != null ? csat + '/5' : '—'}` },
       { type: 'mrkdwn', text: `*🔴 Difficult (open, 10+ msgs)*\n${g.difficult || 0}` },
       { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
     ] },
@@ -4781,24 +4768,6 @@ app.get('/api/report/siena-check', async (req, res) => {
       WHERE closed_datetime >= now() - interval '30 days' AND t ILIKE '%siena%'
       GROUP BY 1 ORDER BY 2 DESC`)).rows;
     res.json({ solved_by_values, siena_tags });
-  } catch (e) { send500(res, e); }
-});
-// diagnostic (admin): inspect the Gorgias satisfaction-survey payload so we can see where CSAT scores live
-app.get('/api/report/csat-check', async (req, res) => {
-  try {
-    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
-    const gcfg = await getGorgiasConfig();
-    if (!gcfg) return res.json({ error: 'Gorgias not connected' });
-    const sv = await gorgiasRequest(gcfg, '/api/satisfaction-surveys?limit=100');
-    const data = sv.data || [];
-    const scored = data.filter(x => typeof x.score === 'number');
-    res.json({
-      returned: data.length,
-      scored_numeric: scored.length,
-      meta: sv.meta || null,
-      sample_keys: data[0] ? Object.keys(data[0]) : [],
-      samples: data.slice(0, 3).map(x => ({ score: x.score, scored_at: x.scored_at, created_datetime: x.created_datetime, sent_datetime: x.sent_datetime }))
-    });
   } catch (e) { send500(res, e); }
 });
 // in-app scheduler: post once when the Europe/London clock reaches 18:00 (reliable on an always-on plan)
