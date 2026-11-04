@@ -4597,6 +4597,42 @@ async function buildDailyReport() {
     WHERE (fulfilled_at AT TIME ZONE 'Europe/London')::date = ${TODAY}`)).rows[0]?.c || 0;
   const cur = s.cur || 'USD';
 
+  // Sales depth: AOV, week-to-date / month-to-date revenue, and today's top products.
+  const aov = (+s.o0 > 0) ? (+s.r0 / +s.o0) : 0;
+  const wm = (await pool.query(`
+    SELECT coalesce(sum(total_price) FILTER (WHERE d >= date_trunc('week', t)),0)::numeric wtd,
+           coalesce(sum(total_price) FILTER (WHERE d >= date_trunc('month', t)),0)::numeric mtd
+    FROM (SELECT total_price, ${DAY} d, ${TODAY} t FROM orders_cache
+          WHERE cancelled_at IS NULL AND created_at >= now() - interval '40 days') x`)).rows[0] || {};
+  const topProd = (await pool.query(`
+    SELECT it->>'title' title, sum((it->>'qty')::int)::int u
+    FROM orders_cache, LATERAL jsonb_array_elements(items) it
+    WHERE cancelled_at IS NULL AND ${DAY} = ${TODAY}
+    GROUP BY 1 ORDER BY 2 DESC LIMIT 3`)).rows;
+  const topProdText = topProd.length ? topProd.map(r => `${slackEsc(r.title)} ×${r.u}`).join(' · ') : '_no sales yet today_';
+
+  // Communicator breakdown (today): device units by colour, accessories, and Clicks Care attach.
+  const accIn = COMMUNICATOR_ACCESSORY_IDS.map(x => `'${x}'`).join(',') || `''`;
+  const commCol = (await pool.query(`
+    SELECT trim(split_part(it->>'variant','/',1)) colour, sum((it->>'qty')::int)::int u
+    FROM orders_cache, LATERAL jsonb_array_elements(items) it
+    WHERE cancelled_at IS NULL AND ${DAY} = ${TODAY} AND it->>'product_id' = '${COMMUNICATOR_PRODUCT_ID}'
+    GROUP BY 1 ORDER BY 2 DESC`)).rows;
+  const commAcc = (await pool.query(`
+    SELECT it->>'title' title, sum((it->>'qty')::int)::int u
+    FROM orders_cache, LATERAL jsonb_array_elements(items) it
+    WHERE cancelled_at IS NULL AND ${DAY} = ${TODAY} AND it->>'product_id' IN (${accIn})
+    GROUP BY 1 ORDER BY 2 DESC`)).rows;
+  const commCare = (await pool.query(`
+    SELECT coalesce(sum((it->>'qty')::int),0)::int u
+    FROM orders_cache, LATERAL jsonb_array_elements(items) it
+    WHERE cancelled_at IS NULL AND ${DAY} = ${TODAY}
+      AND (it->>'product_id' = '${CLICKS_CARE_PRODUCT_ID}' OR lower(it->>'sku') LIKE 'akko%')`)).rows[0]?.u || 0;
+  const commUnits = commCol.reduce((t, r) => t + r.u, 0);
+  const commColText = commCol.length ? commCol.map(r => `${slackEsc(r.colour || '—')} ×${r.u}`).join(' · ') : '_none today_';
+  const commAccText = commAcc.length ? commAcc.map(r => `${slackEsc(r.title)} ×${r.u}`).join(' · ') : '_none today_';
+  const commAttach = commUnits > 0 ? Math.round(commCare / commUnits * 100) : 0;
+
   const g = (await pool.query(`SELECT
       count(*) FILTER (WHERE (created_datetime AT TIME ZONE 'Europe/London')::date = ${TODAY} AND coalesce(spam,false)=false) new_today,
       count(*) FILTER (WHERE status='open') open_now,
@@ -4632,10 +4668,21 @@ async function buildDailyReport() {
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*💰 Sales*' }] },
     { type: 'section', fields: [
       { type: 'mrkdwn', text: `*🛒 Orders today*\n${s.o0 || 0}  _(${delta(+s.o0, +s.o1)} vs yday · ${delta(+s.o0, +s.o7)} vs last wk)_` },
-      { type: 'mrkdwn', text: `*💷 Revenue today*\n${money(+s.r0, cur)}  _(${delta(+s.r0, +s.r7)} vs last wk)_` },
+      { type: 'mrkdwn', text: `*💷 Revenue today*\n${money(+s.r0, cur)}  _(${delta(+s.r0, +s.r1)} vs yday · ${delta(+s.r0, +s.r7)} vs last wk)_` },
       { type: 'mrkdwn', text: `*📦 Units today*\n${units0.toLocaleString()}` },
+      { type: 'mrkdwn', text: `*🧾 Avg order value*\n${money(aov, cur)}` },
       { type: 'mrkdwn', text: `*✅ Fulfilled today*\n${fdt.toLocaleString()}` }
     ] },
+    { type: 'section', text: { type: 'mrkdwn', text: `*📆 Week-to-date:* ${money(+wm.wtd, cur)}   ·   *Month-to-date:* ${money(+wm.mtd, cur)}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*🏆 Top sellers today:* ${topProdText}` } },
+    { type: 'divider' },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: '*📟 Communicator (today)*' }] },
+    { type: 'section', fields: [
+      { type: 'mrkdwn', text: `*📟 Devices sold*\n${commUnits}` },
+      { type: 'mrkdwn', text: `*🛡️ Clicks Care*\n${commCare}  _(${commAttach}% attach)_` }
+    ] },
+    { type: 'section', text: { type: 'mrkdwn', text: `*🎨 By colour:* ${commColText}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*🧩 Accessories:* ${commAccText}` } },
     { type: 'divider' },
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🎧 Support & marketing*' }] },
     { type: 'section', fields: [
