@@ -4653,6 +4653,23 @@ async function buildDailyReport() {
       count(*) FILTER (WHERE status='open') open_now,
       count(*) FILTER (WHERE status='open' AND messages_count>=10) difficult
     FROM tickets_cache`)).rows[0] || {};
+  // Closed today, Siena-handled split, and median resolution time (created -> closed).
+  const tc = (await pool.query(`
+    SELECT count(*)::int closed,
+           count(*) FILTER (WHERE siena)::int closed_siena,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY res) median_res
+    FROM (
+      SELECT (EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE t ILIKE '%siena%') OR cf_solved_by ILIKE '%siena%') siena,
+             extract(epoch FROM (closed_datetime - created_datetime)) res
+      FROM tickets_cache
+      WHERE NOT coalesce(spam,false) AND closed_datetime IS NOT NULL
+        AND (closed_datetime AT TIME ZONE 'Europe/London')::date = ${TODAY}
+    ) x`)).rows[0] || {};
+  const closedToday = tc.closed || 0;
+  const sienaClosed = tc.closed_siena || 0;
+  const teamClosed = closedToday - sienaClosed;
+  const sienaPct = closedToday > 0 ? Math.round(sienaClosed / closedToday * 100) : 0;
+  const dur = sec => { if (sec == null) return '—'; sec = Math.round(sec); if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))}m`; const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60); return `${h}h ${m}m`; };
   const ret = (await pool.query(`SELECT
       count(*) FILTER (WHERE ${DAY} = ${TODAY}) today,
       count(*) FILTER (WHERE created_at >= now()-interval '7 days') last7 FROM returns_cache`)).rows[0] || {};
@@ -4702,6 +4719,9 @@ async function buildDailyReport() {
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🎧 Support & marketing*' }] },
     { type: 'section', fields: [
       { type: 'mrkdwn', text: `*🎧 New tickets*\n${g.new_today || 0}` },
+      { type: 'mrkdwn', text: `*✅ Closed today*\n${closedToday}` },
+      { type: 'mrkdwn', text: `*🤖 Handled by Siena*\n${sienaClosed}  _(${sienaPct}% · ${teamClosed} by team)_` },
+      { type: 'mrkdwn', text: `*⏱️ Median resolution*\n${dur(tc.median_res)}` },
       { type: 'mrkdwn', text: `*🔴 Difficult (open, 10+ msgs)*\n${g.difficult || 0}` },
       { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
     ] },
