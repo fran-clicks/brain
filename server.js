@@ -478,17 +478,6 @@ async function initDb() {
       requested_by TEXT DEFAULT 'anonymous', status TEXT DEFAULT 'pending',
       decided_by TEXT, decided_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
   `);
-  // one-time backfill: set non_support on existing tickets (new/updated rows get it at sync time)
-  {
-    const migV = (await lockClient.query(`SELECT v FROM sync_state WHERE k='migrations'`)).rows[0]?.v || {};
-    if (!migV.non_support_v1) {
-      await lockClient.query(`UPDATE tickets_cache SET non_support = EXISTS (
-        SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t) IN ('auto-close','non-support-related'))`);
-      await lockClient.query(
-        `INSERT INTO sync_state (k, v) VALUES ('migrations', $1::jsonb)
-         ON CONFLICT (k) DO UPDATE SET v = sync_state.v || $1::jsonb`, [JSON.stringify({ non_support_v1: true })]);
-    }
-  }
   // single flat knowledge base: ensure one "main" base, and fold any legacy bases in as sources (once)
   let mainKb = (await lockClient.query(`SELECT id FROM kb_suggestions WHERE is_main LIMIT 1`)).rows[0]?.id;
   if (!mainKb) {
@@ -4974,5 +4963,22 @@ initDb()
         '| ENCRYPTION_KEY set:', !!process.env.ENCRYPTION_KEY);
     });
     bootSync().catch(e => console.error('boot sync:', e.message));
+    backfillNonSupport().catch(e => console.error('non_support backfill:', e.message)); // runs after listen so it never blocks boot
   })
   .catch((e) => { console.error('DB init failed:', e); process.exit(1); });
+
+// one-time, in the background: set non_support=true on existing tagged tickets (new/updated rows get it at sync time)
+async function backfillNonSupport() {
+  const migV = (await pool.query(`SELECT v FROM sync_state WHERE k='migrations'`)).rows[0]?.v || {};
+  if (migV.non_support_v1) return;
+  const client = await pool.connect();
+  try {
+    await client.query('SET statement_timeout = 0'); // one-time full scan — don't let the pool cap kill it
+    await client.query(`UPDATE tickets_cache SET non_support = true
+      WHERE non_support = false
+        AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t) IN ('auto-close','non-support-related'))`);
+    await client.query(`INSERT INTO sync_state (k, v) VALUES ('migrations', $1::jsonb)
+      ON CONFLICT (k) DO UPDATE SET v = sync_state.v || $1::jsonb`, [JSON.stringify({ non_support_v1: true })]);
+    console.log('non_support backfill: done');
+  } finally { client.release(); }
+}
