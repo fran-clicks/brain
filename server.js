@@ -362,11 +362,14 @@ async function initDb() {
     ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS cf_solved_by TEXT DEFAULT '';
     ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS cf_ai_intent TEXT DEFAULT '';
     ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS custom_fields JSONB DEFAULT '{}';
+    ALTER TABLE tickets_cache ADD COLUMN IF NOT EXISTS non_support BOOLEAN DEFAULT false;
     CREATE INDEX IF NOT EXISTS idx_tc_created ON tickets_cache (created_datetime);
     CREATE INDEX IF NOT EXISTS idx_tc_closed ON tickets_cache (closed_datetime);
-    -- partial indexes (exclude spam) so the Overview backlog counts stay fast under load / during big backfills
+    -- partial indexes (exclude spam + non-support) so the Overview backlog counts stay fast under load / during big backfills
     CREATE INDEX IF NOT EXISTS idx_tc_created_live ON tickets_cache (created_datetime) WHERE NOT spam;
     CREATE INDEX IF NOT EXISTS idx_tc_closed_live ON tickets_cache (closed_datetime) WHERE NOT spam;
+    CREATE INDEX IF NOT EXISTS idx_tc_created_sup ON tickets_cache (created_datetime) WHERE NOT spam AND NOT non_support;
+    CREATE INDEX IF NOT EXISTS idx_tc_closed_sup ON tickets_cache (closed_datetime) WHERE NOT spam AND NOT non_support;
     CREATE TABLE IF NOT EXISTS events (
       id SERIAL PRIMARY KEY, title TEXT NOT NULL, description TEXT DEFAULT '',
       event_date DATE NOT NULL, added_by TEXT DEFAULT 'anonymous',
@@ -475,6 +478,17 @@ async function initDb() {
       requested_by TEXT DEFAULT 'anonymous', status TEXT DEFAULT 'pending',
       decided_by TEXT, decided_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
   `);
+  // one-time backfill: set non_support on existing tickets (new/updated rows get it at sync time)
+  {
+    const migV = (await lockClient.query(`SELECT v FROM sync_state WHERE k='migrations'`)).rows[0]?.v || {};
+    if (!migV.non_support_v1) {
+      await lockClient.query(`UPDATE tickets_cache SET non_support = EXISTS (
+        SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t) IN ('auto-close','non-support-related'))`);
+      await lockClient.query(
+        `INSERT INTO sync_state (k, v) VALUES ('migrations', $1::jsonb)
+         ON CONFLICT (k) DO UPDATE SET v = sync_state.v || $1::jsonb`, [JSON.stringify({ non_support_v1: true })]);
+    }
+  }
   // single flat knowledge base: ensure one "main" base, and fold any legacy bases in as sources (once)
   let mainKb = (await lockClient.query(`SELECT id FROM kb_suggestions WHERE is_main LIMIT 1`)).rows[0]?.id;
   if (!mainKb) {
@@ -1301,23 +1315,27 @@ const BACKFILL_HORIZON_DAYS = 400; // keep ~13 months of history
 // as custom_fields[id].value. "Other"/blank is kept as-is; callers treat those as "not captured".
 const GORGIAS_CF = { category: '235346', model: '235348', colour: '235351', country: '235350', solved_by: '235349', ai_intent: '229827' };
 const cfVal = (cf, key) => String(cf?.[GORGIAS_CF[key]]?.value || '').slice(0, 200);
+// tags that mean a ticket isn't a real support item — excluded from backlog/graph totals (alongside spam)
+const NON_SUPPORT_TAGS = ['auto-close', 'non-support-related'];
 async function upsertTicket(x) {
   const cf = x.custom_fields || {};
+  const tagNames = (x.tags || []).map(g => g?.name).filter(Boolean);
+  const nonSupport = tagNames.some(t => NON_SUPPORT_TAGS.includes(String(t).toLowerCase()));
   await pool.query(
     `INSERT INTO tickets_cache (gorgias_id, status, subject, channel, tags, created_datetime, closed_datetime, updated_datetime, spam, messages_count, customer_email, customer_name,
-       cf_category, cf_model, cf_colour, cf_country, cf_solved_by, cf_ai_intent, custom_fields, synced_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,now())
+       cf_category, cf_model, cf_colour, cf_country, cf_solved_by, cf_ai_intent, custom_fields, non_support, synced_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,now())
      ON CONFLICT (gorgias_id) DO UPDATE SET status=$2, subject=$3, channel=$4, tags=$5,
        created_datetime=$6, closed_datetime=$7, updated_datetime=$8, spam=$9,
        messages_count=$10, customer_email=$11, customer_name=$12,
-       cf_category=$13, cf_model=$14, cf_colour=$15, cf_country=$16, cf_solved_by=$17, cf_ai_intent=$18, custom_fields=$19, synced_at=now()`,
+       cf_category=$13, cf_model=$14, cf_colour=$15, cf_country=$16, cf_solved_by=$17, cf_ai_intent=$18, custom_fields=$19, non_support=$20, synced_at=now()`,
     [x.id, x.status || '', (x.subject || '').slice(0, 500), x.channel || '',
-     JSON.stringify((x.tags || []).map(g => g?.name).filter(Boolean)),
+     JSON.stringify(tagNames),
      x.created_datetime || null, x.closed_datetime || null, x.updated_datetime || null, !!x.spam,
      Number.isFinite(x.messages_count) ? x.messages_count : null,
      (x.customer?.email || '').slice(0, 200), (x.customer?.name || '').slice(0, 200),
      cfVal(cf, 'category'), cfVal(cf, 'model'), cfVal(cf, 'colour'), cfVal(cf, 'country'), cfVal(cf, 'solved_by'), cfVal(cf, 'ai_intent'),
-     JSON.stringify(cf)]);
+     JSON.stringify(cf), nonSupport]);
 }
 
 // re-verify every ticket the cache still thinks is open against Gorgias, in batches of 100.
@@ -3778,14 +3796,14 @@ async function overviewStats(win) {
   // spam and trashed tickets are excluded everywhere to match Gorgias's "All" view / reporting
   const mkCount = (col, extra = '') =>
     `SELECT date_trunc('${bucket}', ${col})::date d, count(*)::int c FROM tickets_cache
-     WHERE ${col} >= $1 AND ${col} < $2 AND NOT spam ${extra} GROUP BY 1 ORDER BY 1`;
+     WHERE ${col} >= $1 AND ${col} < $2 AND NOT spam AND NOT non_support ${extra} GROUP BY 1 ORDER BY 1`;
   const mkCats = (col, extra = '') =>
     `SELECT date_trunc('${bucket}', ${col})::date d, ${catSelects} FROM tickets_cache
-     WHERE ${col} >= $1 AND ${col} < $2 AND NOT spam ${extra} GROUP BY 1 ORDER BY 1`;
+     WHERE ${col} >= $1 AND ${col} < $2 AND NOT spam AND NOT non_support ${extra} GROUP BY 1 ORDER BY 1`;
   const mkTags = (col, extra = '') =>
     `SELECT date_trunc('${bucket}', ${col})::date d, t.tag, count(*)::int c
      FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t(tag)
-     WHERE ${col} >= $1 AND ${col} < $2 AND NOT spam ${extra} GROUP BY 1, 2 ORDER BY 1, 3 DESC`;
+     WHERE ${col} >= $1 AND ${col} < $2 AND NOT spam AND NOT non_support ${extra} GROUP BY 1, 2 ORDER BY 1, 3 DESC`;
   // "tickets to solve" = open backlog at the END of each bucket. Computed in ONE query: an opening balance
   // (tickets open at the window start = created-before − closed-before, two fast indexed counts) plus a
   // running cumulative of per-bucket created minus closed within the window. Avoids the old per-bucket
@@ -3793,11 +3811,11 @@ async function overviewStats(win) {
   const backlogQuery =
     `WITH b AS (SELECT generate_series(date_trunc('${bucket}',$1::timestamptz), date_trunc('${bucket}',$2::timestamptz), interval '1 ${bucket}') bk),
      cr AS (SELECT date_trunc('${bucket}',created_datetime) bk, count(*)::int c FROM tickets_cache
-            WHERE NOT spam AND created_datetime >= $1 AND created_datetime < $2 GROUP BY 1),
+            WHERE NOT spam AND NOT non_support AND created_datetime >= $1 AND created_datetime < $2 GROUP BY 1),
      cl AS (SELECT date_trunc('${bucket}',closed_datetime) bk, count(*)::int c FROM tickets_cache
-            WHERE NOT spam AND closed_datetime >= $1 AND closed_datetime < $2 GROUP BY 1),
-     open0 AS (SELECT (SELECT count(*) FROM tickets_cache WHERE NOT spam AND created_datetime < $1)
-                    - (SELECT count(*) FROM tickets_cache WHERE NOT spam AND closed_datetime < $1) v)
+            WHERE NOT spam AND NOT non_support AND closed_datetime >= $1 AND closed_datetime < $2 GROUP BY 1),
+     open0 AS (SELECT (SELECT count(*) FROM tickets_cache WHERE NOT spam AND NOT non_support AND created_datetime < $1)
+                    - (SELECT count(*) FROM tickets_cache WHERE NOT spam AND NOT non_support AND closed_datetime < $1) v)
      SELECT to_char(b.bk::date,'YYYY-MM-DD') d,
        ((SELECT v FROM open0) + sum(coalesce(cr.c,0)) OVER (ORDER BY b.bk) - sum(coalesce(cl.c,0)) OVER (ORDER BY b.bk))::int c
      FROM b LEFT JOIN cr ON cr.bk=b.bk LEFT JOIN cl ON cl.bk=b.bk
@@ -3828,7 +3846,7 @@ async function overviewStats(win) {
                 count(*) FILTER (WHERE created_datetime >= $1 AND created_datetime < $2)::int created,
                 count(*) FILTER (WHERE closed_datetime >= $1 AND closed_datetime < $2)::int closed,
                 count(*) FILTER (WHERE created_datetime >= $1 AND created_datetime < $2 AND (subject ~* '${CANCEL_RX}' OR tags::text ~* '${CANCEL_RX}'))::int cancel_refund
-                FROM tickets_cache WHERE NOT spam`, params),
+                FROM tickets_cache WHERE NOT spam AND NOT non_support`, params),
     () => pool.query(`SELECT id, title, description, event_date, added_by, attachment_name FROM events
                 WHERE event_date >= $1::date AND event_date <= ($2::date + interval '30 days')
                 ORDER BY event_date`, params),
