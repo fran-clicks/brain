@@ -4657,7 +4657,8 @@ async function buildDailyReport() {
   const tc = (await pool.query(`
     SELECT count(*)::int closed,
            count(*) FILTER (WHERE siena)::int closed_siena,
-           percentile_cont(0.5) WITHIN GROUP (ORDER BY res) median_res
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY res) median_res,
+           avg(res) avg_res
     FROM (
       SELECT (EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE t ILIKE '%siena%') OR cf_solved_by ILIKE '%siena%') siena,
              extract(epoch FROM (closed_datetime - created_datetime)) res
@@ -4721,7 +4722,7 @@ async function buildDailyReport() {
       { type: 'mrkdwn', text: `*🎧 New tickets*\n${g.new_today || 0}` },
       { type: 'mrkdwn', text: `*✅ Closed today*\n${closedToday}` },
       { type: 'mrkdwn', text: `*🤖 Handled by Siena*\n${sienaClosed}  _(${sienaPct}% · ${teamClosed} by team)_` },
-      { type: 'mrkdwn', text: `*⏱️ Median resolution*\n${dur(tc.median_res)}` },
+      { type: 'mrkdwn', text: `*⏱️ Resolution (med · avg)*\n${dur(tc.median_res)} · ${dur(tc.avg_res)}` },
       { type: 'mrkdwn', text: `*🔴 Difficult (open, 10+ msgs)*\n${g.difficult || 0}` },
       { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
     ] },
@@ -4752,6 +4753,22 @@ app.post('/api/report/daily', async (req, res) => {
   if (!ok) return res.status(403).json({ error: 'forbidden' });
   try { await postDailyReport(); res.json({ ok: true }); }
   catch (e) { send500(res, e); }
+});
+// diagnostic (admin): how Siena-handled tickets are recorded — distinct solved_by values + any 'siena' tags (last 30d)
+app.get('/api/report/siena-check', async (req, res) => {
+  try {
+    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+    const solved_by_values = (await pool.query(`
+      SELECT coalesce(nullif(cf_solved_by,''),'(empty)') solved_by, count(*)::int c
+      FROM tickets_cache WHERE closed_datetime >= now() - interval '30 days' AND NOT coalesce(spam,false)
+      GROUP BY 1 ORDER BY 2 DESC LIMIT 40`)).rows;
+    const siena_tags = (await pool.query(`
+      SELECT t tag, count(*)::int c
+      FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t
+      WHERE closed_datetime >= now() - interval '30 days' AND t ILIKE '%siena%'
+      GROUP BY 1 ORDER BY 2 DESC`)).rows;
+    res.json({ solved_by_values, siena_tags });
+  } catch (e) { send500(res, e); }
 });
 // in-app scheduler: post once when the Europe/London clock reaches 18:00 (reliable on an always-on plan)
 let lastReportDay = null;
