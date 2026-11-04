@@ -4631,7 +4631,21 @@ async function buildDailyReport() {
       AND (it->>'product_id' = '${CLICKS_CARE_PRODUCT_ID}' OR lower(it->>'sku') LIKE 'akko%')`)).rows[0]?.u || 0;
   const commUnits = commCol.reduce((t, r) => t + r.u, 0);
   const commColText = commCol.length ? commCol.map(r => `${slackEsc(r.colour || '—')} ×${r.u}`).join(' · ') : '_none today_';
-  const commAccText = commAcc.length ? commAcc.map(r => `${slackEsc(r.title)}${r.variant ? ` (${slackEsc(r.variant)})` : ''} ×${r.u}`).join(' · ') : '_none today_';
+  // Group accessories one line each, with their colour variants listed next to the name.
+  const accByTitle = {};
+  for (const r of commAcc) (accByTitle[r.title] ||= []).push({ variant: r.variant, u: r.u });
+  const accLines = Object.entries(accByTitle)
+    .map(([title, vs]) => ({ title, vs, total: vs.reduce((t, v) => t + v.u, 0) }))
+    .sort((a, b) => b.total - a.total)
+    .map(({ title, vs, total }) => {
+      const name = slackEsc(title.replace(/\s*for Communicator$/i, '').replace(/^dbrand\s+/i, ''));
+      const hasVariants = vs.some(v => v.variant);
+      const detail = hasVariants
+        ? vs.sort((a, b) => b.u - a.u).map(v => `${slackEsc(v.variant || '—')} ×${v.u}`).join(' · ')
+        : `×${total}`;
+      return `• *${name}* _(${total})_ — ${detail}`;
+    });
+  const commAccText = accLines.length ? accLines.join('\n') : '_none today_';
   const commAttach = commUnits > 0 ? Math.round(commCare / commUnits * 100) : 0;
 
   const g = (await pool.query(`SELECT
@@ -4682,8 +4696,8 @@ async function buildDailyReport() {
       { type: 'mrkdwn', text: `*📟 Devices sold*\n${commUnits}` },
       { type: 'mrkdwn', text: `*🛡️ Clicks Care*\n${commCare}  _(${commAttach}% attach)_` }
     ] },
-    { type: 'section', text: { type: 'mrkdwn', text: `*🎨 By colour:* ${commColText}` } },
-    { type: 'section', text: { type: 'mrkdwn', text: `*🧩 Accessories:* ${commAccText}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*🎨 Devices by colour:* ${commColText}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*🧩 Accessories today*\n${commAccText}` } },
     { type: 'divider' },
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🎧 Support & marketing*' }] },
     { type: 'section', fields: [
