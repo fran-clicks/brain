@@ -4678,6 +4678,11 @@ async function buildDailyReport() {
   const sienaPct = closedToday > 0 ? Math.round(sienaClosed / closedToday * 100) : 0;
   const pct24 = closedToday > 0 ? Math.round((tc.within24 || 0) / closedToday * 100) : 0;
   const dur = sec => { if (sec == null) return '—'; sec = Math.round(sec); if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))}m`; const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60); return `${h}h ${m}m`; };
+  // Open support backlog = open tickets minus spam, auto-close and non-support-related.
+  const openSupport = (await pool.query(`
+    SELECT count(*)::int c FROM tickets_cache
+    WHERE status='open' AND NOT coalesce(spam,false)
+      AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t) IN ('auto-close','non-support-related'))`)).rows[0]?.c || 0;
   const ret = (await pool.query(`SELECT
       count(*) FILTER (WHERE ${DAY} = ${TODAY}) today,
       count(*) FILTER (WHERE created_at >= now()-interval '7 days') last7 FROM returns_cache`)).rows[0] || {};
@@ -4728,6 +4733,7 @@ async function buildDailyReport() {
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🎧 Support & marketing*' }] },
     { type: 'section', fields: [
       { type: 'mrkdwn', text: `*🎧 New tickets*\n${g.new_today || 0}` },
+      { type: 'mrkdwn', text: `*🗂️ Open backlog (support)*\n${openSupport}` },
       { type: 'mrkdwn', text: `*✅ Closed today*\n${closedToday}` },
       { type: 'mrkdwn', text: `*🤖 Resolved by Siena*\n${sienaClosed}  _(${sienaPct}% · ${teamClosed} by team)_` },
       { type: 'mrkdwn', text: `*⏱️ Resolution*\n${dur(tc.median_res)} median · ${pct24}% ≤ 24h` },
