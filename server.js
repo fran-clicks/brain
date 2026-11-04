@@ -4622,6 +4622,7 @@ async function buildDailyReport() {
     SELECT it->>'title' title, it->>'variant' variant, sum((it->>'qty')::int)::int u
     FROM orders_cache, LATERAL jsonb_array_elements(items) it
     WHERE cancelled_at IS NULL AND ${DAY} = ${TODAY} AND it->>'product_id' IN (${accIn})
+      AND it->>'title' NOT ILIKE '%founders edition%'
     GROUP BY 1, 2 ORDER BY 3 DESC`)).rows;
   const commCare = (await pool.query(`
     SELECT coalesce(sum((it->>'qty')::int),0)::int u
