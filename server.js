@@ -4778,6 +4778,19 @@ app.get('/api/report/siena-check', async (req, res) => {
     res.json({ solved_by_values, siena_tags });
   } catch (e) { send500(res, e); }
 });
+// diagnostic (admin): tags on currently-open tickets, so we can pick which = non-support / auto-close to exclude
+app.get('/api/report/open-tags', async (req, res) => {
+  try {
+    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+    const open_tags = (await pool.query(`
+      SELECT t tag, count(*)::int c
+      FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t
+      WHERE status='open' AND NOT coalesce(spam,false)
+      GROUP BY 1 ORDER BY 2 DESC LIMIT 80`)).rows;
+    const open_total = (await pool.query(`SELECT count(*)::int c FROM tickets_cache WHERE status='open' AND NOT coalesce(spam,false)`)).rows[0]?.c || 0;
+    res.json({ open_total, open_tags });
+  } catch (e) { send500(res, e); }
+});
 // in-app scheduler: post once when the Europe/London clock reaches 18:00 (reliable on an always-on plan)
 let lastReportDay = null;
 setInterval(async () => {
