@@ -4618,6 +4618,11 @@ async function buildDailyReport() {
     FROM orders_cache, LATERAL jsonb_array_elements(items) it
     WHERE cancelled_at IS NULL AND ${DAY} = ${TODAY} AND it->>'product_id' = '${COMMUNICATOR_PRODUCT_ID}'
     GROUP BY 1 ORDER BY 2 DESC`)).rows;
+  const commLay = (await pool.query(`
+    SELECT nullif(trim(split_part(it->>'variant','/',2)),'') layout, sum((it->>'qty')::int)::int u
+    FROM orders_cache, LATERAL jsonb_array_elements(items) it
+    WHERE cancelled_at IS NULL AND ${DAY} = ${TODAY} AND it->>'product_id' = '${COMMUNICATOR_PRODUCT_ID}'
+    GROUP BY 1 ORDER BY 2 DESC`)).rows;
   const commAcc = (await pool.query(`
     SELECT it->>'title' title, it->>'variant' variant, sum((it->>'qty')::int)::int u
     FROM orders_cache, LATERAL jsonb_array_elements(items) it
@@ -4631,6 +4636,7 @@ async function buildDailyReport() {
       AND (it->>'product_id' = '${CLICKS_CARE_PRODUCT_ID}' OR lower(it->>'sku') LIKE 'akko%')`)).rows[0]?.u || 0;
   const commUnits = commCol.reduce((t, r) => t + r.u, 0);
   const commColText = commCol.length ? commCol.map(r => `${slackEsc(r.colour || '—')} ×${r.u}`).join(' · ') : '_none today_';
+  const commLayText = commLay.length ? commLay.map(r => `${slackEsc(r.layout || '—')} ×${r.u}`).join(' · ') : '_none today_';
   // Group accessories one line each, with their colour variants listed next to the name.
   const accByTitle = {};
   for (const r of commAcc) (accByTitle[r.title] ||= []).push({ variant: r.variant, u: r.u });
@@ -4716,6 +4722,7 @@ async function buildDailyReport() {
       { type: 'mrkdwn', text: `*🛡️ Clicks Care*\n${commCare}  _(${commAttach}% attach)_` }
     ] },
     { type: 'section', text: { type: 'mrkdwn', text: `*🎨 Devices by colour:* ${commColText}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*⌨️ Devices by model:* ${commLayText}` } },
     { type: 'section', text: { type: 'mrkdwn', text: `*🧩 Accessories today*\n${commAccText}` } },
     { type: 'divider' },
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🎧 Support & marketing*' }] },
