@@ -4658,7 +4658,7 @@ async function buildDailyReport() {
     SELECT count(*)::int closed,
            count(*) FILTER (WHERE siena)::int closed_siena,
            percentile_cont(0.5) WITHIN GROUP (ORDER BY res) median_res,
-           avg(least(res, 604800)) avg_res   -- cap each ticket at 7d so stale tickets closed today don't skew the mean
+           percentile_cont(0.9) WITHIN GROUP (ORDER BY res) p90_res   -- SLA: 90% of tickets resolved within this
     FROM (
       SELECT EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t) = 'handled-by-siena') siena, -- Siena resolved it herself (not escalated/assisted)
              extract(epoch FROM (closed_datetime - created_datetime)) res
@@ -4734,7 +4734,7 @@ async function buildDailyReport() {
       { type: 'mrkdwn', text: `*🎧 New tickets*\n${g.new_today || 0}` },
       { type: 'mrkdwn', text: `*✅ Closed today*\n${closedToday}` },
       { type: 'mrkdwn', text: `*🤖 Resolved by Siena*\n${sienaClosed}  _(${sienaPct}% · ${teamClosed} by team)_` },
-      { type: 'mrkdwn', text: `*⏱️ Resolution (med · avg)*\n${dur(tc.median_res)} · ${dur(tc.avg_res)}` },
+      { type: 'mrkdwn', text: `*⏱️ Resolution*\n${dur(tc.median_res)} median · 90% ≤ ${dur(tc.p90_res)}` },
       { type: 'mrkdwn', text: `*😊 CSAT (last ${csatN})*\n${csat != null ? csat + '/5' : '—'}` },
       { type: 'mrkdwn', text: `*🔴 Difficult (open, 10+ msgs)*\n${g.difficult || 0}` },
       { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
@@ -4781,6 +4781,24 @@ app.get('/api/report/siena-check', async (req, res) => {
       WHERE closed_datetime >= now() - interval '30 days' AND t ILIKE '%siena%'
       GROUP BY 1 ORDER BY 2 DESC`)).rows;
     res.json({ solved_by_values, siena_tags });
+  } catch (e) { send500(res, e); }
+});
+// diagnostic (admin): inspect the Gorgias satisfaction-survey payload so we can see where CSAT scores live
+app.get('/api/report/csat-check', async (req, res) => {
+  try {
+    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+    const gcfg = await getGorgiasConfig();
+    if (!gcfg) return res.json({ error: 'Gorgias not connected' });
+    const sv = await gorgiasRequest(gcfg, '/api/satisfaction-surveys?limit=100');
+    const data = sv.data || [];
+    const scored = data.filter(x => typeof x.score === 'number');
+    res.json({
+      returned: data.length,
+      scored_numeric: scored.length,
+      meta: sv.meta || null,
+      sample_keys: data[0] ? Object.keys(data[0]) : [],
+      samples: data.slice(0, 3).map(x => ({ score: x.score, scored_at: x.scored_at, created_datetime: x.created_datetime, sent_datetime: x.sent_datetime }))
+    });
   } catch (e) { send500(res, e); }
 });
 // in-app scheduler: post once when the Europe/London clock reaches 18:00 (reliable on an always-on plan)
