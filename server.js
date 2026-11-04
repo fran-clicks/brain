@@ -4658,7 +4658,7 @@ async function buildDailyReport() {
     SELECT count(*)::int closed,
            count(*) FILTER (WHERE siena)::int closed_siena,
            percentile_cont(0.5) WITHIN GROUP (ORDER BY res) median_res,
-           percentile_cont(0.9) WITHIN GROUP (ORDER BY res) p90_res   -- SLA: 90% of tickets resolved within this
+           count(*) FILTER (WHERE res <= 86400)::int within24   -- SLA: resolved within 24h
     FROM (
       SELECT EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t) = 'handled-by-siena') siena, -- Siena resolved it herself (not escalated/assisted)
              extract(epoch FROM (closed_datetime - created_datetime)) res
@@ -4670,6 +4670,7 @@ async function buildDailyReport() {
   const sienaClosed = tc.closed_siena || 0;
   const teamClosed = closedToday - sienaClosed;
   const sienaPct = closedToday > 0 ? Math.round(sienaClosed / closedToday * 100) : 0;
+  const pct24 = closedToday > 0 ? Math.round((tc.within24 || 0) / closedToday * 100) : 0;
   const dur = sec => { if (sec == null) return '—'; sec = Math.round(sec); if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))}m`; const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60); return `${h}h ${m}m`; };
   const ret = (await pool.query(`SELECT
       count(*) FILTER (WHERE ${DAY} = ${TODAY}) today,
@@ -4722,7 +4723,7 @@ async function buildDailyReport() {
       { type: 'mrkdwn', text: `*🎧 New tickets*\n${g.new_today || 0}` },
       { type: 'mrkdwn', text: `*✅ Closed today*\n${closedToday}` },
       { type: 'mrkdwn', text: `*🤖 Resolved by Siena*\n${sienaClosed}  _(${sienaPct}% · ${teamClosed} by team)_` },
-      { type: 'mrkdwn', text: `*⏱️ Resolution*\n${dur(tc.median_res)} median · 90% ≤ ${dur(tc.p90_res)}` },
+      { type: 'mrkdwn', text: `*⏱️ Resolution*\n${dur(tc.median_res)} median · ${pct24}% ≤ 24h` },
       { type: 'mrkdwn', text: `*🔴 Difficult (open, 10+ msgs)*\n${g.difficult || 0}` },
       { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
     ] },
