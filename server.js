@@ -4784,12 +4784,24 @@ async function buildDailyReport() {
   const kv = (await pool.query(`SELECT count(*) sent, coalesce(sum(revenue),0)::numeric rev FROM campaigns_cache
     WHERE (send_time AT TIME ZONE 'Europe/London')::date = ${TODAY}`)).rows[0] || {};
 
-  // 90-day forecast: only SKUs projected to fall below 0 within the next 90 days (soonest first)
+  // 90-day forecast: SKUs projected to fall below 0 within the next 90 days (soonest first).
+  // Reported for the combined stock and for each warehouse on its own demand
+  // (ShipBob = US orders, Floship = rest-of-world).
   const fc = await forecastRows(90);
-  const belowZero = fc.rows.filter(r => r.proj[90] < 0);
-  const fcList = belowZero.slice(0, 10).map(r => `• *${slackEsc(r.sku)}*${r.name && r.name !== r.sku ? ` ${slackEsc(r.name)}` : ''} — out in ~${r.cover}d → short *${Math.abs(r.proj[90]).toLocaleString()} units* by day 90`).join('\n')
-    + (belowZero.length > 10 ? `\n…and ${belowZero.length - 10} more` : '');
-  const fcText = belowZero.length ? fcList : '_none forecast to run out in the next 90 days_';
+  const fcSection = (view) => {
+    const below = fc.rows
+      .map(r => ({ r, v: view(r) }))
+      .filter(x => x.v.proj[90] < 0)
+      .sort((a, b) => (a.v.cover == null ? Infinity : a.v.cover) - (b.v.cover == null ? Infinity : b.v.cover));
+    if (!below.length) return { count: 0, text: '_none forecast to run out in the next 90 days_' };
+    const list = below.slice(0, 10).map(({ r, v }) =>
+      `• *${slackEsc(r.sku)}*${r.name && r.name !== r.sku ? ` ${slackEsc(r.name)}` : ''} — out in ~${v.cover}d → short *${Math.abs(v.proj[90]).toLocaleString()} units* by day 90`).join('\n')
+      + (below.length > 10 ? `\n…and ${below.length - 10} more` : '');
+    return { count: below.length, text: list };
+  };
+  const fcCombined = fcSection(r => r);
+  const fcShipbob = fcSection(r => r.wh.shipbob);
+  const fcFloship = fcSection(r => r.wh.floship);
 
   const fr = (await pool.query(`SELECT name, to_char(eta,'DD Mon') eta,
       (eta < ${TODAY}) overdue, (eta BETWEEN ${TODAY} AND ${TODAY} + 7) soon,
@@ -4861,7 +4873,9 @@ async function buildDailyReport() {
     { type: 'divider' },
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*📦 Inventory & returns*' }] },
     { type: 'section', text: { type: 'mrkdwn', text: `*↩️ Returns today:* ${ret.today || 0}  _(7d: ${ret.last7 || 0})_` } },
-    { type: 'section', text: { type: 'mrkdwn', text: `*📉 Forecast to run out within 90 days (${belowZero.length}):*\n${fcText}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*📉 Forecast to run out within 90 days — combined (${fcCombined.count}):*\n${fcCombined.text}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*🇺🇸 ShipBob (US demand) — run out ≤90d (${fcShipbob.count}):*\n${fcShipbob.text}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*🌍 Floship (rest-of-world demand) — run out ≤90d (${fcFloship.count}):*\n${fcFloship.text}` } },
     { type: 'divider' },
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🚢 Freight*' }] },
     { type: 'section', text: { type: 'mrkdwn', text: freightLine } },
