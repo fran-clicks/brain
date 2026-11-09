@@ -4846,6 +4846,27 @@ app.get('/api/report/closed-check', async (req, res) => {
     res.json({ by_day: byDay, sample });
   } catch (e) { send500(res, e); }
 });
+// diagnostic (admin): probe which Gorgias reporting cubes the key can read (for top-agent messages + handle time)
+app.get('/api/report/reporting-probe', async (req, res) => {
+  try {
+    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+    const gcfg = await getGorgiasConfig();
+    if (!gcfg) return res.json({ error: 'Gorgias not connected' });
+    const scopes = ['messages-sent', 'messages', 'ticket-handle-time', 'handle-time', 'agent-handle-time',
+      'resolution-time', 'tickets-closed', 'agent-performance', 'online-time'];
+    const out = {};
+    for (const scope of scopes) {
+      try {
+        const r = await gorgiasRequest(gcfg, '/api/reporting/stats?limit=5', {
+          method: 'POST',
+          body: JSON.stringify({ scope, measures: [], dimensions: [], filters: [], timezone: 'UTC' })
+        });
+        out[scope] = { ok: true, sample: JSON.stringify(r).slice(0, 600) };
+      } catch (e) { out[scope] = { ok: false, error: e.message }; }
+    }
+    res.json(out);
+  } catch (e) { send500(res, e); }
+});
 // diagnostic (admin): Gorgias agents/users (to build "top agent" and identify Siena) + a sample reporting probe
 app.get('/api/report/agents-check', async (req, res) => {
   try {
