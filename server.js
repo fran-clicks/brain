@@ -4838,7 +4838,7 @@ async function buildDailyReport() {
     ] },
     { type: 'section', text: { type: 'mrkdwn', text: `*🏷️ Top categories (created today):* ${catsText}` } },
     { type: 'section', text: { type: 'mrkdwn', text: `*🏆 Top agents — messages (24h):* ${topAgentText}` } },
-    { type: 'section', text: { type: 'mrkdwn', text: `*⏱️ Avg handle time — agents (24h):* ${handleText}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*⏱️ Avg team handle time (24h):* ${handleText}` } },
     { type: 'divider' },
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*📦 Inventory & returns*' }] },
     { type: 'section', text: { type: 'mrkdwn', text: `*↩️ Returns today:* ${ret.today || 0}  _(7d: ${ret.last7 || 0})_` } },
