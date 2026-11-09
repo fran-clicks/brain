@@ -3076,27 +3076,36 @@ app.get('/api/fulfillment/grid', async (_req, res) => {
   res.json({ sources, rows, totals, connected: { shipbob: !!(await getConnector('shipbob')), floship: !!(await getConnector('floship')), manual: man.rows.length > 0 } });
 });
 
-// stock forecast: current Global Inventory total per SKU, drawn down by recent Shopify sales velocity.
-// projected stock at 7/14/30/90 days = current − (avg daily units sold over the chosen window × horizon)
+// stock forecast, split per fulfilment warehouse (ShipBob + Floship).
+// Each warehouse holds its own stock and is drawn down by the demand it actually serves:
+//   ShipBob → US orders, Floship → rest-of-world (everything not shipping to US, incl. blank country).
+// Shopify order country is a 2-letter code (countryCodeV2), so US === 'US'.
+// projected stock at 7/14/30/90 days = that warehouse's stock − (its avg daily units × horizon).
+// Top-level stock/sold/rate/cover/proj remain the *combined* view for backward compatibility.
 async function forecastRows(win) {
-  const [sb, fl, man, sales] = await Promise.all([
-    pool.query(`SELECT sku, name, fulfillable FROM shipbob_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request','ck-5100','ck-5101','ck-5200','ck-5201')`),
-    pool.query(`SELECT sku, description, qty FROM floship_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request','ck-5100','ck-5101','ck-5200','ck-5201')`),
-    pool.query(`SELECT sku, qty, description FROM manual_stock WHERE sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request','ck-5100','ck-5101','ck-5200','ck-5201')`),
+  const SKU_FILTER = `sku ~ '[A-Za-z]' AND sku !~* '-top$' AND lower(sku) NOT IN ('x-redo','quarantine - returns','ck-reserve','ck-request','ck-5100','ck-5101','ck-5200','ck-5201')`;
+  const [sb, fl, sales] = await Promise.all([
+    pool.query(`SELECT sku, name, fulfillable FROM shipbob_stock WHERE ${SKU_FILTER}`),
+    pool.query(`SELECT sku, description, qty FROM floship_stock WHERE ${SKU_FILTER}`),
     pool.query(
-      `SELECT it->>'sku' sku, sum(coalesce((it->>'qty')::int, 0))::int units
+      `SELECT it->>'sku' sku,
+              sum(CASE WHEN country = 'US' THEN coalesce((it->>'qty')::int, 0) ELSE 0 END)::int us_units,
+              sum(CASE WHEN country <> 'US' OR country IS NULL OR country = '' THEN coalesce((it->>'qty')::int, 0) ELSE 0 END)::int row_units
        FROM orders_cache, LATERAL jsonb_array_elements(items) it
        WHERE cancelled_at IS NULL AND created_at >= now() - make_interval(days => $1::int)
        GROUP BY 1`, [win])
   ]);
-  const stock = {}, rawName = {};
-  const add = (s, q, n) => { if (!s) return; stock[s] = (stock[s] || 0) + (q || 0); if (n && !rawName[s]) rawName[s] = n; };
-  sb.rows.forEach(r => add(r.sku, r.fulfillable, r.name));
-  fl.rows.forEach(r => add(r.sku, r.qty, r.description));
-  man.rows.forEach(r => add(r.sku, r.qty, r.description));
-  const sold = {}; sales.rows.forEach(r => { if (r.sku) sold[r.sku] = (sold[r.sku] || 0) + (r.units || 0); });
 
-  const skus = Object.keys(stock);
+  // per-warehouse stock + raw name fallback
+  const sbStock = {}, flStock = {}, rawName = {};
+  sb.rows.forEach(r => { if (!r.sku) return; sbStock[r.sku] = (sbStock[r.sku] || 0) + (r.fulfillable || 0); if (r.name && !rawName[r.sku]) rawName[r.sku] = r.name; });
+  fl.rows.forEach(r => { if (!r.sku) return; flStock[r.sku] = (flStock[r.sku] || 0) + (r.qty || 0); if (r.description && !rawName[r.sku]) rawName[r.sku] = r.description; });
+
+  // per-warehouse demand (units over the window)
+  const sbSold = {}, flSold = {};
+  sales.rows.forEach(r => { if (!r.sku) return; sbSold[r.sku] = (sbSold[r.sku] || 0) + (r.us_units || 0); flSold[r.sku] = (flSold[r.sku] || 0) + (r.row_units || 0); });
+
+  const skus = Array.from(new Set([...Object.keys(sbStock), ...Object.keys(flStock)]));
   const nameMap = {};
   if (skus.length) {
     const nm = (await pool.query(
@@ -3106,18 +3115,24 @@ async function forecastRows(win) {
   }
 
   const horizons = [7, 14, 30, 90];
-  const rows = skus.map(sku => {
-    const cur = stock[sku] || 0;
-    const rate = (sold[sku] || 0) / win; // units per day
+  const mkView = (cur, soldN) => {
+    const rate = (soldN || 0) / win; // units per day
     const cover = rate > 0 ? cur / rate : null; // days until stockout
     const proj = {}; horizons.forEach(h => proj[h] = Math.round(cur - rate * h));
-    return { sku, name: nameMap[sku] || rawName[sku] || sku, stock: cur, sold: sold[sku] || 0,
-      rate: Math.round(rate * 100) / 100, cover: cover == null ? null : Math.round(cover * 10) / 10, proj };
+    return { stock: cur, sold: soldN || 0, rate: Math.round(rate * 100) / 100,
+      cover: cover == null ? null : Math.round(cover * 10) / 10, proj };
+  };
+  const rows = skus.map(sku => {
+    const shipbob = mkView(sbStock[sku] || 0, sbSold[sku] || 0);
+    const floship = mkView(flStock[sku] || 0, flSold[sku] || 0);
+    const combined = mkView((sbStock[sku] || 0) + (flStock[sku] || 0), (sbSold[sku] || 0) + (flSold[sku] || 0));
+    return { sku, name: nameMap[sku] || rawName[sku] || sku, ...combined, wh: { shipbob, floship } };
   });
-  // soonest stockout first; SKUs with no sales (no depletion) sink to the bottom
+  // soonest combined stockout first; SKUs with no sales (no depletion) sink to the bottom
   rows.sort((a, b) => (a.cover == null ? Infinity : a.cover) - (b.cover == null ? Infinity : b.cover)
     || b.sold - a.sold || a.sku.localeCompare(b.sku));
-  return { window: win, horizons, rows, hasSales: sales.rows.length > 0 };
+  return { window: win, horizons, rows, hasSales: sales.rows.length > 0,
+    warehouses: [{ key: 'combined', label: 'Combined' }, { key: 'shipbob', label: 'ShipBob (US)' }, { key: 'floship', label: 'Floship (ROW)' }] };
 }
 app.get('/api/forecast', async (req, res) => {
   const win = Math.max(1, Math.min(parseInt(req.query.window) || 14, 90));

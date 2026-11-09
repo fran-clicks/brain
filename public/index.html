@@ -814,9 +814,17 @@ footer{color:rgba(16,17,20,.45)}
           <button data-w="90" class="active">90d</button>
         </span>
       </div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)">
+        Warehouse:
+        <span class="periods" id="fcWh">
+          <button data-wh="combined" class="active">Combined</button>
+          <button data-wh="shipbob">ShipBob (US)</button>
+          <button data-wh="floship">Floship (ROW)</button>
+        </span>
+      </div>
       <input class="search" id="fcSearch" placeholder="Search SKU or product…" style="flex:1;min-width:180px;margin:0">
     </div>
-    <div class="note" style="margin:2px 0 6px">Daily sales rate is averaged over the chosen window and drawn against the combined stock total. 🔴 = runs out inside 14 days · 🟠 = inside 30 days. Click a row for its depletion chart.</div>
+    <div class="note" id="fcMethod" style="margin:2px 0 6px">Daily sales rate is averaged over the chosen window and drawn against the combined stock total. 🔴 = runs out inside 14 days · 🟠 = inside 30 days. Click a row for its depletion chart.</div>
     <div style="overflow-x:auto"><table id="fcTable"><thead id="fcHead"></thead><tbody></tbody></table></div>
     <div class="note" id="fcNote" style="margin-top:8px"></div>
   </div>

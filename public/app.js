@@ -194,7 +194,14 @@ async function syncAllFulfillment() {
   finally { b.disabled = false; b.textContent = '🔄 Sync all'; loadFulfillment(); }
 }
 // ---------- stock forecast ----------
-let fcRows = [], fcWindow = 90, fcHorizons = [7, 14, 30, 90];
+let fcRows = [], fcWindow = 90, fcHorizons = [7, 14, 30, 90], fcWh = 'combined';
+// pick the active warehouse's numbers for a row (falls back to the combined top-level fields)
+function fcView(r) { return (fcWh !== 'combined' && r.wh && r.wh[fcWh]) ? r.wh[fcWh] : r; }
+const FC_METHOD = {
+  combined: 'Daily sales rate is averaged over the chosen window and drawn against the combined stock of both warehouses. 🔴 = runs out inside 14 days · 🟠 = inside 30 days. Click a row for its depletion chart.',
+  shipbob: 'ShipBob stock drawn down by <b>US</b> order demand only (ShipBob fulfils US orders). 🔴 = runs out inside 14 days · 🟠 = inside 30 days. Click a row for its depletion chart.',
+  floship: 'Floship stock drawn down by <b>rest-of-world</b> demand only (every order not shipping to the US). 🔴 = runs out inside 14 days · 🟠 = inside 30 days. Click a row for its depletion chart.'
+};
 function fcFlag(cover) {
   if (cover == null) return '';
   if (cover <= 14) return '🔴';
@@ -202,27 +209,30 @@ function fcFlag(cover) {
   return '';
 }
 function renderForecast() {
+  const m = document.getElementById('fcMethod'); if (m) m.innerHTML = FC_METHOD[fcWh] || FC_METHOD.combined;
   const q = (document.getElementById('fcSearch').value || '').toLowerCase();
   const rows = fcRows.filter(r => (r.sku + ' ' + r.name).toLowerCase().includes(q));
+  const stockLabel = fcWh === 'shipbob' ? 'ShipBob stock' : fcWh === 'floship' ? 'Floship stock' : 'In stock';
   document.getElementById('fcHead').innerHTML = `<tr>
     <th>SKU / product</th>
-    <th style="text-align:right">In stock</th>
+    <th style="text-align:right">${stockLabel}</th>
     <th style="text-align:right">Sold (${fcWindow}d)</th>
     <th style="text-align:right">Units/day</th>
     <th style="text-align:right">Days left</th>
     ${fcHorizons.map(h => `<th style="text-align:right">+${h}d</th>`).join('')}</tr>`;
   const cell = v => `<td style="text-align:right">${v < 0 ? `<span style="color:var(--red)">${v.toLocaleString()}</span>` : v.toLocaleString()}</td>`;
   document.querySelector('#fcTable tbody').innerHTML = rows.length ? rows.map(r => {
-    const flag = fcFlag(r.cover);
-    const cover = r.cover == null ? '<span style="color:var(--muted)">no sales</span>'
-      : `${flag ? flag + ' ' : ''}${r.cover.toLocaleString()}d`;
+    const v = fcView(r);
+    const flag = fcFlag(v.cover);
+    const cover = v.cover == null ? '<span style="color:var(--muted)">no sales</span>'
+      : `${flag ? flag + ' ' : ''}${v.cover.toLocaleString()}d`;
     return `<tr style="cursor:pointer" onclick="openForecastChart('${esc(r.sku).replace(/'/g, "\\'")}')">
       <td><b>${esc(r.sku)}</b>${r.name && r.name !== r.sku ? `<div style="font-size:12px;color:var(--muted)">${esc(r.name)}</div>` : ''}</td>
-      <td style="text-align:right">${r.stock.toLocaleString()}</td>
-      <td style="text-align:right">${r.sold.toLocaleString()}</td>
-      <td style="text-align:right">${r.rate.toLocaleString()}</td>
+      <td style="text-align:right">${v.stock.toLocaleString()}</td>
+      <td style="text-align:right">${v.sold.toLocaleString()}</td>
+      <td style="text-align:right">${v.rate.toLocaleString()}</td>
       <td style="text-align:right;font-weight:600">${cover}</td>
-      ${fcHorizons.map(h => cell(r.proj[h])).join('')}</tr>`;
+      ${fcHorizons.map(h => cell(v.proj[h])).join('')}</tr>`;
   }).join('') : `<tr><td colspan="${5 + fcHorizons.length}" class="empty">No SKUs to forecast yet.</td></tr>`;
 }
 async function loadForecast() {
@@ -233,7 +243,7 @@ async function loadForecast() {
     const r = await api('/api/forecast?window=' + fcWindow);
     fcRows = r.rows || []; fcHorizons = r.horizons || fcHorizons;
     renderForecast();
-    const atRisk = fcRows.filter(x => x.cover != null && x.cover <= 30).length;
+    const atRisk = fcRows.filter(x => { const v = fcView(x); return v.cover != null && v.cover <= 30; }).length;
     document.getElementById('fcNote').textContent = r.hasSales
       ? `${fcRows.length} SKUs · ${atRisk} running low within 30 days`
       : 'No Shopify sales cached yet — sync Shopify to enable the forecast.';
@@ -245,16 +255,25 @@ document.querySelectorAll('#fcWindow button').forEach(b => b.onclick = () => {
   document.querySelectorAll('#fcWindow button').forEach(x => x.classList.remove('active'));
   b.classList.add('active'); fcWindow = parseInt(b.dataset.w); loadForecast();
 });
+document.querySelectorAll('#fcWh button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#fcWh button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active'); fcWh = b.dataset.wh;
+  renderForecast();
+  const atRisk = fcRows.filter(x => { const v = fcView(x); return v.cover != null && v.cover <= 30; }).length;
+  if (fcRows.length) document.getElementById('fcNote').textContent = `${fcRows.length} SKUs · ${atRisk} running low within 30 days`;
+});
 let fcChartObj = null;
 function openForecastChart(sku) {
   const r = fcRows.find(x => x.sku === sku);
   if (!r) return;
-  document.getElementById('fcChartTitle').textContent = r.sku + (r.name && r.name !== r.sku ? ' — ' + r.name : '');
-  const runsOut = r.cover != null ? `runs out in ~${r.cover} days at ${r.rate}/day` : 'no recent sales — not depleting';
-  document.getElementById('fcChartSub').textContent = `${r.stock.toLocaleString()} in stock · ${runsOut}`;
-  const maxDay = r.cover != null ? Math.min(120, Math.ceil(r.cover) + 10) : 90;
+  const v = fcView(r);
+  const whLbl = fcWh === 'shipbob' ? ' · ShipBob (US)' : fcWh === 'floship' ? ' · Floship (ROW)' : '';
+  document.getElementById('fcChartTitle').textContent = r.sku + (r.name && r.name !== r.sku ? ' — ' + r.name : '') + whLbl;
+  const runsOut = v.cover != null ? `runs out in ~${v.cover} days at ${v.rate}/day` : 'no recent sales — not depleting';
+  document.getElementById('fcChartSub').textContent = `${v.stock.toLocaleString()} in stock · ${runsOut}`;
+  const maxDay = v.cover != null ? Math.min(120, Math.ceil(v.cover) + 10) : 90;
   const labels = [], data = [];
-  for (let d = 0; d <= maxDay; d++) { labels.push(d + 'd'); data.push(Math.round(r.stock - r.rate * d)); }
+  for (let d = 0; d <= maxDay; d++) { labels.push(d + 'd'); data.push(Math.round(v.stock - v.rate * d)); }
   document.getElementById('fcModal').style.display = 'flex';
   if (fcChartObj) fcChartObj.destroy();
   fcChartObj = new Chart(document.getElementById('fcChart'), {
