@@ -4576,9 +4576,18 @@ function londonNow() {
   return { date: `${p.year}-${p.month}-${p.day}`, hour: parseInt(p.hour), minute: parseInt(p.minute) };
 }
 async function refreshForReport() {
+  // Pull recent Gorgias updates FIRST (new + newly-closed tickets since the last run) so today's
+  // closures/Siena work are in the cache. refreshOpenTickets only re-checks already-open tickets,
+  // so on its own it misses tickets created-and-closed since the last sync (e.g. while asleep).
+  try {
+    if (await getGorgiasConfig()) {
+      for (let i = 0; i < 30 && syncRunning; i++) await new Promise(r => setTimeout(r, 1000)); // let any boot sync finish first
+      await syncGorgias(60);       // incremental catch-up; big budget so a multi-day asleep gap is covered in one go
+      await refreshOpenTickets();  // then reconcile the open set (handles trashed/removed)
+    }
+  } catch (e) { console.error('refreshForReport gorgias:', e.message); }
   const jobs = [];
   try { if (await getConnector('shopify')) jobs.push(syncShopify(8)); } catch {}
-  try { if (await getGorgiasConfig()) jobs.push(refreshOpenTickets()); } catch {}
   try { if (await getConnector('redo')) jobs.push(syncRedo(6)); } catch {}
   try { if (await getConnector('klaviyo')) jobs.push(syncKlaviyo()); } catch {}
   await Promise.allSettled(jobs);
