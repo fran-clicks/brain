@@ -4846,6 +4846,22 @@ app.get('/api/report/closed-check', async (req, res) => {
     res.json({ by_day: byDay, sample });
   } catch (e) { send500(res, e); }
 });
+// diagnostic (admin): Gorgias sync health + a live auth test, to see why the cache may be frozen
+app.get('/api/report/sync-status', async (req, res) => {
+  try {
+    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+    const st = (await pool.query(`SELECT v FROM sync_state WHERE k='gorgias'`)).rows[0]?.v || {};
+    const latest = (await pool.query(`SELECT to_char(max(closed_datetime),'YYYY-MM-DD HH24:MI') last_closed,
+      to_char(max(created_datetime),'YYYY-MM-DD HH24:MI') last_created, count(*)::int rows FROM tickets_cache`)).rows[0] || {};
+    let live_tickets = null, live_err = null;
+    try {
+      const gcfg = await getGorgiasConfig();
+      const t = await gorgiasRequest(gcfg, '/api/tickets?limit=1&order_by=updated_datetime:desc&trashed=false');
+      live_tickets = { ok: true, newest_updated: t.data?.[0]?.updated_datetime || null };
+    } catch (e) { live_err = e.message; }
+    res.json({ sync_state: st, cache: latest, live_tickets, live_err });
+  } catch (e) { send500(res, e); }
+});
 // diagnostic (admin): probe which Gorgias reporting cubes the key can read (for top-agent messages + handle time)
 app.get('/api/report/reporting-probe', async (req, res) => {
   try {
