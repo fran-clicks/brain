@@ -4725,6 +4725,41 @@ async function buildDailyReport() {
       AND nullif(cf_category,'') IS NOT NULL
     GROUP BY 1 ORDER BY 2 DESC LIMIT 5`)).rows;
   const catsText = cats.length ? cats.map(r => `${slackEsc(r.cat)} (${r.c})`).join(' · ') : '_none categorised today_';
+
+  // Agent performance (live from Gorgias reporting API, last 24h, excluding Siena/bots/system accounts)
+  const SKIP_AGENT = /siena|bot|copilot|gorgias|ingestion|\bai\b|automation|help ?center|helpdesk|clicks team/i;
+  let topAgentText = '_unavailable_', handleText = '_unavailable_';
+  try {
+    const gcfg = await getGorgiasConfig();
+    if (gcfg) {
+      const aStart = new Date(Date.now() - 24 * 3600e3).toISOString(), aEnd = new Date().toISOString();
+      const stat = async (scope, measures, dimensions) => {
+        const r = await gorgiasRequest(gcfg, '/api/reporting/stats', {
+          method: 'POST',
+          body: JSON.stringify({ query: { scope, measures, dimensions,
+            filters: [{ member: 'periodStart', operator: 'afterDate', values: [aStart] }, { member: 'periodEnd', operator: 'beforeDate', values: [aEnd] }],
+            timezone: REPORT_TZ } })
+        });
+        return r.data || [];
+      };
+      const names = {};
+      try { const u = await gorgiasRequest(gcfg, '/api/users?limit=100'); for (const x of (u.data || [])) names[x.id] = x.name; } catch {}
+      // #2 — top agents by messages sent (map agentId -> name, drop Siena/bots)
+      const msgs = await stat('messages-sent', ['messagesCount'], ['agentId']);
+      const ranked = msgs.map(r => ({ name: names[r.agentId] || `#${r.agentId}`, n: +r.messagesCount }))
+        .filter(a => a.name && !SKIP_AGENT.test(a.name))
+        .sort((a, b) => b.n - a.n);
+      topAgentText = ranked.length ? ranked.slice(0, 3).map((a, i) => `${i === 0 ? '🥇 ' : ''}${slackEsc(a.name)} (${a.n})`).join(' · ') : '_no agent messages (24h)_';
+      // #5 — average ticket handle time across human agents (weighted; count = total/avg)
+      const ht = await stat('ticket-handle-time', ['averageHandleTime', 'handleTime'], ['ticketAssigneeName']);
+      const htRows = ht.map(r => ({ name: r.ticketAssigneeName, avg: parseFloat(r.averageHandleTime) || 0, total: parseFloat(r.handleTime) || 0 }))
+        .filter(a => a.name && !SKIP_AGENT.test(a.name));
+      let sumT = 0, sumC = 0;
+      for (const a of htRows) if (a.avg > 0 && a.total > 0) { sumT += a.total; sumC += a.total / a.avg; }
+      const teamAvg = sumC > 0 ? sumT / sumC : (htRows.length ? htRows.reduce((s, a) => s + a.avg, 0) / htRows.length : null);
+      handleText = teamAvg != null ? dur(teamAvg) : '_unavailable_';
+    }
+  } catch (e) { console.error('agent stats:', e.message); }
   const ret = (await pool.query(`SELECT
       count(*) FILTER (WHERE ${DAY} = ${TODAY}) today,
       count(*) FILTER (WHERE created_at >= now()-interval '7 days') last7 FROM returns_cache`)).rows[0] || {};
@@ -4803,6 +4838,8 @@ async function buildDailyReport() {
       { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
     ] },
     { type: 'section', text: { type: 'mrkdwn', text: `*🏷️ Top categories (created today):* ${catsText}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*🏆 Top agents — messages (24h):* ${topAgentText}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*⏱️ Avg handle time — agents (24h):* ${handleText}` } },
     { type: 'divider' },
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*📦 Inventory & returns*' }] },
     { type: 'section', text: { type: 'mrkdwn', text: `*↩️ Returns today:* ${ret.today || 0}  _(7d: ${ret.last7 || 0})_` } },
