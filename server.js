@@ -4723,7 +4723,9 @@ async function buildDailyReport() {
       AND (created_datetime AT TIME ZONE 'Europe/London')::date = ${TODAY}
       AND nullif(cf_category,'') IS NOT NULL
     GROUP BY 1 ORDER BY 2 DESC LIMIT 5`)).rows;
-  const catsText = cats.length ? cats.map(r => `${slackEsc(r.cat)} (${r.c})`).join(' · ') : '_none categorised today_';
+  // strip any "Group::" prefix (e.g. "Aftersales::Returns" -> "Returns") and list one per line
+  const catLabel = c => String(c || '').split('::').pop().trim();
+  const catsText = cats.length ? cats.map(r => `• ${slackEsc(catLabel(r.cat))} — ${r.c}`).join('\n') : '_none categorised today_';
 
   // Agent performance (live from Gorgias reporting API, last 24h, excluding Siena/bots/system accounts)
   const SKIP_AGENT = /siena|bot|copilot|gorgias|ingestion|\bai\b|automation|help ?center|helpdesk|clicks team/i;
@@ -4836,7 +4838,7 @@ async function buildDailyReport() {
       { type: 'mrkdwn', text: `*🔴 Difficult (open, 10+ msgs)*\n${g.difficult || 0}` },
       { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
     ] },
-    { type: 'section', text: { type: 'mrkdwn', text: `*🏷️ Top categories (created today):* ${catsText}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: `*🏷️ Top categories (created today)*\n${catsText}` } },
     { type: 'section', text: { type: 'mrkdwn', text: `*🏆 Top agents — messages (24h):* ${topAgentText}` } },
     { type: 'section', text: { type: 'mrkdwn', text: `*⏱️ Avg team handle time (24h):* ${handleText}` } },
     { type: 'divider' },
