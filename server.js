@@ -4897,24 +4897,24 @@ app.get('/api/report/reporting-probe', async (req, res) => {
       { member: 'periodStart', operator: 'afterDate', values: [start] },
       { member: 'periodEnd', operator: 'beforeDate', values: [end] },
     ];
-    const attempts = [
-      { scope: 'messages-sent', measures: [] },
-      { scope: 'ticket-handle-time', measures: [] },
-      { scope: 'resolution-time', measures: [] },
-    ];
     const auth = Buffer.from(`${gcfg.email}:${gcfg.api_key}`).toString('base64');
-    const out = {};
-    for (const a of attempts) {
+    const stat = async (scope, measures, dimensions) => {
       try {
         const r = await fetch(`https://${gcfg.domain}.gorgias.com/api/reporting/stats`, {
           method: 'POST',
           headers: { Authorization: `Basic ${auth}`, Accept: 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: { scope: a.scope, measures: ['__probe__'], dimensions: ['__probe__'], filters: periodFilters, timezone: 'UTC' } })
+          body: JSON.stringify({ query: { scope, measures, dimensions, filters: periodFilters, timezone: 'UTC' } })
         });
-        const body = await r.text();
-        out[a.scope] = { status: r.status, body: body.slice(0, 1200) };
-      } catch (e) { out[a.scope] = { error: e.message }; }
-    }
+        return { status: r.status, body: (await r.text()).slice(0, 1600) };
+      } catch (e) { return { error: e.message }; }
+    };
+    const out = {};
+    out.messages_sent = await stat('messages-sent', ['messagesCount'], ['agentId']);
+    out.handle_time = await stat('ticket-handle-time', ['averageHandleTime'], ['ticketAssigneeName']);
+    try {
+      const u = await gorgiasRequest(gcfg, '/api/users?limit=100');
+      out.users = (u.data || []).map(x => ({ id: x.id, name: x.name }));
+    } catch (e) { out.users_err = e.message; }
     res.json(out);
   } catch (e) { send500(res, e); }
 });
