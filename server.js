@@ -4892,7 +4892,7 @@ app.get('/api/report/reporting-probe', async (req, res) => {
     // 'first-response-time' is a known-good control (we use it elsewhere). The rest are guesses — the
     // 400 response BODY will tell us the valid scope/measure names.
     const attempts = [
-      { scope: 'first-response-time', measures: ['averageFirstResponseTime'] },
+      { scope: 'first-response-time', measures: ['averageFirstResponseTime'] }, // control (known measure)
       { scope: 'messages-sent', measures: [] },
       { scope: 'ticket-handle-time', measures: [] },
       { scope: 'resolution-time', measures: [] },
@@ -4906,10 +4906,10 @@ app.get('/api/report/reporting-probe', async (req, res) => {
         const r = await fetch(`https://${gcfg.domain}.gorgias.com/api/reporting/stats`, {
           method: 'POST',
           headers: { Authorization: `Basic ${auth}`, Accept: 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ scope: a.scope, measures: a.measures, filters: [], timezone: 'UTC' })
+          body: JSON.stringify({ query: { scope: a.scope, measures: a.measures, filters: [], timezone: 'UTC' } })
         });
         const body = await r.text();
-        out[a.scope] = { status: r.status, body: body.slice(0, 800) };
+        out[a.scope] = { status: r.status, body: body.slice(0, 900) };
       } catch (e) { out[a.scope] = { error: e.message }; }
     }
     res.json(out);
