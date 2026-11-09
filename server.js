@@ -4794,9 +4794,9 @@ async function buildDailyReport() {
       .filter(x => x.v.proj[90] < 0)
       .sort((a, b) => (a.v.cover == null ? Infinity : a.v.cover) - (b.v.cover == null ? Infinity : b.v.cover));
     if (!below.length) return { count: 0, text: '_none forecast to run out in the next 90 days_' };
-    const list = below.slice(0, 10).map(({ r, v }) =>
+    const list = below.slice(0, 5).map(({ r, v }) =>
       `• *${slackEsc(r.sku)}*${r.name && r.name !== r.sku ? ` ${slackEsc(r.name)}` : ''} — out in ~${v.cover}d → short *${Math.abs(v.proj[90]).toLocaleString()} units* by day 90`).join('\n')
-      + (below.length > 10 ? `\n…and ${below.length - 10} more` : '');
+      + (below.length > 5 ? `\n…and ${below.length - 5} more` : '');
     return { count: below.length, text: list };
   };
   const fcCombined = fcSection(r => r);
