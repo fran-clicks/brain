@@ -4889,17 +4889,28 @@ app.get('/api/report/reporting-probe', async (req, res) => {
     if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
     const gcfg = await getGorgiasConfig();
     if (!gcfg) return res.json({ error: 'Gorgias not connected' });
-    const scopes = ['messages-sent', 'messages', 'ticket-handle-time', 'handle-time', 'agent-handle-time',
-      'resolution-time', 'tickets-closed', 'agent-performance', 'online-time'];
+    // 'first-response-time' is a known-good control (we use it elsewhere). The rest are guesses — the
+    // 400 response BODY will tell us the valid scope/measure names.
+    const attempts = [
+      { scope: 'first-response-time', measures: ['averageFirstResponseTime'] },
+      { scope: 'messages-sent', measures: [] },
+      { scope: 'ticket-handle-time', measures: [] },
+      { scope: 'resolution-time', measures: [] },
+      { scope: 'agent-performance', measures: [] },
+      { scope: 'messages', measures: [] },
+    ];
+    const auth = Buffer.from(`${gcfg.email}:${gcfg.api_key}`).toString('base64');
     const out = {};
-    for (const scope of scopes) {
+    for (const a of attempts) {
       try {
-        const r = await gorgiasRequest(gcfg, '/api/reporting/stats?limit=5', {
+        const r = await fetch(`https://${gcfg.domain}.gorgias.com/api/reporting/stats`, {
           method: 'POST',
-          body: JSON.stringify({ scope, measures: [], dimensions: [], filters: [], timezone: 'UTC' })
+          headers: { Authorization: `Basic ${auth}`, Accept: 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scope: a.scope, measures: a.measures, filters: [], timezone: 'UTC' })
         });
-        out[scope] = { ok: true, sample: JSON.stringify(r).slice(0, 600) };
-      } catch (e) { out[scope] = { ok: false, error: e.message }; }
+        const body = await r.text();
+        out[a.scope] = { status: r.status, body: body.slice(0, 800) };
+      } catch (e) { out[a.scope] = { error: e.message }; }
     }
     res.json(out);
   } catch (e) { send500(res, e); }
