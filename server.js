@@ -4894,8 +4894,8 @@ app.get('/api/report/reporting-probe', async (req, res) => {
     const start = new Date(Date.now() - 24 * 3600e3).toISOString();
     const end = new Date().toISOString();
     const periodFilters = [
-      { member: 'periodStart', operator: 'one-of', values: [start] },
-      { member: 'periodEnd', operator: 'one-of', values: [end] },
+      { member: 'periodStart', operator: 'afterDate', values: [start] },
+      { member: 'periodEnd', operator: 'beforeDate', values: [end] },
     ];
     const attempts = [
       { scope: 'messages-sent', measures: [] },
@@ -4909,7 +4909,7 @@ app.get('/api/report/reporting-probe', async (req, res) => {
         const r = await fetch(`https://${gcfg.domain}.gorgias.com/api/reporting/stats`, {
           method: 'POST',
           headers: { Authorization: `Basic ${auth}`, Accept: 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: { scope: a.scope, measures: a.measures, filters: periodFilters } })
+          body: JSON.stringify({ query: { scope: a.scope, measures: a.measures, filters: periodFilters, timezone: 'UTC' } })
         });
         const body = await r.text();
         out[a.scope] = { status: r.status, body: body.slice(0, 1200) };
