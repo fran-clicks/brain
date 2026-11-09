@@ -4748,6 +4748,26 @@ async function buildDailyReport() {
     frOverdue.length ? `⚠️ Overdue: ${frOverdue.map(x => `${slackEsc(x.name)} (${x.eta})`).join(', ')}` : ''
   ].filter(Boolean).join('\n') || '_no shipments arriving in the next 7 days_';
 
+  // per-service last sync (so stale/broken connectors are visible at a glance)
+  const svcLabel = { gorgias: 'Gorgias', shopify: 'Shopify', klaviyo: 'Klaviyo', redo: 'Redo', shipbob: 'ShipBob', floship: 'Floship', uk_stock: 'UK stock' };
+  const ago = iso => {
+    if (!iso) return 'never';
+    const mins = Math.round((Date.now() - Date.parse(iso)) / 60000);
+    if (!(mins >= 0)) return '—';
+    if (mins < 60) return `${mins}m ago`;
+    const h = Math.round(mins / 60); if (h < 48) return `${h}h ago`;
+    return `${Math.round(h / 24)}d ago`;
+  };
+  const syncRows = (await pool.query(`SELECT k, v FROM sync_state WHERE k = ANY($1)`, [Object.keys(svcLabel)])).rows;
+  const syncOrder = Object.keys(svcLabel);
+  const syncLine = syncRows
+    .sort((a, b) => syncOrder.indexOf(a.k) - syncOrder.indexOf(b.k))
+    .map(r => {
+      const stale = r.v?.last_run && (Date.now() - Date.parse(r.v.last_run)) > 3 * 3600e3;
+      const warn = (r.v?.last_error || stale) ? ' ⚠️' : '';
+      return `${svcLabel[r.k]}: ${ago(r.v?.last_run)}${warn}`;
+    }).join('  ·  ') || '_no sync data_';
+
   const today = new Date().toLocaleDateString('en-GB', { timeZone: REPORT_TZ, weekday: 'long', day: 'numeric', month: 'long' });
   const appUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || 'https://clicks-brain.onrender.com').replace(/\/$/, '');
   const blocks = [
@@ -4791,6 +4811,7 @@ async function buildDailyReport() {
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🚢 Freight*' }] },
     { type: 'section', text: { type: 'mrkdwn', text: freightLine } },
     { type: 'divider' },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: `🔄 *Last sync* — ${syncLine}` }] },
     { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: '📊 Open dashboard', emoji: true }, url: appUrl + '/' }] },
     { type: 'context', elements: [{ type: 'mrkdwn', text: `Data refreshed just before posting · ${new Date().toLocaleString('en-GB', { timeZone: REPORT_TZ })}` }] }
   ];
