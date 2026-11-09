@@ -4818,6 +4818,25 @@ app.get('/api/report/siena-check', async (req, res) => {
     res.json({ solved_by_values, siena_tags });
   } catch (e) { send500(res, e); }
 });
+// diagnostic (admin): why "Resolved by Siena" might read 0 — what closed recently and whether the tag is present
+app.get('/api/report/closed-check', async (req, res) => {
+  try {
+    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+    const byDay = (await pool.query(`
+      SELECT (closed_datetime AT TIME ZONE 'Europe/London')::date d,
+             count(*)::int closed,
+             count(*) FILTER (WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t)='handled-by-siena'))::int siena
+      FROM tickets_cache
+      WHERE NOT coalesce(spam,false) AND closed_datetime >= now() - interval '7 days'
+      GROUP BY 1 ORDER BY 1 DESC`)).rows;
+    const sample = (await pool.query(`
+      SELECT gorgias_id, status, to_char(closed_datetime,'YYYY-MM-DD HH24:MI') closed_at, to_char(synced_at,'YYYY-MM-DD HH24:MI') synced_at, tags
+      FROM tickets_cache
+      WHERE NOT coalesce(spam,false) AND closed_datetime >= now() - interval '2 days'
+      ORDER BY closed_datetime DESC LIMIT 15`)).rows;
+    res.json({ by_day: byDay, sample });
+  } catch (e) { send500(res, e); }
+});
 // diagnostic (admin): Gorgias agents/users (to build "top agent" and identify Siena) + a sample reporting probe
 app.get('/api/report/agents-check', async (req, res) => {
   try {
