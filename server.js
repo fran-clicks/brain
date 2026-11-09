@@ -4670,26 +4670,52 @@ async function buildDailyReport() {
   const tc = (await pool.query(`
     SELECT count(*)::int closed,
            count(*) FILTER (WHERE siena)::int closed_siena,
-           percentile_cont(0.5) WITHIN GROUP (ORDER BY res) median_res,
-           count(*) FILTER (WHERE res <= 86400)::int within24   -- SLA: resolved within 24h
+           count(*) FILTER (WHERE recent)::int closed_recent,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY res) FILTER (WHERE recent) median_res,
+           count(*) FILTER (WHERE recent AND res <= 86400)::int within24   -- SLA on recent tickets only
     FROM (
       SELECT EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t) = 'handled-by-siena') siena, -- Siena resolved it herself (not escalated/assisted)
+             created_datetime >= now() - interval '7 days' AS recent, -- resolution metrics only over recently-created tickets, so old cleared tickets don't bloat the median
              extract(epoch FROM (closed_datetime - created_datetime)) res
       FROM tickets_cache
       WHERE NOT coalesce(spam,false) AND closed_datetime IS NOT NULL
         AND (closed_datetime AT TIME ZONE 'Europe/London')::date = ${TODAY}
     ) x`)).rows[0] || {};
   const closedToday = tc.closed || 0;
+  const closedRecent = tc.closed_recent || 0;
   const sienaClosed = tc.closed_siena || 0;
   const teamClosed = closedToday - sienaClosed;
   const sienaPct = closedToday > 0 ? Math.round(sienaClosed / closedToday * 100) : 0;
-  const pct24 = closedToday > 0 ? Math.round((tc.within24 || 0) / closedToday * 100) : 0;
+  const pct24 = closedRecent > 0 ? Math.round((tc.within24 || 0) / closedRecent * 100) : 0;
   const dur = sec => { if (sec == null) return '—'; sec = Math.round(sec); if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))}m`; const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60); return `${h}h ${m}m`; };
   // Open support backlog = open tickets minus spam, auto-close and non-support-related.
   const openSupport = (await pool.query(`
     SELECT count(*)::int c FROM tickets_cache
     WHERE status='open' AND NOT coalesce(spam,false)
       AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t) IN ('auto-close','non-support-related'))`)).rows[0]?.c || 0;
+  // day-over-day backlog: compare to the value snapshotted on the previous report day
+  const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: REPORT_TZ });
+  const snapRow = (await pool.query(`SELECT v FROM sync_state WHERE k='report_backlog'`)).rows[0]?.v || {};
+  let prevBacklog;
+  if (snapRow.date === todayISO) {
+    prevBacklog = snapRow.prev ?? null; // already snapshotted today — keep comparing to yesterday
+  } else {
+    prevBacklog = snapRow.value ?? null; // yesterday's value
+    await pool.query(`INSERT INTO sync_state (k, v) VALUES ('report_backlog', $1::jsonb)
+      ON CONFLICT (k) DO UPDATE SET v = $1::jsonb`, [JSON.stringify({ date: todayISO, value: openSupport, prev: snapRow.value ?? null })]);
+  }
+  const backlogDelta = (prevBacklog != null && prevBacklog > 0)
+    ? `  _(${openSupport >= prevBacklog ? '▲' : '▼'}${Math.round(Math.abs(openSupport - prevBacklog) / prevBacklog * 100)}% vs yday)_`
+    : '';
+  // top ticket categories created today (from the Gorgias category custom field)
+  const cats = (await pool.query(`
+    SELECT nullif(cf_category,'') cat, count(*)::int c
+    FROM tickets_cache
+    WHERE NOT coalesce(spam,false) AND NOT non_support
+      AND (created_datetime AT TIME ZONE 'Europe/London')::date = ${TODAY}
+      AND nullif(cf_category,'') IS NOT NULL
+    GROUP BY 1 ORDER BY 2 DESC LIMIT 5`)).rows;
+  const catsText = cats.length ? cats.map(r => `${slackEsc(r.cat)} (${r.c})`).join(' · ') : '_none categorised today_';
   const ret = (await pool.query(`SELECT
       count(*) FILTER (WHERE ${DAY} = ${TODAY}) today,
       count(*) FILTER (WHERE created_at >= now()-interval '7 days') last7 FROM returns_cache`)).rows[0] || {};
@@ -4740,13 +4766,14 @@ async function buildDailyReport() {
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🎧 Support & marketing*' }] },
     { type: 'section', fields: [
       { type: 'mrkdwn', text: `*🎧 New tickets*\n${g.new_today || 0}` },
-      { type: 'mrkdwn', text: `*🗂️ Open backlog (support)*\n${openSupport}` },
+      { type: 'mrkdwn', text: `*🗂️ Open backlog (support)*\n${openSupport}${backlogDelta}` },
       { type: 'mrkdwn', text: `*✅ Closed today*\n${closedToday}` },
       { type: 'mrkdwn', text: `*🤖 Resolved by Siena*\n${sienaClosed}  _(${sienaPct}% · ${teamClosed} by team)_` },
-      { type: 'mrkdwn', text: `*⏱️ Resolution*\n${dur(tc.median_res)} median · ${pct24}% ≤ 24h` },
+      { type: 'mrkdwn', text: `*⏱️ Resolution (created ≤7d)*\n${dur(tc.median_res)} median · ${pct24}% ≤ 24h` },
       { type: 'mrkdwn', text: `*🔴 Difficult (open, 10+ msgs)*\n${g.difficult || 0}` },
       { type: 'mrkdwn', text: `*✉️ Campaigns today*\n${kv.sent || 0}${(+kv.rev) > 0 ? ` · ${money(+kv.rev, cur)}` : ''}` }
     ] },
+    { type: 'section', text: { type: 'mrkdwn', text: `*🏷️ Top categories (created today):* ${catsText}` } },
     { type: 'divider' },
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*📦 Inventory & returns*' }] },
     { type: 'section', text: { type: 'mrkdwn', text: `*↩️ Returns today:* ${ret.today || 0}  _(7d: ${ret.last7 || 0})_` } },
