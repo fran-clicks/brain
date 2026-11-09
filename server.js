@@ -4702,20 +4702,19 @@ async function buildDailyReport() {
     SELECT count(*)::int c FROM tickets_cache
     WHERE status='open' AND NOT coalesce(spam,false)
       AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t) IN ('auto-close','non-support-related'))`)).rows[0]?.c || 0;
-  // day-over-day backlog: compare to the value snapshotted on the previous report day
-  const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: REPORT_TZ });
-  const snapRow = (await pool.query(`SELECT v FROM sync_state WHERE k='report_backlog'`)).rows[0]?.v || {};
-  let prevBacklog;
-  if (snapRow.date === todayISO) {
-    prevBacklog = snapRow.prev ?? null; // already snapshotted today — keep comparing to yesterday
-  } else {
-    prevBacklog = snapRow.value ?? null; // yesterday's value
-    await pool.query(`INSERT INTO sync_state (k, v) VALUES ('report_backlog', $1::jsonb)
-      ON CONFLICT (k) DO UPDATE SET v = $1::jsonb`, [JSON.stringify({ date: todayISO, value: openSupport, prev: snapRow.value ?? null })]);
-  }
-  const backlogDelta = (prevBacklog != null && prevBacklog > 0)
+  // day-over-day backlog change ≈ net inflow over the last 24h (created − closed), support tickets only.
+  // Works from day one (no stored history needed); also snapshot today's value for future exact comparison.
+  const flow = (await pool.query(`
+    SELECT count(*) FILTER (WHERE created_datetime >= now() - interval '24 hours')::int created24,
+           count(*) FILTER (WHERE closed_datetime >= now() - interval '24 hours')::int closed24
+    FROM tickets_cache WHERE NOT coalesce(spam,false) AND NOT non_support`)).rows[0] || {};
+  const prevBacklog = openSupport - ((flow.created24 || 0) - (flow.closed24 || 0));
+  const backlogDelta = (prevBacklog > 0)
     ? `  _(${openSupport >= prevBacklog ? '▲' : '▼'}${Math.round(Math.abs(openSupport - prevBacklog) / prevBacklog * 100)}% vs yday)_`
     : '';
+  const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: REPORT_TZ });
+  await pool.query(`INSERT INTO sync_state (k, v) VALUES ('report_backlog', $1::jsonb)
+    ON CONFLICT (k) DO UPDATE SET v = $1::jsonb`, [JSON.stringify({ date: todayISO, value: openSupport })]).catch(() => {});
   // top ticket categories created today (from the Gorgias category custom field)
   const cats = (await pool.query(`
     SELECT nullif(cf_category,'') cat, count(*)::int c
