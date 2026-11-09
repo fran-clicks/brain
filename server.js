@@ -4909,7 +4909,7 @@ app.get('/api/report/reporting-probe', async (req, res) => {
         const r = await fetch(`https://${gcfg.domain}.gorgias.com/api/reporting/stats`, {
           method: 'POST',
           headers: { Authorization: `Basic ${auth}`, Accept: 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: { scope: a.scope, measures: a.measures, filters: periodFilters, timezone: 'UTC' } })
+          body: JSON.stringify({ query: { scope: a.scope, measures: ['__probe__'], dimensions: ['__probe__'], filters: periodFilters, timezone: 'UTC' } })
         });
         const body = await r.text();
         out[a.scope] = { status: r.status, body: body.slice(0, 1200) };
