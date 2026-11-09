@@ -4054,13 +4054,15 @@ app.get('/api/gorgias/stats', async (req, res) => {
       out.csat_avg_5 = scored.length ? +(scored.reduce((a, x) => a + x.score, 0) / scored.length).toFixed(2) : null;
     } catch (e) { out.errors.push(String(e.message)); }
     try {
-      const frt = await gorgiasRequest(cfg, '/api/reporting/stats?limit=1', {
+      const frt = await gorgiasRequest(cfg, '/api/reporting/stats', {
         method: 'POST',
-        body: JSON.stringify({ scope: 'first-response-time', measures: ['averageFirstResponseTime'], filters: [], timezone: 'UTC' })
+        body: JSON.stringify({ query: { scope: 'first-response-time', measures: ['averageFirstResponseTime'],
+          filters: [{ member: 'periodStart', operator: 'afterDate', values: [w[0]] }, { member: 'periodEnd', operator: 'beforeDate', values: [w[1]] }],
+          timezone: REPORT_TZ } })
       });
-      const row = frt?.data?.[0] || frt?.data || {};
-      const v = row.averageFirstResponseTime ?? row['FirstResponseTime.averageFirstResponseTime'] ?? null;
-      out.avg_first_response_seconds = typeof v === 'number' ? v : (v ? Number(v) : null);
+      const row = frt?.data?.[0] || {};
+      const v = row.averageFirstResponseTime ?? null;
+      out.avg_first_response_seconds = v != null ? Number(v) : null;
     } catch (e) { console.error('gorgias FRT (best-effort):', e.message); } // quiet — metric shows "—"
   } else {
     out.message = 'Live Gorgias metrics unavailable — the connector needs re-adding on the ＋ page. Showing locally synced data.';
@@ -4870,41 +4872,6 @@ app.post('/api/report/daily', async (req, res) => {
   try { await postDailyReport(); res.json({ ok: true }); }
   catch (e) { send500(res, e); }
 });
-// diagnostic (admin): how Siena-handled tickets are recorded — distinct solved_by values + any 'siena' tags (last 30d)
-app.get('/api/report/siena-check', async (req, res) => {
-  try {
-    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
-    const solved_by_values = (await pool.query(`
-      SELECT coalesce(nullif(cf_solved_by,''),'(empty)') solved_by, count(*)::int c
-      FROM tickets_cache WHERE closed_datetime >= now() - interval '30 days' AND NOT coalesce(spam,false)
-      GROUP BY 1 ORDER BY 2 DESC LIMIT 40`)).rows;
-    const siena_tags = (await pool.query(`
-      SELECT t tag, count(*)::int c
-      FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t
-      WHERE closed_datetime >= now() - interval '30 days' AND t ILIKE '%siena%'
-      GROUP BY 1 ORDER BY 2 DESC`)).rows;
-    res.json({ solved_by_values, siena_tags });
-  } catch (e) { send500(res, e); }
-});
-// diagnostic (admin): why "Resolved by Siena" might read 0 — what closed recently and whether the tag is present
-app.get('/api/report/closed-check', async (req, res) => {
-  try {
-    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
-    const byDay = (await pool.query(`
-      SELECT (closed_datetime AT TIME ZONE 'Europe/London')::date d,
-             count(*)::int closed,
-             count(*) FILTER (WHERE EXISTS (SELECT 1 FROM jsonb_array_elements_text(tags) t WHERE lower(t)='handled-by-siena'))::int siena
-      FROM tickets_cache
-      WHERE NOT coalesce(spam,false) AND closed_datetime >= now() - interval '7 days'
-      GROUP BY 1 ORDER BY 1 DESC`)).rows;
-    const sample = (await pool.query(`
-      SELECT gorgias_id, status, to_char(closed_datetime,'YYYY-MM-DD HH24:MI') closed_at, to_char(synced_at,'YYYY-MM-DD HH24:MI') synced_at, tags
-      FROM tickets_cache
-      WHERE NOT coalesce(spam,false) AND closed_datetime >= now() - interval '2 days'
-      ORDER BY closed_datetime DESC LIMIT 15`)).rows;
-    res.json({ by_day: byDay, sample });
-  } catch (e) { send500(res, e); }
-});
 // diagnostic (admin): Gorgias sync health + a live auth test, to see why the cache may be frozen
 app.get('/api/report/sync-status', async (req, res) => {
   try {
@@ -4919,68 +4886,6 @@ app.get('/api/report/sync-status', async (req, res) => {
       live_tickets = { ok: true, newest_updated: t.data?.[0]?.updated_datetime || null };
     } catch (e) { live_err = e.message; }
     res.json({ sync_state: st, cache: latest, live_tickets, live_err });
-  } catch (e) { send500(res, e); }
-});
-// diagnostic (admin): probe which Gorgias reporting cubes the key can read (for top-agent messages + handle time)
-app.get('/api/report/reporting-probe', async (req, res) => {
-  try {
-    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
-    const gcfg = await getGorgiasConfig();
-    if (!gcfg) return res.json({ error: 'Gorgias not connected' });
-    // 'first-response-time' is a known-good control (we use it elsewhere). The rest are guesses — the
-    // 400 response BODY will tell us the valid scope/measure names.
-    const start = new Date(Date.now() - 24 * 3600e3).toISOString();
-    const end = new Date().toISOString();
-    const periodFilters = [
-      { member: 'periodStart', operator: 'afterDate', values: [start] },
-      { member: 'periodEnd', operator: 'beforeDate', values: [end] },
-    ];
-    const auth = Buffer.from(`${gcfg.email}:${gcfg.api_key}`).toString('base64');
-    const stat = async (scope, measures, dimensions) => {
-      try {
-        const r = await fetch(`https://${gcfg.domain}.gorgias.com/api/reporting/stats`, {
-          method: 'POST',
-          headers: { Authorization: `Basic ${auth}`, Accept: 'application/json', 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: { scope, measures, dimensions, filters: periodFilters, timezone: 'UTC' } })
-        });
-        return { status: r.status, body: (await r.text()).slice(0, 1600) };
-      } catch (e) { return { error: e.message }; }
-    };
-    const out = {};
-    out.messages_sent = await stat('messages-sent', ['messagesCount'], ['agentId']);
-    out.handle_time = await stat('ticket-handle-time', ['averageHandleTime'], ['ticketAssigneeName']);
-    try {
-      const u = await gorgiasRequest(gcfg, '/api/users?limit=100');
-      out.users = (u.data || []).map(x => ({ id: x.id, name: x.name }));
-    } catch (e) { out.users_err = e.message; }
-    res.json(out);
-  } catch (e) { send500(res, e); }
-});
-// diagnostic (admin): Gorgias agents/users (to build "top agent" and identify Siena) + a sample reporting probe
-app.get('/api/report/agents-check', async (req, res) => {
-  try {
-    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
-    const gcfg = await getGorgiasConfig();
-    if (!gcfg) return res.json({ error: 'Gorgias not connected' });
-    const out = {};
-    try {
-      const u = await gorgiasRequest(gcfg, '/api/users?limit=100');
-      out.users = (u.data || []).map(x => ({ id: x.id, name: x.name, email: x.email, role: x.role?.name || x.role || null, active: x.active }));
-    } catch (e) { out.users_err = e.message; }
-    res.json(out);
-  } catch (e) { send500(res, e); }
-});
-// diagnostic (admin): tags on currently-open tickets, so we can pick which = non-support / auto-close to exclude
-app.get('/api/report/open-tags', async (req, res) => {
-  try {
-    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
-    const open_tags = (await pool.query(`
-      SELECT t tag, count(*)::int c
-      FROM tickets_cache, LATERAL jsonb_array_elements_text(tags) t
-      WHERE status='open' AND NOT coalesce(spam,false)
-      GROUP BY 1 ORDER BY 2 DESC LIMIT 80`)).rows;
-    const open_total = (await pool.query(`SELECT count(*)::int c FROM tickets_cache WHERE status='open' AND NOT coalesce(spam,false)`)).rows[0]?.c || 0;
-    res.json({ open_total, open_tags });
   } catch (e) { send500(res, e); }
 });
 // in-app scheduler: post once when the Europe/London clock reaches 18:00 (reliable on an always-on plan)
