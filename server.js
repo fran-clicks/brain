@@ -4818,6 +4818,20 @@ app.get('/api/report/siena-check', async (req, res) => {
     res.json({ solved_by_values, siena_tags });
   } catch (e) { send500(res, e); }
 });
+// diagnostic (admin): Gorgias agents/users (to build "top agent" and identify Siena) + a sample reporting probe
+app.get('/api/report/agents-check', async (req, res) => {
+  try {
+    if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+    const gcfg = await getGorgiasConfig();
+    if (!gcfg) return res.json({ error: 'Gorgias not connected' });
+    const out = {};
+    try {
+      const u = await gorgiasRequest(gcfg, '/api/users?limit=100');
+      out.users = (u.data || []).map(x => ({ id: x.id, name: x.name, email: x.email, role: x.role?.name || x.role || null, active: x.active }));
+    } catch (e) { out.users_err = e.message; }
+    res.json(out);
+  } catch (e) { send500(res, e); }
+});
 // diagnostic (admin): tags on currently-open tickets, so we can pick which = non-support / auto-close to exclude
 app.get('/api/report/open-tags', async (req, res) => {
   try {
