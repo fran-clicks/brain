@@ -4784,24 +4784,33 @@ async function buildDailyReport() {
   const kv = (await pool.query(`SELECT count(*) sent, coalesce(sum(revenue),0)::numeric rev FROM campaigns_cache
     WHERE (send_time AT TIME ZONE 'Europe/London')::date = ${TODAY}`)).rows[0] || {};
 
-  // 90-day forecast: SKUs projected to fall below 0 within the next 90 days (soonest first).
-  // Reported for the combined stock and for each warehouse on its own demand
-  // (ShipBob = US orders, Floship = rest-of-world).
+  // 90-day forecast: SKUs projected to run out within the next 90 days, ranked by how
+  // short they'll be (biggest shortfall first). Per warehouse on its own demand
+  // (ShipBob = US orders, Floship = rest-of-world); "combined" is the UNION — a SKU that
+  // runs out in EITHER warehouse, with its shortfalls summed.
   const fc = await forecastRows(90);
-  const fcSection = (view) => {
-    const below = fc.rows
-      .map(r => ({ r, v: view(r) }))
-      .filter(x => x.v.proj[90] < 0)
-      .sort((a, b) => (a.v.cover == null ? Infinity : a.v.cover) - (b.v.cover == null ? Infinity : b.v.cover));
-    if (!below.length) return { count: 0, text: '_none forecast to run out in the next 90 days_' };
-    const list = below.slice(0, 5).map(({ r, v }) =>
-      `• *${slackEsc(r.sku)}*${r.name && r.name !== r.sku ? ` ${slackEsc(r.name)}` : ''} — out in ~${v.cover}d → short *${Math.abs(v.proj[90]).toLocaleString()} units* by day 90`).join('\n')
-      + (below.length > 5 ? `\n…and ${below.length - 5} more` : '');
-    return { count: below.length, text: list };
+  const shortOf = v => (v.proj[90] < 0 ? -v.proj[90] : 0); // units short by day 90, else 0
+  const sectionFrom = (items) => {
+    if (!items.length) return { count: 0, text: '_none forecast to run out in the next 90 days_' };
+    items.sort((a, b) => b.short - a.short || (a.cover == null ? Infinity : a.cover) - (b.cover == null ? Infinity : b.cover));
+    const list = items.slice(0, 5).map(x =>
+      `• *${slackEsc(x.sku)}*${x.name && x.name !== x.sku ? ` ${slackEsc(x.name)}` : ''} — short *${x.short.toLocaleString()} units* by day 90${x.cover != null ? ` (out in ~${x.cover}d)` : ''}`).join('\n')
+      + (items.length > 5 ? `\n…and ${items.length - 5} more` : '');
+    return { count: items.length, text: list };
   };
-  const fcCombined = fcSection(r => r);
-  const fcShipbob = fcSection(r => r.wh.shipbob);
-  const fcFloship = fcSection(r => r.wh.floship);
+  const whItems = (view) => fc.rows
+    .map(r => ({ sku: r.sku, name: r.name, cover: view(r).cover, short: shortOf(view(r)) }))
+    .filter(x => x.short > 0);
+  const unionItems = fc.rows.map(r => {
+    const ssb = shortOf(r.wh.shipbob), sfl = shortOf(r.wh.floship);
+    const covs = [];
+    if (ssb > 0 && r.wh.shipbob.cover != null) covs.push(r.wh.shipbob.cover);
+    if (sfl > 0 && r.wh.floship.cover != null) covs.push(r.wh.floship.cover);
+    return { sku: r.sku, name: r.name, cover: covs.length ? Math.min(...covs) : null, short: ssb + sfl };
+  }).filter(x => x.short > 0);
+  const fcCombined = sectionFrom(unionItems);
+  const fcShipbob = sectionFrom(whItems(r => r.wh.shipbob));
+  const fcFloship = sectionFrom(whItems(r => r.wh.floship));
 
   const fr = (await pool.query(`SELECT name, to_char(eta,'DD Mon') eta,
       (eta < ${TODAY}) overdue, (eta BETWEEN ${TODAY} AND ${TODAY} + 7) soon,
