@@ -2968,12 +2968,27 @@ const floshipOrderLink = fsid => `https://admin.floship.com/order/${String(fsid)
 let floshipDefsReady = false;
 async function ensureFloshipMetafieldDefs(scfg) {
   if (floshipDefsReady) return;
-  const M = `mutation($def: MetafieldDefinitionInput!) { metafieldDefinitionCreate(definition: $def) { userErrors { code message } } }`;
+  const CREATE = `mutation($def: MetafieldDefinitionInput!) { metafieldDefinitionCreate(definition: $def) { createdDefinition { id } userErrors { code message } } }`;
+  const FIND = `query($key: String!) { metafieldDefinitions(first: 1, ownerType: ORDER, namespace: "floship", key: $key) { nodes { id pinnedPosition } } }`;
+  const PIN = `mutation($id: ID!) { metafieldDefinitionPin(definitionId: $id) { userErrors { field message } } }`;
   const defs = [
     { name: 'Floship ID', namespace: 'floship', key: 'id', type: 'single_line_text_field', ownerType: 'ORDER' },
     { name: 'Floship link', namespace: 'floship', key: 'link', type: 'url', ownerType: 'ORDER' }
   ];
-  for (const def of defs) { try { await shopifyGraphql(scfg, M, { def }); } catch (e) { /* exists or no scope — fine */ } }
+  for (const def of defs) {
+    try {
+      // create if missing (returns an id); otherwise look it up
+      let id = null;
+      try { const c = await shopifyGraphql(scfg, CREATE, { def }); id = c.metafieldDefinitionCreate?.createdDefinition?.id || null; } catch (e) { /* ignore */ }
+      if (!id) {
+        const f = await shopifyGraphql(scfg, FIND, { key: def.key });
+        const n = f.metafieldDefinitions?.nodes?.[0];
+        if (n && n.pinnedPosition != null) continue; // already pinned → nothing to do
+        id = n?.id || null;
+      }
+      if (id) await shopifyGraphql(scfg, PIN, { id }); // pin so it shows on the order's main Metafields card
+    } catch (e) { /* non-fatal: metafields still write, just not pinned */ }
+  }
   floshipDefsReady = true;
 }
 // add the FSID tag + floship.id text + floship.link url metafields to one Shopify order (all idempotent)
