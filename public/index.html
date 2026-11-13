@@ -874,10 +874,10 @@ footer{color:rgba(16,17,20,.45)}
   <!-- Floship order IDs → Shopify (admin) -->
   <div class="card" id="fsidCard" style="display:none">
     <h2>🔗 Floship order IDs → Shopify <span style="font-weight:400;color:var(--muted);font-size:12px">· write the FS… ID onto each Shopify order</span></h2>
-    <div class="note" style="margin-top:0">Adds the Floship ID as an order <b>tag</b> (search <code>tag:FS…</code> in Shopify) and a <code>floship.id</code> metafield, matched by the order number. When Floship references an FS… number you can find the order instantly.</div>
+    <div class="note" style="margin-top:0">Adds the Floship ID as an order <b>tag</b> (search <code>tag:FS…</code> in Shopify), a <code>floship.id</code> metafield, and a clickable <code>floship.link</code> metafield to the Floship order, matched by the order number. When Floship references an FS… number you can find the order instantly.</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
       <button class="btn" id="fsidRecentBtn" onclick="fsidSync('recent')" style="margin:0;padding:7px 14px">🗓️ Sync last 7 days</button>
-      <button class="btn" id="fsidFullBtn" onclick="fsidSync('full')" style="margin:0;padding:7px 14px">🌐 Full sync (all orders)</button>
+      <button class="btn" id="fsid30Btn" onclick="fsidSync('fulfilled30')" style="margin:0;padding:7px 14px">📦 Last 30 days (fulfilled only)</button>
       <span class="updating-pill" id="fsidUpdating"><div class="spin"></div>Working…</span>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">

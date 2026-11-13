@@ -284,25 +284,27 @@ function openForecastChart(sku) {
       scales: { y: { beginAtZero: false, grid: { color: 'rgba(16,17,20,.06)' } }, x: { grid: { display: false } } } }
   });
 }
-// Floship FSID → Shopify (tag + metafield). modes: recent | full | single
+// Floship FSID → Shopify (tag + metafields). modes: recent | fulfilled30 | single
 async function fsidSync(mode) {
   const note = document.getElementById('fsidNote');
   const ref = (document.getElementById('fsidRef').value || '').trim();
   if (mode === 'single' && !ref) { note.textContent = '⚠️ Enter a CT order number first.'; return; }
+  const winBtns = ['fsidRecentBtn', 'fsid30Btn'];
   document.getElementById('fsidUpdating').classList.add('on');
-  ['fsidRecentBtn', 'fsidFullBtn'].forEach(id => document.getElementById(id).disabled = true);
-  note.textContent = mode === 'full' ? 'Running full sync… large backfill runs in batches — keep clicking Full until it says caught up.' : 'Working…';
+  winBtns.forEach(id => document.getElementById(id).disabled = true);
+  note.textContent = 'Working…';
   try {
     const r = await api('/api/floship/fsid-sync', { method: 'POST', body: JSON.stringify({ mode, ref }) });
     let msg;
     if (mode === 'single') {
       msg = r.found
         ? `${r.written ? '✅' : (r.unmatched ? '⚠️' : 'ℹ️')} ${r.fsid} → ${r.ref}: ` +
-          (r.written ? 'tag + metafield written' : (r.unmatched ? 'Floship order found, but no matching Shopify order in the cache' : 'already up to date'))
+          (r.written ? 'tag + metafields written' : (r.unmatched ? 'Floship order found, but no matching Shopify order in the cache' : 'already up to date'))
         : `❓ ${r.note || 'not found'}`;
     } else {
-      msg = `✅ ${mode === 'full' ? 'Full' : 'Last 7 days'}: ${r.written} written · ${r.matched} matched · ${r.skipped} already done · ${r.unmatched} no Shopify match (${r.pages} Floship pages)`;
-      if (mode === 'full') msg += r.done ? ' — all caught up ✅' : ' — more to go, click Full again ⏩';
+      const label = mode === 'fulfilled30' ? 'Last 30 days (fulfilled)' : 'Last 7 days';
+      msg = `✅ ${label}: ${r.written} written · ${r.matched} matched · ${r.skipped} already done · ${r.unmatched} no Shopify match (${r.pages} Floship pages)`;
+      msg += r.more ? ' — more to go, click again ⏩' : ' — all caught up ✅';
     }
     if (r.hint) msg += `\n⚠️ ${r.hint}`;
     if (r.errors && r.errors.length) msg += `\nErrors: ${r.errors.slice(0, 5).join(' · ')}`;
@@ -310,7 +312,7 @@ async function fsidSync(mode) {
   } catch (e) { note.textContent = '⚠️ ' + e.message; }
   finally {
     document.getElementById('fsidUpdating').classList.remove('on');
-    ['fsidRecentBtn', 'fsidFullBtn'].forEach(id => document.getElementById(id).disabled = false);
+    winBtns.forEach(id => document.getElementById(id).disabled = false);
   }
 }
 async function loadFulfillment() {

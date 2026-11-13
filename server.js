@@ -2961,7 +2961,22 @@ async function floshipGetOrdersPage(auth, token, url) {
   return { results, next: (b && !Array.isArray(b) && b.next) || null };
 }
 const fsPair = o => ({ fsid: String(o.reference || '').trim(), ref: String(o.customer_reference || '').trim(), status: o.status || '', source: o.source || '' });
-// add the FSID tag + floship.id metafield to one Shopify order (both idempotent)
+// Floship admin URL for an FSID ("FS10974548" → https://admin.floship.com/order/10974548)
+const floshipOrderLink = fsid => `https://admin.floship.com/order/${String(fsid).replace(/\D/g, '')}`;
+// best-effort: define floship.id (text) and floship.link (url) as proper ORDER metafields so they
+// show pinned/typed in the admin rather than as "unstructured". Non-fatal if the scope is missing.
+let floshipDefsReady = false;
+async function ensureFloshipMetafieldDefs(scfg) {
+  if (floshipDefsReady) return;
+  const M = `mutation($def: MetafieldDefinitionInput!) { metafieldDefinitionCreate(definition: $def) { userErrors { code message } } }`;
+  const defs = [
+    { name: 'Floship ID', namespace: 'floship', key: 'id', type: 'single_line_text_field', ownerType: 'ORDER' },
+    { name: 'Floship link', namespace: 'floship', key: 'link', type: 'url', ownerType: 'ORDER' }
+  ];
+  for (const def of defs) { try { await shopifyGraphql(scfg, M, { def }); } catch (e) { /* exists or no scope — fine */ } }
+  floshipDefsReady = true;
+}
+// add the FSID tag + floship.id text + floship.link url metafields to one Shopify order (all idempotent)
 async function applyFsidToShopify(scfg, gid, fsid) {
   const M = `mutation($id: ID!, $tags: [String!]!, $mf: [MetafieldsSetInput!]!) {
     tagsAdd(id: $id, tags: $tags) { userErrors { field message } }
@@ -2969,7 +2984,10 @@ async function applyFsidToShopify(scfg, gid, fsid) {
   }`;
   const d = await shopifyGraphql(scfg, M, {
     id: gid, tags: [fsid],
-    mf: [{ ownerId: gid, namespace: 'floship', key: 'id', type: 'single_line_text_field', value: fsid }]
+    mf: [
+      { ownerId: gid, namespace: 'floship', key: 'id', type: 'single_line_text_field', value: fsid },
+      { ownerId: gid, namespace: 'floship', key: 'link', type: 'url', value: floshipOrderLink(fsid) }
+    ]
   });
   const errs = [...(d.tagsAdd?.userErrors || []), ...(d.metafieldsSet?.userErrors || [])];
   if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
@@ -2998,7 +3016,9 @@ async function pushFsidPairs(scfg, pairs, force) {
   }
   return { matched, written, unmatched, skipped, errors };
 }
-// modes: 'full' (resumable backfill of all orders), 'recent' (last 7 days), 'single' (one CT reference)
+// modes: 'recent' (last 7 days, any status), 'fulfilled30' (last 30 days, fulfilled only),
+// 'single' (one CT reference). Each writes the FS tag + floship.id + floship.link metafields.
+const FSID_WINDOWS = { recent: { days: 7, fulfilled: false }, fulfilled30: { days: 30, fulfilled: true } };
 app.post('/api/floship/fsid-sync', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const conn = await getConnector('floship');
@@ -3012,6 +3032,7 @@ app.post('/api/floship/fsid-sync', async (req, res) => {
   const scopeHint = errs => errs.some(e => /access|scope|denied|write_orders/i.test(e))
     ? 'Writes were denied — the brain’s Shopify app likely needs the write_orders scope. Add it in the Shopify custom app and reinstall.' : undefined;
   try {
+    await ensureFloshipMetafieldDefs(scfg); // best-effort; non-fatal
     if (mode === 'single') {
       const ref = String(req.body?.ref || '').trim();
       if (!ref) return res.status(400).json({ error: 'ref (the CT order number) is required' });
@@ -3023,40 +3044,34 @@ app.post('/api/floship/fsid-sync', async (req, res) => {
         const hit = results.find(o => String(o.customer_reference || '').trim() === ref);
         if (hit) pair = fsPair(hit);
       }
-      if (!pair) return res.json({ mode, ref, found: false, note: 'No Floship order found for that reference. If it is an older order, run a Full sync once to cache it.' });
+      if (!pair) return res.json({ mode, ref, found: false, note: 'No Floship order found for that reference. If it is older, run the Last 30 days sync to cache it.' });
       const out = await pushFsidPairs(scfg, [pair], true);
       return res.json({ mode, ref, found: true, fsid: pair.fsid, ...out, hint: scopeHint(out.errors) });
     }
-    // recent or full — page newest-first
-    const cutoff = mode === 'full' ? null : Date.now() - 7 * 86400000;
-    const startUrl = mode === 'full'
-      ? ((await pool.query(`SELECT v->>'cursor' c FROM sync_state WHERE k='floship_fsid'`)).rows[0]?.c || ordersUrl)
-      : ordersUrl;
-    let url = startUrl, guard = 0, pages = 0;
+    // windowed modes — page newest-first, stop past the cutoff, optionally fulfilled-only
+    const win = FSID_WINDOWS[mode];
+    if (!win) return res.status(400).json({ error: `unknown mode: ${mode}` });
+    const cutoff = Date.now() - win.days * 86400000;
+    let url = ordersUrl, guard = 0, pages = 0, more = false;
     const agg = { matched: 0, written: 0, unmatched: 0, skipped: 0, errors: [] };
     const t0 = Date.now();
     while (url && guard++ < 1000) {
       const { results, next } = await floshipGetOrdersPage(auth, cfg.token, url);
       pages++;
-      let rows = results, stop = false;
-      if (cutoff) {
-        const fresh = results.filter(o => { const d = Date.parse(o.create_date || o.original_transaction_date || ''); return !d || d >= cutoff; });
-        if (fresh.length < results.length) stop = true;
-        rows = fresh;
-      }
+      let stop = false;
+      let rows = results.filter(o => {
+        const d = Date.parse(o.create_date || o.original_transaction_date || '');
+        if (d && d < cutoff) { stop = true; return false; } // newest-first → once we pass the window, stop
+        return true;
+      });
+      if (win.fulfilled) rows = rows.filter(o => String(o.status || '').toLowerCase() === 'fulfilled');
       const out = await pushFsidPairs(scfg, rows.map(fsPair).filter(p => p.fsid && p.ref), false);
       agg.matched += out.matched; agg.written += out.written; agg.unmatched += out.unmatched; agg.skipped += out.skipped;
       if (out.errors.length) agg.errors.push(...out.errors);
       url = stop ? null : next;
-      if (mode === 'full' && Date.now() - t0 > 20000) break; // time-box; resume on next click
+      if (url && Date.now() - t0 > 25000) { more = true; break; } // soft time-box; skip-done makes re-clicks cheap
     }
-    if (mode === 'full') {
-      const done = !url;
-      await pool.query(`INSERT INTO sync_state (k, v) VALUES ('floship_fsid', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
-        [JSON.stringify({ cursor: done ? null : url, last_run: new Date().toISOString() })]);
-      return res.json({ mode, pages, ...agg, errors: agg.errors.slice(0, 10), done, more: !done, hint: scopeHint(agg.errors) });
-    }
-    return res.json({ mode, pages, ...agg, errors: agg.errors.slice(0, 10), done: true, hint: scopeHint(agg.errors) });
+    return res.json({ mode, pages, ...agg, errors: agg.errors.slice(0, 10), done: !more, more, hint: scopeHint(agg.errors) });
   } catch (e) { send500(res, e, 502); }
 });
 
