@@ -2904,6 +2904,36 @@ app.post('/api/floship/sync', async (req, res) => {
   try { res.json(await syncFloship()); }
   catch (e) { send500(res, e, 502); }
 });
+// DIAGNOSTIC (admin): fetch the Floship ORDERS endpoint and return the first couple of raw order
+// objects, so we can see which field holds the Floship ID (FS…) and which holds the Shopify order
+// number (CT…). Remove once the FSID sync is built.
+app.get('/api/floship/orders-probe', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('floship');
+  if (!conn) return res.status(400).json({ error: 'Floship not connected — add it on the ＋ page first.' });
+  const cfg = conn.config;
+  const auth = conn.meta?.auth || 'Token';
+  const base = String(cfg.base_url).replace(/\/+$/, '').replace(/\/(products|inventory|inventories|stock|skus?)$/i, '');
+  const candidates = [base + '/orders', base + '/order', String(cfg.base_url).replace(/\/+$/, '') + '/orders'];
+  const tried = [];
+  for (const url of Array.from(new Set(candidates))) {
+    try {
+      const [u, hdrs] = floshipAuthApply(auth, url, cfg.token);
+      const r = await fetch(u, { headers: { ...hdrs, Accept: 'application/json' } });
+      const text = await r.text();
+      let body; try { body = JSON.parse(text); } catch { body = text; }
+      if (!r.ok) { tried.push({ url, status: r.status }); continue; }
+      const list = Array.isArray(body) ? body : (body.results || body.data || body.orders || []);
+      return res.json({
+        ok: true, url, status: r.status,
+        shape: { isArray: Array.isArray(body), topKeys: body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : null,
+          count: Array.isArray(list) ? list.length : null, next: body?.next || null },
+        sample: Array.isArray(list) ? list.slice(0, 2) : body
+      });
+    } catch (e) { tried.push({ url, error: e.message }); }
+  }
+  res.status(502).json({ ok: false, tried });
+});
 
 // ---------- Freight tracker (shipment builder: fields, items, documents, configurable stage stepper) ----------
 const FREIGHT_STAGES = ['Shipment booked', 'Picked up / dropped off', 'En route to destination country',
