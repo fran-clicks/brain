@@ -284,6 +284,35 @@ function openForecastChart(sku) {
       scales: { y: { beginAtZero: false, grid: { color: 'rgba(16,17,20,.06)' } }, x: { grid: { display: false } } } }
   });
 }
+// Floship FSID → Shopify (tag + metafield). modes: recent | full | single
+async function fsidSync(mode) {
+  const note = document.getElementById('fsidNote');
+  const ref = (document.getElementById('fsidRef').value || '').trim();
+  if (mode === 'single' && !ref) { note.textContent = '⚠️ Enter a CT order number first.'; return; }
+  document.getElementById('fsidUpdating').classList.add('on');
+  ['fsidRecentBtn', 'fsidFullBtn'].forEach(id => document.getElementById(id).disabled = true);
+  note.textContent = mode === 'full' ? 'Running full sync… large backfill runs in batches — keep clicking Full until it says caught up.' : 'Working…';
+  try {
+    const r = await api('/api/floship/fsid-sync', { method: 'POST', body: JSON.stringify({ mode, ref }) });
+    let msg;
+    if (mode === 'single') {
+      msg = r.found
+        ? `${r.written ? '✅' : (r.unmatched ? '⚠️' : 'ℹ️')} ${r.fsid} → ${r.ref}: ` +
+          (r.written ? 'tag + metafield written' : (r.unmatched ? 'Floship order found, but no matching Shopify order in the cache' : 'already up to date'))
+        : `❓ ${r.note || 'not found'}`;
+    } else {
+      msg = `✅ ${mode === 'full' ? 'Full' : 'Last 7 days'}: ${r.written} written · ${r.matched} matched · ${r.skipped} already done · ${r.unmatched} no Shopify match (${r.pages} Floship pages)`;
+      if (mode === 'full') msg += r.done ? ' — all caught up ✅' : ' — more to go, click Full again ⏩';
+    }
+    if (r.hint) msg += `\n⚠️ ${r.hint}`;
+    if (r.errors && r.errors.length) msg += `\nErrors: ${r.errors.slice(0, 5).join(' · ')}`;
+    note.textContent = msg;
+  } catch (e) { note.textContent = '⚠️ ' + e.message; }
+  finally {
+    document.getElementById('fsidUpdating').classList.remove('on');
+    ['fsidRecentBtn', 'fsidFullBtn'].forEach(id => document.getElementById(id).disabled = false);
+  }
+}
 async function loadFulfillment() {
   loadFulfillmentGrid();
   loadForecast();
@@ -291,6 +320,7 @@ async function loadFulfillment() {
   document.getElementById('fulSyncAllBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
   document.getElementById('fulImportBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
   document.getElementById('sbAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
+  const fsidCard = document.getElementById('fsidCard'); if (fsidCard) fsidCard.style.display = window.isAdmin ? 'block' : 'none';
   document.getElementById('sbUpdating').classList.add('on');
   try {
     const s = await api('/api/shipbob/summary');

@@ -2935,6 +2935,131 @@ app.get('/api/floship/orders-probe', async (req, res) => {
   res.status(502).json({ ok: false, tried });
 });
 
+// ---------- Floship order ID (FSID) → Shopify order (tag + metafield) ----------
+// Floship order object: reference = FSID ("FS12023977"), customer_reference = Shopify order number
+// ("CT25754510-RSHIP"). We match customer_reference → orders_cache.order_number → Shopify order GID,
+// then add the FSID as an order tag (searchable: tag:FS…) and a floship.id order metafield.
+let floshipOrdersTableReady = false;
+async function ensureFloshipOrdersTable() {
+  if (floshipOrdersTableReady) return;
+  await pool.query(`CREATE TABLE IF NOT EXISTS floship_orders (
+    fsid TEXT PRIMARY KEY, order_ref TEXT, status TEXT, source TEXT,
+    fetched_at TIMESTAMPTZ DEFAULT now(), shopify_done BOOLEAN DEFAULT false, last_error TEXT)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_fo_ref ON floship_orders (order_ref)`);
+  floshipOrdersTableReady = true;
+}
+function floshipOrdersUrl(cfg) {
+  const base = String(cfg.base_url).replace(/\/+$/, '').replace(/\/(products|inventory|inventories|stock|skus?)$/i, '');
+  return base + '/orders';
+}
+async function floshipGetOrdersPage(auth, token, url) {
+  const [u, hdrs] = floshipAuthApply(auth, url, token);
+  const r = await fetch(u, { headers: { ...hdrs, Accept: 'application/json' } });
+  if (!r.ok) throw new Error(`Floship ${r.status} fetching orders`);
+  const b = await r.json();
+  const results = Array.isArray(b) ? b : (b.results || b.data || b.orders || []);
+  return { results, next: (b && !Array.isArray(b) && b.next) || null };
+}
+const fsPair = o => ({ fsid: String(o.reference || '').trim(), ref: String(o.customer_reference || '').trim(), status: o.status || '', source: o.source || '' });
+// add the FSID tag + floship.id metafield to one Shopify order (both idempotent)
+async function applyFsidToShopify(scfg, gid, fsid) {
+  const M = `mutation($id: ID!, $tags: [String!]!, $mf: [MetafieldsSetInput!]!) {
+    tagsAdd(id: $id, tags: $tags) { userErrors { field message } }
+    metafieldsSet(metafields: $mf) { userErrors { field message } }
+  }`;
+  const d = await shopifyGraphql(scfg, M, {
+    id: gid, tags: [fsid],
+    mf: [{ ownerId: gid, namespace: 'floship', key: 'id', type: 'single_line_text_field', value: fsid }]
+  });
+  const errs = [...(d.tagsAdd?.userErrors || []), ...(d.metafieldsSet?.userErrors || [])];
+  if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
+}
+// upsert pairs into the cache table, then write matched ones to Shopify (skips already-done unless force)
+async function pushFsidPairs(scfg, pairs, force) {
+  let matched = 0, written = 0, unmatched = 0, skipped = 0; const errors = [];
+  for (const p of pairs) {
+    if (!p.ref || !p.fsid) continue;
+    const prev = (await pool.query(`SELECT shopify_done FROM floship_orders WHERE fsid=$1`, [p.fsid])).rows[0];
+    await pool.query(`INSERT INTO floship_orders (fsid, order_ref, status, source, fetched_at)
+      VALUES ($1,$2,$3,$4,now()) ON CONFLICT (fsid) DO UPDATE SET order_ref=$2, status=$3, source=$4, fetched_at=now()`,
+      [p.fsid, p.ref, p.status, p.source]);
+    if (prev?.shopify_done && !force) { skipped++; continue; }
+    const row = (await pool.query(`SELECT shopify_id FROM orders_cache WHERE order_number=$1 LIMIT 1`, [p.ref])).rows[0];
+    if (!row) { unmatched++; continue; }
+    matched++;
+    const gid = `gid://shopify/Order/${row.shopify_id}`;
+    try {
+      await applyFsidToShopify(scfg, gid, p.fsid); written++;
+      await pool.query(`UPDATE floship_orders SET shopify_done=true, last_error=null WHERE fsid=$1`, [p.fsid]);
+    } catch (e) {
+      errors.push(`${p.ref}: ${e.message}`);
+      await pool.query(`UPDATE floship_orders SET last_error=$2 WHERE fsid=$1`, [p.fsid, String(e.message).slice(0, 300)]).catch(() => {});
+    }
+  }
+  return { matched, written, unmatched, skipped, errors };
+}
+// modes: 'full' (resumable backfill of all orders), 'recent' (last 7 days), 'single' (one CT reference)
+app.post('/api/floship/fsid-sync', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('floship');
+  if (!conn) return res.status(400).json({ error: 'Floship not connected — add it on the ＋ page first.' });
+  const sconn = await getConnector('shopify');
+  if (!sconn) return res.status(400).json({ error: 'Shopify not connected.' });
+  await ensureFloshipOrdersTable();
+  const scfg = sconn.config, cfg = conn.config, auth = conn.meta?.auth || 'Token';
+  const ordersUrl = floshipOrdersUrl(cfg);
+  const mode = String(req.body?.mode || 'recent');
+  const scopeHint = errs => errs.some(e => /access|scope|denied|write_orders/i.test(e))
+    ? 'Writes were denied — the brain’s Shopify app likely needs the write_orders scope. Add it in the Shopify custom app and reinstall.' : undefined;
+  try {
+    if (mode === 'single') {
+      const ref = String(req.body?.ref || '').trim();
+      if (!ref) return res.status(400).json({ error: 'ref (the CT order number) is required' });
+      let pair = null;
+      const cached = (await pool.query(`SELECT fsid, order_ref, status, source FROM floship_orders WHERE order_ref=$1 ORDER BY fetched_at DESC LIMIT 1`, [ref])).rows[0];
+      if (cached) pair = { fsid: cached.fsid, ref: cached.order_ref, status: cached.status, source: cached.source };
+      if (!pair) {
+        const { results } = await floshipGetOrdersPage(auth, cfg.token, ordersUrl + '?search=' + encodeURIComponent(ref));
+        const hit = results.find(o => String(o.customer_reference || '').trim() === ref);
+        if (hit) pair = fsPair(hit);
+      }
+      if (!pair) return res.json({ mode, ref, found: false, note: 'No Floship order found for that reference. If it is an older order, run a Full sync once to cache it.' });
+      const out = await pushFsidPairs(scfg, [pair], true);
+      return res.json({ mode, ref, found: true, fsid: pair.fsid, ...out, hint: scopeHint(out.errors) });
+    }
+    // recent or full — page newest-first
+    const cutoff = mode === 'full' ? null : Date.now() - 7 * 86400000;
+    const startUrl = mode === 'full'
+      ? ((await pool.query(`SELECT v->>'cursor' c FROM sync_state WHERE k='floship_fsid'`)).rows[0]?.c || ordersUrl)
+      : ordersUrl;
+    let url = startUrl, guard = 0, pages = 0;
+    const agg = { matched: 0, written: 0, unmatched: 0, skipped: 0, errors: [] };
+    const t0 = Date.now();
+    while (url && guard++ < 1000) {
+      const { results, next } = await floshipGetOrdersPage(auth, cfg.token, url);
+      pages++;
+      let rows = results, stop = false;
+      if (cutoff) {
+        const fresh = results.filter(o => { const d = Date.parse(o.create_date || o.original_transaction_date || ''); return !d || d >= cutoff; });
+        if (fresh.length < results.length) stop = true;
+        rows = fresh;
+      }
+      const out = await pushFsidPairs(scfg, rows.map(fsPair).filter(p => p.fsid && p.ref), false);
+      agg.matched += out.matched; agg.written += out.written; agg.unmatched += out.unmatched; agg.skipped += out.skipped;
+      if (out.errors.length) agg.errors.push(...out.errors);
+      url = stop ? null : next;
+      if (mode === 'full' && Date.now() - t0 > 20000) break; // time-box; resume on next click
+    }
+    if (mode === 'full') {
+      const done = !url;
+      await pool.query(`INSERT INTO sync_state (k, v) VALUES ('floship_fsid', $1) ON CONFLICT (k) DO UPDATE SET v=$1`,
+        [JSON.stringify({ cursor: done ? null : url, last_run: new Date().toISOString() })]);
+      return res.json({ mode, pages, ...agg, errors: agg.errors.slice(0, 10), done, more: !done, hint: scopeHint(agg.errors) });
+    }
+    return res.json({ mode, pages, ...agg, errors: agg.errors.slice(0, 10), done: true, hint: scopeHint(agg.errors) });
+  } catch (e) { send500(res, e, 502); }
+});
+
 // ---------- Freight tracker (shipment builder: fields, items, documents, configurable stage stepper) ----------
 const FREIGHT_STAGES = ['Shipment booked', 'Picked up / dropped off', 'En route to destination country',
   'Arrived at destination country', 'Customs clearance', 'En route to final warehouse', 'Arrived at warehouse'];
