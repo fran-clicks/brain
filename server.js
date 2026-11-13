@@ -2977,30 +2977,43 @@ const fsPair = o => ({ fsid: String(o.reference || '').trim(), ref: String(o.cus
 const floshipOrderLink = fsid => `https://admin.floship.com/order/${String(fsid).replace(/\D/g, '')}`;
 // best-effort: define floship.id (text) and floship.link (url) as proper ORDER metafields so they
 // show pinned/typed in the admin rather than as "unstructured". Non-fatal if the scope is missing.
+// Create (or update) + pin ORDER metafield definitions, with admin access PUBLIC_READ so OTHER apps
+// (e.g. Gorgias) can read them — the default MERCHANT_READ hides them from every app but the owner.
+const _mfDefsDone = new Set();
+async function ensureOrderMetafieldDefs(scfg, defs) {
+  const CREATE = `mutation($def: MetafieldDefinitionInput!) { metafieldDefinitionCreate(definition: $def) { createdDefinition { id } userErrors { code } } }`;
+  const UPDATE = `mutation($def: MetafieldDefinitionUpdateInput!) { metafieldDefinitionUpdate(definition: $def) { userErrors { code message } } }`;
+  const FIND = `query($ns: String!, $key: String!) { metafieldDefinitions(first: 1, ownerType: ORDER, namespace: $ns, key: $key) { nodes { id pinnedPosition } } }`;
+  const PIN = `mutation($id: ID!) { metafieldDefinitionPin(definitionId: $id) { userErrors { field message } } }`;
+  for (const def of defs) {
+    const k = `${def.namespace}.${def.key}`;
+    if (_mfDefsDone.has(k)) continue;
+    try {
+      let id = null, created = false;
+      try {
+        const c = await shopifyGraphql(scfg, CREATE, { def: { ...def, access: { admin: 'PUBLIC_READ' } } });
+        id = c.metafieldDefinitionCreate?.createdDefinition?.id || null; created = !!id;
+      } catch (e) { /* ignore */ }
+      if (!created) {
+        // already exists → widen access so Gorgias etc. can read it, then find + pin
+        try { await shopifyGraphql(scfg, UPDATE, { def: { namespace: def.namespace, key: def.key, ownerType: 'ORDER', access: { admin: 'PUBLIC_READ' } } }); } catch (e) { /* ignore */ }
+        const f = await shopifyGraphql(scfg, FIND, { ns: def.namespace, key: def.key });
+        const n = f.metafieldDefinitions?.nodes?.[0];
+        id = n?.id || null;
+        if (n && n.pinnedPosition != null) { _mfDefsDone.add(k); continue; }
+      }
+      if (id) await shopifyGraphql(scfg, PIN, { id });
+      _mfDefsDone.add(k);
+    } catch (e) { /* non-fatal: metafields still write */ }
+  }
+}
 let floshipDefsReady = false;
 async function ensureFloshipMetafieldDefs(scfg) {
   if (floshipDefsReady) return;
-  const CREATE = `mutation($def: MetafieldDefinitionInput!) { metafieldDefinitionCreate(definition: $def) { createdDefinition { id } userErrors { code message } } }`;
-  const FIND = `query($key: String!) { metafieldDefinitions(first: 1, ownerType: ORDER, namespace: "floship", key: $key) { nodes { id pinnedPosition } } }`;
-  const PIN = `mutation($id: ID!) { metafieldDefinitionPin(definitionId: $id) { userErrors { field message } } }`;
-  const defs = [
+  await ensureOrderMetafieldDefs(scfg, [
     { name: 'Floship ID', namespace: 'floship', key: 'id', type: 'single_line_text_field', ownerType: 'ORDER' },
     { name: 'Floship link', namespace: 'floship', key: 'link', type: 'url', ownerType: 'ORDER' }
-  ];
-  for (const def of defs) {
-    try {
-      // create if missing (returns an id); otherwise look it up
-      let id = null;
-      try { const c = await shopifyGraphql(scfg, CREATE, { def }); id = c.metafieldDefinitionCreate?.createdDefinition?.id || null; } catch (e) { /* ignore */ }
-      if (!id) {
-        const f = await shopifyGraphql(scfg, FIND, { key: def.key });
-        const n = f.metafieldDefinitions?.nodes?.[0];
-        if (n && n.pinnedPosition != null) continue; // already pinned → nothing to do
-        id = n?.id || null;
-      }
-      if (id) await shopifyGraphql(scfg, PIN, { id }); // pin so it shows on the order's main Metafields card
-    } catch (e) { /* non-fatal: metafields still write, just not pinned */ }
-  }
+  ]);
   floshipDefsReady = true;
 }
 // add the FSID tag + floship.id text + floship.link url metafields to one Shopify order (all idempotent)
@@ -3130,22 +3143,11 @@ const sbPair = o => {
 let shipbobDefsReady = false;
 async function ensureShipbobMetafieldDefs(scfg) {
   if (shipbobDefsReady) return;
-  const CREATE = `mutation($def: MetafieldDefinitionInput!) { metafieldDefinitionCreate(definition: $def) { createdDefinition { id } userErrors { code message } } }`;
-  const FIND = `query($key: String!) { metafieldDefinitions(first: 1, ownerType: ORDER, namespace: "shipbob", key: $key) { nodes { id pinnedPosition } } }`;
-  const PIN = `mutation($id: ID!) { metafieldDefinitionPin(definitionId: $id) { userErrors { field message } } }`;
-  const defs = [
+  await ensureOrderMetafieldDefs(scfg, [
     { name: 'ShipBob order ID', namespace: 'shipbob', key: 'order_id', type: 'single_line_text_field', ownerType: 'ORDER' },
     { name: 'ShipBob shipment ID', namespace: 'shipbob', key: 'shipment_id', type: 'single_line_text_field', ownerType: 'ORDER' },
     { name: 'ShipBob link', namespace: 'shipbob', key: 'link', type: 'url', ownerType: 'ORDER' }
-  ];
-  for (const def of defs) {
-    try {
-      let id = null;
-      try { const c = await shopifyGraphql(scfg, CREATE, { def }); id = c.metafieldDefinitionCreate?.createdDefinition?.id || null; } catch (e) { /* ignore */ }
-      if (!id) { const f = await shopifyGraphql(scfg, FIND, { key: def.key }); const n = f.metafieldDefinitions?.nodes?.[0]; if (n && n.pinnedPosition != null) continue; id = n?.id || null; }
-      if (id) await shopifyGraphql(scfg, PIN, { id });
-    } catch (e) { /* non-fatal */ }
-  }
+  ]);
   shipbobDefsReady = true;
 }
 async function applyShipbobToShopify(scfg, gid, p) {
