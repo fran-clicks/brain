@@ -3188,6 +3188,22 @@ async function pushShipbobPairs(scfg, pairs, force) {
   }
   return { matched, written, unmatched, skipped, errors };
 }
+// DIAGNOSTIC (admin): list ORDER metafield definitions with their admin access + pin state,
+// so we can confirm floship.*/shipbob.* are PUBLIC_READ (readable by Gorgias). Also re-runs the
+// definition setup (create/widen access/pin) on demand.
+app.get('/api/shopify/metafield-defs', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const sconn = await getConnector('shopify');
+  if (!sconn) return res.status(400).json({ error: 'Shopify not connected.' });
+  const scfg = sconn.config;
+  try {
+    if (req.query.apply) { floshipDefsReady = false; shipbobDefsReady = false; _mfDefsDone.clear(); await ensureFloshipMetafieldDefs(scfg); await ensureShipbobMetafieldDefs(scfg); }
+    const q = `{ metafieldDefinitions(first: 50, ownerType: ORDER) { nodes { namespace key name pinnedPosition access { admin } } } }`;
+    const d = await shopifyGraphql(scfg, q);
+    const nodes = (d.metafieldDefinitions?.nodes || []).filter(n => ['floship', 'shipbob'].includes(n.namespace));
+    res.json({ applied: !!req.query.apply, defs: nodes });
+  } catch (e) { send500(res, e, 502); }
+});
 // modes: 'recent' (7d), 'completed30' (30d completed only), 'single' (one CT order number)
 const SB_WINDOWS = { recent: { days: 7, completed: false }, completed30: { days: 30, completed: true } };
 app.post('/api/shipbob/id-sync', async (req, res) => {
