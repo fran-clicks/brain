@@ -315,6 +315,37 @@ async function fsidSync(mode) {
     winBtns.forEach(id => document.getElementById(id).disabled = false);
   }
 }
+// ShipBob order/shipment IDs → Shopify (tag + metafields). modes: recent | completed30 | single
+async function sbidSync(mode) {
+  const note = document.getElementById('sbidNote');
+  const ref = (document.getElementById('sbidRef').value || '').trim();
+  if (mode === 'single' && !ref) { note.textContent = '⚠️ Enter a CT order number first.'; return; }
+  const btns = ['sbidRecentBtn', 'sbid30Btn'];
+  document.getElementById('sbidUpdating').classList.add('on');
+  btns.forEach(id => document.getElementById(id).disabled = true);
+  note.textContent = 'Working…';
+  try {
+    const r = await api('/api/shipbob/id-sync', { method: 'POST', body: JSON.stringify({ mode, ref }) });
+    let msg;
+    if (mode === 'single') {
+      msg = r.found
+        ? `${r.written ? '✅' : (r.unmatched ? '⚠️' : 'ℹ️')} ${r.ref} → order ${r.sb_order_id} · shipment ${r.shipment_id}: ` +
+          (r.written ? 'tags + metafields written' : (r.unmatched ? 'ShipBob order found, but no matching Shopify order in the cache' : 'already up to date'))
+        : `❓ ${r.note || 'not found'}`;
+    } else {
+      const label = mode === 'completed30' ? 'Last 30 days (completed)' : 'Last 7 days';
+      msg = `✅ ${label}: ${r.written} written · ${r.matched} matched · ${r.skipped} already done · ${r.unmatched} no Shopify match (${r.pages} ShipBob pages)`;
+      msg += r.more ? ' — more to go, click again ⏩' : ' — all caught up ✅';
+    }
+    if (r.hint) msg += `\n⚠️ ${r.hint}`;
+    if (r.errors && r.errors.length) msg += `\nErrors: ${r.errors.slice(0, 5).join(' · ')}`;
+    note.textContent = msg;
+  } catch (e) { note.textContent = '⚠️ ' + e.message; }
+  finally {
+    document.getElementById('sbidUpdating').classList.remove('on');
+    btns.forEach(id => document.getElementById(id).disabled = false);
+  }
+}
 async function loadFulfillment() {
   loadFulfillmentGrid();
   loadForecast();
@@ -323,6 +354,7 @@ async function loadFulfillment() {
   document.getElementById('fulImportBtn').style.display = window.isAdmin ? 'inline-flex' : 'none';
   document.getElementById('sbAdminBar').style.display = window.isAdmin ? 'inline' : 'none';
   const fsidCard = document.getElementById('fsidCard'); if (fsidCard) fsidCard.style.display = window.isAdmin ? 'block' : 'none';
+  const sbidCard = document.getElementById('sbidCard'); if (sbidCard) sbidCard.style.display = window.isAdmin ? 'block' : 'none';
   document.getElementById('sbUpdating').classList.add('on');
   try {
     const s = await api('/api/shipbob/summary');

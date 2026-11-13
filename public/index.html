@@ -886,6 +886,22 @@ footer{color:rgba(16,17,20,.45)}
     </div>
     <div class="note" id="fsidNote" style="margin-top:10px"></div>
   </div>
+
+  <!-- ShipBob order IDs → Shopify (admin) -->
+  <div class="card" id="sbidCard" style="display:none">
+    <h2>🚚 ShipBob order IDs → Shopify <span style="font-weight:400;color:var(--muted);font-size:12px">· write the ShipBob order + shipment IDs onto each Shopify order</span></h2>
+    <div class="note" style="margin-top:0">Adds the ShipBob <b>order ID</b> and <b>shipment ID</b> as searchable order tags, plus <code>shipbob.order_id</code>, <code>shipbob.shipment_id</code>, and a clickable <code>shipbob.link</code> metafield to the ShipBob shipment. Matched by the Shopify order ID that ShipBob stores as its reference.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
+      <button class="btn" id="sbidRecentBtn" onclick="sbidSync('recent')" style="margin:0;padding:7px 14px">🗓️ Sync last 7 days</button>
+      <button class="btn" id="sbid30Btn" onclick="sbidSync('completed30')" style="margin:0;padding:7px 14px">📦 Last 30 days (completed only)</button>
+      <span class="updating-pill" id="sbidUpdating"><div class="spin"></div>Working…</span>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
+      <input id="sbidRef" placeholder="CT261434900 — single order" style="flex:1;min-width:200px;margin:0" onkeydown="if(event.key==='Enter')sbidSync('single')">
+      <button class="btn" onclick="sbidSync('single')" style="margin:0;padding:7px 14px">🎯 Sync this order</button>
+    </div>
+    <div class="note" id="sbidNote" style="margin-top:10px"></div>
+  </div>
 </div>
 
 <!-- FREIGHT TRACKER (manual bulk shipments factory → warehouse) -->

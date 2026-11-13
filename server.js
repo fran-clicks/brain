@@ -3102,6 +3102,141 @@ app.post('/api/floship/fsid-sync', async (req, res) => {
   } catch (e) { send500(res, e, 502); }
 });
 
+// ---------- ShipBob order/shipment ID → Shopify (tag + metafields) ----------
+// ShipBob order: id = ShipBob order id, shipments[].id = shipment id, reference_id = our Shopify
+// order id, order_number = ShipBob's own number. Match reference_id → orders_cache.shopify_id,
+// then tag the ShipBob order id + shipment id(s) and write shipbob.order_id / shipment_id / link.
+let shipbobOrdersTableReady = false;
+async function ensureShipbobOrdersTable() {
+  if (shipbobOrdersTableReady) return;
+  await pool.query(`CREATE TABLE IF NOT EXISTS shipbob_orders (
+    shopify_id TEXT PRIMARY KEY, sb_order_id TEXT, shipment_id TEXT, order_number TEXT, status TEXT,
+    fetched_at TIMESTAMPTZ DEFAULT now(), shopify_done BOOLEAN DEFAULT false, last_error TEXT)`);
+  shipbobOrdersTableReady = true;
+}
+const shipbobOrderLink = (orderId, shipmentId) =>
+  `https://web.shipbob.com/App/Merchant/#/order-shipment-management/orders/${orderId}/shipments/${shipmentId}`;
+const sbPair = o => {
+  const ships = o.shipments || [];
+  return {
+    shopify_id: String(o.reference_id || '').trim(),
+    sb_order_id: String(o.id || ''),
+    shipment_id: String((ships[0] || {}).id || ''),
+    all_shipment_ids: ships.map(s => String(s.id || '')).filter(Boolean),
+    order_number: String(o.order_number || ''),
+    status: o.status || ''
+  };
+};
+let shipbobDefsReady = false;
+async function ensureShipbobMetafieldDefs(scfg) {
+  if (shipbobDefsReady) return;
+  const CREATE = `mutation($def: MetafieldDefinitionInput!) { metafieldDefinitionCreate(definition: $def) { createdDefinition { id } userErrors { code message } } }`;
+  const FIND = `query($key: String!) { metafieldDefinitions(first: 1, ownerType: ORDER, namespace: "shipbob", key: $key) { nodes { id pinnedPosition } } }`;
+  const PIN = `mutation($id: ID!) { metafieldDefinitionPin(definitionId: $id) { userErrors { field message } } }`;
+  const defs = [
+    { name: 'ShipBob order ID', namespace: 'shipbob', key: 'order_id', type: 'single_line_text_field', ownerType: 'ORDER' },
+    { name: 'ShipBob shipment ID', namespace: 'shipbob', key: 'shipment_id', type: 'single_line_text_field', ownerType: 'ORDER' },
+    { name: 'ShipBob link', namespace: 'shipbob', key: 'link', type: 'url', ownerType: 'ORDER' }
+  ];
+  for (const def of defs) {
+    try {
+      let id = null;
+      try { const c = await shopifyGraphql(scfg, CREATE, { def }); id = c.metafieldDefinitionCreate?.createdDefinition?.id || null; } catch (e) { /* ignore */ }
+      if (!id) { const f = await shopifyGraphql(scfg, FIND, { key: def.key }); const n = f.metafieldDefinitions?.nodes?.[0]; if (n && n.pinnedPosition != null) continue; id = n?.id || null; }
+      if (id) await shopifyGraphql(scfg, PIN, { id });
+    } catch (e) { /* non-fatal */ }
+  }
+  shipbobDefsReady = true;
+}
+async function applyShipbobToShopify(scfg, gid, p) {
+  const tags = Array.from(new Set([p.sb_order_id, ...(p.all_shipment_ids || [])].filter(Boolean)));
+  const mf = [
+    { ownerId: gid, namespace: 'shipbob', key: 'order_id', type: 'single_line_text_field', value: p.sb_order_id },
+    { ownerId: gid, namespace: 'shipbob', key: 'shipment_id', type: 'single_line_text_field', value: p.shipment_id },
+    { ownerId: gid, namespace: 'shipbob', key: 'link', type: 'url', value: shipbobOrderLink(p.sb_order_id, p.shipment_id) }
+  ].filter(m => m.value);
+  const M = `mutation($id: ID!, $tags: [String!]!, $mf: [MetafieldsSetInput!]!) {
+    tagsAdd(id: $id, tags: $tags) { userErrors { field message } }
+    metafieldsSet(metafields: $mf) { userErrors { field message } }
+  }`;
+  const d = await shopifyGraphql(scfg, M, { id: gid, tags, mf });
+  const errs = [...(d.tagsAdd?.userErrors || []), ...(d.metafieldsSet?.userErrors || [])];
+  if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
+}
+async function pushShipbobPairs(scfg, pairs, force) {
+  let matched = 0, written = 0, unmatched = 0, skipped = 0; const errors = [];
+  for (const p of pairs) {
+    if (!p.shopify_id || !p.sb_order_id) continue;
+    const prev = (await pool.query(`SELECT shopify_done FROM shipbob_orders WHERE shopify_id=$1`, [p.shopify_id])).rows[0];
+    await pool.query(`INSERT INTO shipbob_orders (shopify_id, sb_order_id, shipment_id, order_number, status, fetched_at)
+      VALUES ($1,$2,$3,$4,$5,now()) ON CONFLICT (shopify_id) DO UPDATE SET sb_order_id=$2, shipment_id=$3, order_number=$4, status=$5, fetched_at=now()`,
+      [p.shopify_id, p.sb_order_id, p.shipment_id, p.order_number, p.status]);
+    if (prev?.shopify_done && !force) { skipped++; continue; }
+    const row = (await pool.query(`SELECT 1 FROM orders_cache WHERE shopify_id::text=$1 LIMIT 1`, [p.shopify_id])).rows[0];
+    if (!row) { unmatched++; continue; }
+    matched++;
+    const gid = `gid://shopify/Order/${p.shopify_id}`;
+    try {
+      await applyShipbobToShopify(scfg, gid, p); written++;
+      await pool.query(`UPDATE shipbob_orders SET shopify_done=true, last_error=null WHERE shopify_id=$1`, [p.shopify_id]);
+    } catch (e) {
+      errors.push(`${p.order_number || p.shopify_id}: ${e.message}`);
+      await pool.query(`UPDATE shipbob_orders SET last_error=$2 WHERE shopify_id=$1`, [p.shopify_id, String(e.message).slice(0, 300)]).catch(() => {});
+    }
+  }
+  return { matched, written, unmatched, skipped, errors };
+}
+// modes: 'recent' (7d), 'completed30' (30d completed only), 'single' (one CT order number)
+const SB_WINDOWS = { recent: { days: 7, completed: false }, completed30: { days: 30, completed: true } };
+app.post('/api/shipbob/id-sync', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('shipbob');
+  if (!conn) return res.status(400).json({ error: 'ShipBob not connected — add it on the ＋ page first.' });
+  const sconn = await getConnector('shopify');
+  if (!sconn) return res.status(400).json({ error: 'Shopify not connected.' });
+  await ensureShipbobOrdersTable();
+  const scfg = sconn.config, cfg = conn.config;
+  const mode = String(req.body?.mode || 'recent');
+  const scopeHint = errs => errs.some(e => /access|scope|denied|write_orders/i.test(e))
+    ? 'Writes were denied — the brain’s Shopify app needs the write_orders scope.' : undefined;
+  try {
+    await ensureShipbobMetafieldDefs(scfg); // best-effort
+    if (mode === 'single') {
+      const ref = String(req.body?.ref || '').trim();
+      if (!ref) return res.status(400).json({ error: 'ref (the CT order number) is required' });
+      const oc = (await pool.query(`SELECT shopify_id FROM orders_cache WHERE order_number=$1 LIMIT 1`, [ref])).rows[0];
+      if (!oc) return res.json({ mode, ref, found: false, note: 'That order number isn’t in the brain’s order cache.' });
+      const sid = String(oc.shopify_id);
+      const body = await shipbobRequest(cfg, `/${SHIPBOB_VER}/order?ReferenceIds=${encodeURIComponent(sid)}&Limit=50`);
+      const arr = Array.isArray(body) ? body : (body.items || body.data || []);
+      const hit = arr.find(o => String(o.reference_id || '') === sid) || arr[0];
+      if (!hit) return res.json({ mode, ref, found: false, note: 'No ShipBob order found for that order (it may not be fulfilled by ShipBob).' });
+      const pair = sbPair(hit);
+      const out = await pushShipbobPairs(scfg, [pair], true);
+      return res.json({ mode, ref, found: true, sb_order_id: pair.sb_order_id, shipment_id: pair.shipment_id, ...out, hint: scopeHint(out.errors) });
+    }
+    const win = SB_WINDOWS[mode];
+    if (!win) return res.status(400).json({ error: `unknown mode: ${mode}` });
+    const sinceIso = new Date(Date.now() - win.days * 86400000).toISOString();
+    let page = 1, pages = 0, more = false; const agg = { matched: 0, written: 0, unmatched: 0, skipped: 0, errors: [] };
+    const t0 = Date.now();
+    while (page <= 200) {
+      const body = await shipbobRequest(cfg, `/${SHIPBOB_VER}/order?StartDate=${encodeURIComponent(sinceIso)}&SortOrder=Newest&Page=${page}&Limit=250`);
+      const arr = Array.isArray(body) ? body : (body.items || body.data || []);
+      pages++;
+      let rows = arr;
+      if (win.completed) rows = rows.filter(o => /complete|fulfill/i.test(o.status || ''));
+      const out = await pushShipbobPairs(scfg, rows.map(sbPair).filter(p => p.shopify_id && p.sb_order_id), false);
+      agg.matched += out.matched; agg.written += out.written; agg.unmatched += out.unmatched; agg.skipped += out.skipped;
+      if (out.errors.length) agg.errors.push(...out.errors);
+      if (arr.length < 250) break;
+      page++;
+      if (Date.now() - t0 > 25000) { more = true; break; }
+    }
+    return res.json({ mode, pages, ...agg, errors: agg.errors.slice(0, 10), done: !more, more, hint: scopeHint(agg.errors) });
+  } catch (e) { send500(res, e, 502); }
+});
+
 // ---------- Freight tracker (shipment builder: fields, items, documents, configurable stage stepper) ----------
 const FREIGHT_STAGES = ['Shipment booked', 'Picked up / dropped off', 'En route to destination country',
   'Arrived at destination country', 'Customs clearance', 'En route to final warehouse', 'Arrived at warehouse'];
