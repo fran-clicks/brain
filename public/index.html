@@ -876,8 +876,8 @@ footer{color:rgba(16,17,20,.45)}
     <h2>🔗 Floship order IDs → Shopify <span style="font-weight:400;color:var(--muted);font-size:12px">· write the FS… ID onto each Shopify order</span></h2>
     <div class="note" style="margin-top:0">Adds the Floship ID as an order <b>tag</b> (search <code>tag:FS…</code> in Shopify), a <code>floship.id</code> metafield, and a clickable <code>floship.link</code> metafield to the Floship order, matched by the order number. When Floship references an FS… number you can find the order instantly.</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
-      <button class="btn" id="fsidRecentBtn" onclick="fsidSync('recent')" style="margin:0;padding:7px 14px">🗓️ Sync last 7 days</button>
-      <button class="btn" id="fsid30Btn" onclick="fsidSync('fulfilled30')" style="margin:0;padding:7px 14px">📦 Last 30 days (fulfilled only)</button>
+      <button class="btn" id="fsidRecentBtn" onclick="fsidSync('recent')" style="margin:0;padding:7px 14px">🗓️ Last 7 days (fulfilled)</button>
+      <button class="btn" id="fsid30Btn" onclick="fsidSync('fulfilled30')" style="margin:0;padding:7px 14px">📦 Last 30 days (fulfilled)</button>
       <span class="updating-pill" id="fsidUpdating"><div class="spin"></div>Working…</span>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
@@ -892,8 +892,8 @@ footer{color:rgba(16,17,20,.45)}
     <h2>🚚 ShipBob order IDs → Shopify <span style="font-weight:400;color:var(--muted);font-size:12px">· write the ShipBob order + shipment IDs onto each Shopify order</span></h2>
     <div class="note" style="margin-top:0">Adds the ShipBob <b>order ID</b> and <b>shipment ID</b> as searchable order tags, plus <code>shipbob.order_id</code>, <code>shipbob.shipment_id</code>, and a clickable <code>shipbob.link</code> metafield to the ShipBob shipment. Matched by the Shopify order ID that ShipBob stores as its reference.</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
-      <button class="btn" id="sbidRecentBtn" onclick="sbidSync('recent')" style="margin:0;padding:7px 14px">🗓️ Sync last 7 days</button>
-      <button class="btn" id="sbid30Btn" onclick="sbidSync('completed30')" style="margin:0;padding:7px 14px">📦 Last 30 days (completed only)</button>
+      <button class="btn" id="sbidRecentBtn" onclick="sbidSync('recent')" style="margin:0;padding:7px 14px">🗓️ Last 7 days (completed)</button>
+      <button class="btn" id="sbid30Btn" onclick="sbidSync('completed30')" style="margin:0;padding:7px 14px">📦 Last 30 days (completed)</button>
       <span class="updating-pill" id="sbidUpdating"><div class="spin"></div>Working…</span>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">

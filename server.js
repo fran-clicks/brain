@@ -3058,7 +3058,7 @@ async function pushFsidPairs(scfg, pairs, force) {
 }
 // modes: 'recent' (last 7 days, any status), 'fulfilled30' (last 30 days, fulfilled only),
 // 'single' (one CT reference). Each writes the FS tag + floship.id + floship.link metafields.
-const FSID_WINDOWS = { recent: { days: 7, fulfilled: false }, fulfilled30: { days: 30, fulfilled: true } };
+const FSID_WINDOWS = { recent: { days: 7, fulfilled: true }, fulfilled30: { days: 30, fulfilled: true } };
 app.post('/api/floship/fsid-sync', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const conn = await getConnector('floship');
@@ -3205,7 +3205,7 @@ app.get('/api/shopify/metafield-defs', async (req, res) => {
   } catch (e) { send500(res, e, 502); }
 });
 // modes: 'recent' (7d), 'completed30' (30d completed only), 'single' (one CT order number)
-const SB_WINDOWS = { recent: { days: 7, completed: false }, completed30: { days: 30, completed: true } };
+const SB_WINDOWS = { recent: { days: 7, completed: true }, completed30: { days: 30, completed: true } };
 app.post('/api/shipbob/id-sync', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const conn = await getConnector('shipbob');
