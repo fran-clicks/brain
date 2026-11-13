@@ -3209,7 +3209,7 @@ app.post('/api/shipbob/id-sync', async (req, res) => {
       const sid = String(oc.shopify_id);
       const body = await shipbobRequest(cfg, `/${SHIPBOB_VER}/order?ReferenceIds=${encodeURIComponent(sid)}&Limit=50`);
       const arr = Array.isArray(body) ? body : (body.items || body.data || []);
-      const hit = arr.find(o => String(o.reference_id || '') === sid) || arr[0];
+      const hit = arr.find(o => String(o.reference_id || '') === sid); // exact match only (no fallback to a wrong order)
       if (!hit) return res.json({ mode, ref, found: false, note: 'No ShipBob order found for that order (it may not be fulfilled by ShipBob).' });
       const pair = sbPair(hit);
       const out = await pushShipbobPairs(scfg, [pair], true);
