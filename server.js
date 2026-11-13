@@ -2679,6 +2679,18 @@ async function shipbobOrdersSince(cfg, sinceIso, maxPages = 60, limit = 250) {
   }
   return out;
 }
+// DIAGNOSTIC (admin): newest few ShipBob orders, raw — to map order id / shipment id / reference_id.
+// Remove once the ShipBob ID sync is built.
+app.get('/api/shipbob/orders-probe', async (req, res) => {
+  if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
+  const conn = await getConnector('shipbob');
+  if (!conn) return res.status(400).json({ error: 'ShipBob not connected — add it on the ＋ page first.' });
+  try {
+    const body = await shipbobRequest(conn.config, `/${SHIPBOB_VER}/order?SortOrder=Newest&Page=1&Limit=3`);
+    const items = Array.isArray(body) ? body : (body.items || body.data || []);
+    res.json({ ok: true, count: items.length, sample: items.slice(0, 3) });
+  } catch (e) { send500(res, e, 502); }
+});
 const cNorm = s => String(s || '').toLowerCase().replace(/[.,#\-\/]/g, ' ').replace(/\s+/g, ' ').trim();
 const cKey = s => String(s || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
 // street normaliser: drop unit designators so "Apt 232" == "232", "Suite 5" == "5", etc.
