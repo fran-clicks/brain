@@ -4926,16 +4926,41 @@ app.get('/api/report/sync-status', async (req, res) => {
     res.json({ sync_state: st, cache: latest, live_tickets, live_err });
   } catch (e) { send500(res, e); }
 });
-// in-app scheduler: post once when the Europe/London clock reaches 18:00 (reliable on an always-on plan)
-let lastReportDay = null;
+// in-app scheduler with catch-up: post the daily report the FIRST time the app is awake
+// at or after 18:00 Europe/London on a day it hasn't already posted. This survives reboots,
+// redeploys and missed wake-pings — if the app is asleep at 18:00 and only wakes at, say, 18:40
+// (or later that evening), it still posts. The "already posted today" flag is persisted in the DB
+// (sync_state.k='daily_report'), so a restart can't lose the day or double-post.
+async function reportPostedDate() {
+  const r = await pool.query(`SELECT v->>'date' d FROM sync_state WHERE k='daily_report'`);
+  return r.rows[0]?.d || null;
+}
+async function setReportPostedDate(date) {
+  await pool.query(
+    `INSERT INTO sync_state (k, v) VALUES ('daily_report', $1::jsonb)
+     ON CONFLICT (k) DO UPDATE SET v = $1::jsonb`,
+    [JSON.stringify({ date, at: new Date().toISOString() })]);
+}
+let reportTick = false; // guard against overlapping runs within one process
 setInterval(async () => {
+  if (reportTick) return;
+  reportTick = true;
   try {
-    const { date, hour, minute } = londonNow();
-    if (hour === 18 && minute < 5 && lastReportDay !== date) {
-      lastReportDay = date;
-      if (await getConnector('slack')) await postDailyReport();
+    const { date, hour } = londonNow();
+    // catch-up window: any time from 18:00 to end of day (same London date) we haven't posted yet
+    if (hour >= 18 && hour < 24 && (await reportPostedDate()) !== date) {
+      if (await getConnector('slack')) {
+        await setReportPostedDate(date); // claim the day first so a slow/overlapping tick can't double-post
+        try {
+          await postDailyReport();
+        } catch (e) {
+          await setReportPostedDate('').catch(() => {}); // posting failed → release the claim so it retries next minute
+          throw e;
+        }
+      }
     }
   } catch (e) { console.error('daily report scheduler:', e.message); }
+  finally { reportTick = false; }
 }, 60 * 1000);
 
 const seenSlackEvents = new Set();
