@@ -3197,10 +3197,15 @@ app.get('/api/shopify/metafield-defs', async (req, res) => {
   if (!sconn) return res.status(400).json({ error: 'Shopify not connected.' });
   const scfg = sconn.config;
   try {
-    if (req.query.apply) { floshipDefsReady = false; shipbobDefsReady = false; _mfDefsDone.clear(); await ensureFloshipMetafieldDefs(scfg); await ensureShipbobMetafieldDefs(scfg); }
+    if (req.query.apply) {
+      floshipDefsReady = false; shipbobDefsReady = false; _mfDefsDone.clear();
+      await ensureFloshipMetafieldDefs(scfg);
+      await ensureShipbobMetafieldDefs(scfg);
+      await ensureOrderMetafieldDefs(scfg, [{ name: 'Duplicated by', namespace: 'duplicate', key: 'duplicated_by', type: 'single_line_text_field', ownerType: 'ORDER' }]);
+    }
     const q = `{ metafieldDefinitions(first: 50, ownerType: ORDER) { nodes { namespace key name pinnedPosition access { admin } } } }`;
     const d = await shopifyGraphql(scfg, q);
-    const nodes = (d.metafieldDefinitions?.nodes || []).filter(n => ['floship', 'shipbob'].includes(n.namespace));
+    const nodes = (d.metafieldDefinitions?.nodes || []).filter(n => ['floship', 'shipbob', 'duplicate'].includes(n.namespace));
     res.json({ applied: !!req.query.apply, defs: nodes });
   } catch (e) { send500(res, e, 502); }
 });
