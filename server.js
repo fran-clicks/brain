@@ -2981,26 +2981,23 @@ const floshipOrderLink = fsid => `https://admin.floship.com/order/${String(fsid)
 // (e.g. Gorgias) can read them — the default MERCHANT_READ hides them from every app but the owner.
 const _mfDefsDone = new Set();
 async function ensureOrderMetafieldDefs(scfg, defs) {
-  const CREATE = `mutation($def: MetafieldDefinitionInput!) { metafieldDefinitionCreate(definition: $def) { createdDefinition { id } userErrors { code } } }`;
-  const UPDATE = `mutation($def: MetafieldDefinitionUpdateInput!) { metafieldDefinitionUpdate(definition: $def) { userErrors { code message } } }`;
+  // NOTE: don't send `access` — the input enum only allows MERCHANT_READ/MERCHANT_READ_WRITE, and
+  // the default for an app-owned custom-namespace definition is PUBLIC_READ_WRITE, which is what lets
+  // other apps (Gorgias) read it. Sending PUBLIC_READ is invalid and fails the whole create.
+  const CREATE = `mutation($def: MetafieldDefinitionInput!) { metafieldDefinitionCreate(definition: $def) { createdDefinition { id } userErrors { code message } } }`;
   const FIND = `query($ns: String!, $key: String!) { metafieldDefinitions(first: 1, ownerType: ORDER, namespace: $ns, key: $key) { nodes { id pinnedPosition } } }`;
   const PIN = `mutation($id: ID!) { metafieldDefinitionPin(definitionId: $id) { userErrors { field message } } }`;
   for (const def of defs) {
     const k = `${def.namespace}.${def.key}`;
     if (_mfDefsDone.has(k)) continue;
     try {
-      let id = null, created = false;
-      try {
-        const c = await shopifyGraphql(scfg, CREATE, { def: { ...def, access: { admin: 'PUBLIC_READ' } } });
-        id = c.metafieldDefinitionCreate?.createdDefinition?.id || null; created = !!id;
-      } catch (e) { /* ignore */ }
-      if (!created) {
-        // already exists → widen access so Gorgias etc. can read it, then find + pin
-        try { await shopifyGraphql(scfg, UPDATE, { def: { namespace: def.namespace, key: def.key, ownerType: 'ORDER', access: { admin: 'PUBLIC_READ' } } }); } catch (e) { /* ignore */ }
+      let id = null;
+      try { const c = await shopifyGraphql(scfg, CREATE, { def }); id = c.metafieldDefinitionCreate?.createdDefinition?.id || null; } catch (e) { /* ignore */ }
+      if (!id) {
         const f = await shopifyGraphql(scfg, FIND, { ns: def.namespace, key: def.key });
         const n = f.metafieldDefinitions?.nodes?.[0];
-        id = n?.id || null;
         if (n && n.pinnedPosition != null) { _mfDefsDone.add(k); continue; }
+        id = n?.id || null;
       }
       if (id) await shopifyGraphql(scfg, PIN, { id });
       _mfDefsDone.add(k);
@@ -3197,24 +3194,16 @@ app.get('/api/shopify/metafield-defs', async (req, res) => {
   if (!sconn) return res.status(400).json({ error: 'Shopify not connected.' });
   const scfg = sconn.config;
   try {
-    let dupCreate = null;
     if (req.query.apply) {
       floshipDefsReady = false; shipbobDefsReady = false; _mfDefsDone.clear();
       await ensureFloshipMetafieldDefs(scfg);
       await ensureShipbobMetafieldDefs(scfg);
-      // direct attempt (surfacing userErrors) to see why the duplicate def may not create
-      try {
-        const CR = `mutation($def: MetafieldDefinitionInput!){ metafieldDefinitionCreate(definition:$def){ createdDefinition{id} userErrors{ code field message } } }`;
-        const r = await shopifyGraphql(scfg, CR, { def: { name: 'Duplicated by', namespace: 'duplicate', key: 'duplicated_by', type: 'single_line_text_field', ownerType: 'ORDER', access: { admin: 'PUBLIC_READ' } } });
-        dupCreate = r.metafieldDefinitionCreate;
-        const id = r.metafieldDefinitionCreate?.createdDefinition?.id;
-        if (id) await shopifyGraphql(scfg, `mutation($id: ID!){ metafieldDefinitionPin(definitionId:$id){ userErrors{ message } } }`, { id });
-      } catch (e) { dupCreate = { error: e.message }; }
+      await ensureOrderMetafieldDefs(scfg, [{ name: 'Duplicated by', namespace: 'duplicate', key: 'duplicated_by', type: 'single_line_text_field', ownerType: 'ORDER' }]);
     }
     const q = `{ metafieldDefinitions(first: 50, ownerType: ORDER) { nodes { namespace key name pinnedPosition access { admin } } } }`;
     const d = await shopifyGraphql(scfg, q);
     const nodes = (d.metafieldDefinitions?.nodes || []).filter(n => ['floship', 'shipbob', 'duplicate'].includes(n.namespace));
-    return res.json({ applied: !!req.query.apply, dupCreate, defs: nodes });
+    return res.json({ applied: !!req.query.apply, defs: nodes });
   } catch (e) { send500(res, e, 502); }
 });
 // modes: 'recent' (7d), 'completed30' (30d completed only), 'single' (one CT order number)
