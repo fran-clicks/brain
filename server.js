@@ -4980,6 +4980,16 @@ async function refreshForReport() {
   try { if (await getConnector('klaviyo')) jobs.push(syncKlaviyo()); } catch {}
   await Promise.allSettled(jobs);
 }
+// one plain line per 3PL sync for the Slack report: "<n> synced with Shopify · <m> failed (refs)"
+function fmtIdSync(label, r) {
+  if (!r) return `*${label}*\n_didn't run_`;
+  if (r.error) return `*${label}*\n⚠️ failed to run — ${r.error}`;
+  const failed = r.errors || [];
+  const refs = failed.map(e => String(e).split(':')[0].trim()).filter(Boolean);
+  const detail = `${r.written || 0} synced with Shopify · ${failed.length} failed`
+    + (failed.length ? ` (${refs.slice(0, 6).join(', ')}${refs.length > 6 ? '…' : ''})` : '');
+  return `*${label}*\n${detail}`;
+}
 async function buildDailyReport(idSync) {
   await refreshForReport();
   const sym = c => c === 'GBP' ? '£' : c === 'EUR' ? '€' : c === 'USD' ? '$' : '';
@@ -5256,9 +5266,8 @@ async function buildDailyReport(idSync) {
     { type: 'section', text: { type: 'mrkdwn', text: `*📉 Forecast to run out within 90 days — combined (${fcCombined.count}):*\n${fcCombined.text}` } },
     { type: 'section', text: { type: 'mrkdwn', text: `*🇺🇸 ShipBob (US demand) — run out ≤90d (${fcShipbob.count}):*\n${fcShipbob.text}` } },
     { type: 'section', text: { type: 'mrkdwn', text: `*🌍 Floship (rest-of-world demand) — run out ≤90d (${fcFloship.count}):*\n${fcFloship.text}` } },
-    ...(idSync ? [{ type: 'context', elements: [{ type: 'mrkdwn', text:
-      `🔗 *3PL ID sync (7d)* — Floship ${idSync.floship?.written ?? '–'} tagged · ShipBob ${idSync.shipbob?.written ?? '–'} tagged · ${(idSync.floship?.skipped || 0) + (idSync.shipbob?.skipped || 0)} already done`
-      + ((idSync.floship?.error || idSync.shipbob?.error) ? `  ⚠️ ${[idSync.floship?.error, idSync.shipbob?.error].filter(Boolean).join('; ')}` : '') }] }] : []),
+    ...(idSync ? [{ type: 'section', text: { type: 'mrkdwn', text:
+      fmtIdSync('🔗 Floship ID sync (7d)', idSync.floship) + '\n\n' + fmtIdSync('🚚 ShipBob ID sync (7d)', idSync.shipbob) } }] : []),
     { type: 'divider' },
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🚢 Freight*' }] },
     { type: 'section', text: { type: 'mrkdwn', text: freightLine } },
