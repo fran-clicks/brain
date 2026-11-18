@@ -3055,7 +3055,7 @@ async function pushFsidPairs(scfg, pairs, force) {
 }
 // modes: 'recent' (last 7 days, any status), 'fulfilled30' (last 30 days, fulfilled only),
 // 'single' (one CT reference). Each writes the FS tag + floship.id + floship.link metafields.
-const FSID_WINDOWS = { recent: { days: 7, fulfilled: true }, fulfilled30: { days: 30, fulfilled: true } };
+const FSID_WINDOWS = { recent: { days: 7 }, fulfilled30: { days: 30 } };
 // self-contained windowed Floship FSID sync (used by the button and the daily scheduler)
 async function floshipFsidWindow(mode) {
   const win = FSID_WINDOWS[mode];
@@ -3074,7 +3074,7 @@ async function floshipFsidWindow(mode) {
     pages++;
     let stop = false;
     let rows = results.filter(o => { const d = Date.parse(o.create_date || o.original_transaction_date || ''); if (d && d < cutoff) { stop = true; return false; } return true; });
-    if (win.fulfilled) rows = rows.filter(o => String(o.status || '').toLowerCase() === 'fulfilled');
+    rows = rows.filter(o => !/cancel/i.test(o.status || '')); // sync every order except cancelled
     const out = await pushFsidPairs(scfg, rows.map(fsPair).filter(p => p.fsid && p.ref), false);
     agg.matched += out.matched; agg.written += out.written; agg.unmatched += out.unmatched; agg.skipped += out.skipped;
     if (out.errors.length) agg.errors.push(...out.errors);
@@ -3214,7 +3214,7 @@ app.get('/api/shopify/metafield-defs', async (req, res) => {
   } catch (e) { send500(res, e, 502); }
 });
 // modes: 'recent' (7d), 'completed30' (30d completed only), 'single' (one CT order number)
-const SB_WINDOWS = { recent: { days: 7, completed: true }, completed30: { days: 30, completed: true } };
+const SB_WINDOWS = { recent: { days: 7 }, completed30: { days: 30 } };
 // self-contained windowed ShipBob ID sync (used by the button and the daily scheduler)
 async function shipbobIdWindow(mode) {
   const win = SB_WINDOWS[mode];
@@ -3231,8 +3231,7 @@ async function shipbobIdWindow(mode) {
     const body = await shipbobRequest(cfg, `/${SHIPBOB_VER}/order?StartDate=${encodeURIComponent(sinceIso)}&SortOrder=Newest&Page=${page}&Limit=250`);
     const arr = Array.isArray(body) ? body : (body.items || body.data || []);
     pages++;
-    let rows = arr;
-    if (win.completed) rows = rows.filter(o => /complete|fulfill/i.test(o.status || ''));
+    let rows = arr.filter(o => !/cancel/i.test(o.status || '')); // sync every order except cancelled
     const out = await pushShipbobPairs(scfg, rows.map(sbPair).filter(p => p.shopify_id && p.sb_order_id), false);
     agg.matched += out.matched; agg.written += out.written; agg.unmatched += out.unmatched; agg.skipped += out.skipped;
     if (out.errors.length) agg.errors.push(...out.errors);

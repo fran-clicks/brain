@@ -302,7 +302,7 @@ async function fsidSync(mode) {
           (r.written ? 'tag + metafields written' : (r.unmatched ? 'Floship order found, but no matching Shopify order in the cache' : 'already up to date'))
         : `❓ ${r.note || 'not found'}`;
     } else {
-      const label = mode === 'fulfilled30' ? 'Last 30 days (fulfilled)' : 'Last 7 days';
+      const label = mode === 'fulfilled30' ? 'Last 30 days' : 'Last 7 days';
       msg = `✅ ${label}: ${r.written} written · ${r.matched} matched · ${r.skipped} already done · ${r.unmatched} no Shopify match (${r.pages} Floship pages)`;
       msg += r.more ? ' — more to go, click again ⏩' : ' — all caught up ✅';
     }
@@ -333,7 +333,7 @@ async function sbidSync(mode) {
           (r.written ? 'tags + metafields written' : (r.unmatched ? 'ShipBob order found, but no matching Shopify order in the cache' : 'already up to date'))
         : `❓ ${r.note || 'not found'}`;
     } else {
-      const label = mode === 'completed30' ? 'Last 30 days (completed)' : 'Last 7 days';
+      const label = mode === 'completed30' ? 'Last 30 days' : 'Last 7 days';
       msg = `✅ ${label}: ${r.written} written · ${r.matched} matched · ${r.skipped} already done · ${r.unmatched} no Shopify match (${r.pages} ShipBob pages)`;
       msg += r.more ? ' — more to go, click again ⏩' : ' — all caught up ✅';
     }
