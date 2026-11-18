@@ -4980,7 +4980,7 @@ async function refreshForReport() {
   try { if (await getConnector('klaviyo')) jobs.push(syncKlaviyo()); } catch {}
   await Promise.allSettled(jobs);
 }
-async function buildDailyReport() {
+async function buildDailyReport(idSync) {
   await refreshForReport();
   const sym = c => c === 'GBP' ? '£' : c === 'EUR' ? '€' : c === 'USD' ? '$' : '';
   const money = (n, c) => `${sym(c)}${Math.round(n || 0).toLocaleString()}`;
@@ -5256,6 +5256,9 @@ async function buildDailyReport() {
     { type: 'section', text: { type: 'mrkdwn', text: `*📉 Forecast to run out within 90 days — combined (${fcCombined.count}):*\n${fcCombined.text}` } },
     { type: 'section', text: { type: 'mrkdwn', text: `*🇺🇸 ShipBob (US demand) — run out ≤90d (${fcShipbob.count}):*\n${fcShipbob.text}` } },
     { type: 'section', text: { type: 'mrkdwn', text: `*🌍 Floship (rest-of-world demand) — run out ≤90d (${fcFloship.count}):*\n${fcFloship.text}` } },
+    ...(idSync ? [{ type: 'context', elements: [{ type: 'mrkdwn', text:
+      `🔗 *3PL ID sync (7d)* — Floship ${idSync.floship?.written ?? '–'} tagged · ShipBob ${idSync.shipbob?.written ?? '–'} tagged · ${(idSync.floship?.skipped || 0) + (idSync.shipbob?.skipped || 0)} already done`
+      + ((idSync.floship?.error || idSync.shipbob?.error) ? `  ⚠️ ${[idSync.floship?.error, idSync.shipbob?.error].filter(Boolean).join('; ')}` : '') }] }] : []),
     { type: 'divider' },
     { type: 'context', elements: [{ type: 'mrkdwn', text: '*🚢 Freight*' }] },
     { type: 'section', text: { type: 'mrkdwn', text: freightLine } },
@@ -5267,11 +5270,11 @@ async function buildDailyReport() {
   const fallback = `Daily report ${today}: ${s.o0 || 0} orders, ${money(+s.r0, cur)}, ${g.open_now || 0} open tickets.`;
   return { blocks, fallback };
 }
-async function postDailyReport() {
+async function postDailyReport(idSync) {
   const conn = await getConnector('slack');
   if (!conn?.config?.bot_token) throw new Error('Slack bot not connected');
   const channel = (conn.config.alert_channel || '#clicksbrain').trim();
-  const { blocks, fallback } = await buildDailyReport();
+  const { blocks, fallback } = await buildDailyReport(idSync);
   await slackPost(conn.config.bot_token, channel, fallback, undefined, blocks);
 }
 app.post('/api/report/daily', async (req, res) => {
@@ -5322,15 +5325,17 @@ setInterval(async () => {
     if (hour >= 18 && hour < 24 && (await reportPostedDate()) !== date) {
       if (await getConnector('slack')) {
         await setReportPostedDate(date); // claim the day first so a slow/overlapping tick can't double-post
+        // run the last-7-day ID syncs first so their counts can go into the report
+        const idSync = {};
+        try { idSync.floship = await floshipFsidWindow('recent'); } catch (e) { idSync.floship = { error: e.message }; }
+        try { idSync.shipbob = await shipbobIdWindow('recent'); } catch (e) { idSync.shipbob = { error: e.message }; }
+        console.log('daily id syncs:', JSON.stringify(idSync));
         try {
-          await postDailyReport();
+          await postDailyReport(idSync);
         } catch (e) {
           await setReportPostedDate('').catch(() => {}); // posting failed → release the claim so it retries next minute
           throw e;
         }
-        // after the report: tag the last 7 days of fulfilled Floship / completed ShipBob orders with their IDs
-        try { const r = await floshipFsidWindow('recent'); console.log('daily floship fsid sync:', JSON.stringify(r)); } catch (e) { console.error('daily floship fsid sync:', e.message); }
-        try { const r = await shipbobIdWindow('recent'); console.log('daily shipbob id sync:', JSON.stringify(r)); } catch (e) { console.error('daily shipbob id sync:', e.message); }
       }
     }
   } catch (e) { console.error('daily report scheduler:', e.message); }
