@@ -3056,6 +3056,33 @@ async function pushFsidPairs(scfg, pairs, force) {
 // modes: 'recent' (last 7 days, any status), 'fulfilled30' (last 30 days, fulfilled only),
 // 'single' (one CT reference). Each writes the FS tag + floship.id + floship.link metafields.
 const FSID_WINDOWS = { recent: { days: 7, fulfilled: true }, fulfilled30: { days: 30, fulfilled: true } };
+// self-contained windowed Floship FSID sync (used by the button and the daily scheduler)
+async function floshipFsidWindow(mode) {
+  const win = FSID_WINDOWS[mode];
+  if (!win) return { error: `unknown mode: ${mode}` };
+  const conn = await getConnector('floship'); if (!conn) return { error: 'Floship not connected' };
+  const sconn = await getConnector('shopify'); if (!sconn) return { error: 'Shopify not connected' };
+  await ensureFloshipOrdersTable();
+  const scfg = sconn.config, cfg = conn.config, auth = conn.meta?.auth || 'Token';
+  await ensureFloshipMetafieldDefs(scfg);
+  const cutoff = Date.now() - win.days * 86400000;
+  let url = floshipOrdersUrl(cfg), guard = 0, pages = 0, more = false;
+  const agg = { matched: 0, written: 0, unmatched: 0, skipped: 0, errors: [] };
+  const t0 = Date.now();
+  while (url && guard++ < 1000) {
+    const { results, next } = await floshipGetOrdersPage(auth, cfg.token, url);
+    pages++;
+    let stop = false;
+    let rows = results.filter(o => { const d = Date.parse(o.create_date || o.original_transaction_date || ''); if (d && d < cutoff) { stop = true; return false; } return true; });
+    if (win.fulfilled) rows = rows.filter(o => String(o.status || '').toLowerCase() === 'fulfilled');
+    const out = await pushFsidPairs(scfg, rows.map(fsPair).filter(p => p.fsid && p.ref), false);
+    agg.matched += out.matched; agg.written += out.written; agg.unmatched += out.unmatched; agg.skipped += out.skipped;
+    if (out.errors.length) agg.errors.push(...out.errors);
+    url = stop ? null : next;
+    if (url && Date.now() - t0 > 25000) { more = true; break; }
+  }
+  return { mode, pages, ...agg, more, done: !more };
+}
 app.post('/api/floship/fsid-sync', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const conn = await getConnector('floship');
@@ -3085,30 +3112,10 @@ app.post('/api/floship/fsid-sync', async (req, res) => {
       const out = await pushFsidPairs(scfg, [pair], true);
       return res.json({ mode, ref, found: true, fsid: pair.fsid, ...out, hint: scopeHint(out.errors) });
     }
-    // windowed modes — page newest-first, stop past the cutoff, optionally fulfilled-only
-    const win = FSID_WINDOWS[mode];
-    if (!win) return res.status(400).json({ error: `unknown mode: ${mode}` });
-    const cutoff = Date.now() - win.days * 86400000;
-    let url = ordersUrl, guard = 0, pages = 0, more = false;
-    const agg = { matched: 0, written: 0, unmatched: 0, skipped: 0, errors: [] };
-    const t0 = Date.now();
-    while (url && guard++ < 1000) {
-      const { results, next } = await floshipGetOrdersPage(auth, cfg.token, url);
-      pages++;
-      let stop = false;
-      let rows = results.filter(o => {
-        const d = Date.parse(o.create_date || o.original_transaction_date || '');
-        if (d && d < cutoff) { stop = true; return false; } // newest-first → once we pass the window, stop
-        return true;
-      });
-      if (win.fulfilled) rows = rows.filter(o => String(o.status || '').toLowerCase() === 'fulfilled');
-      const out = await pushFsidPairs(scfg, rows.map(fsPair).filter(p => p.fsid && p.ref), false);
-      agg.matched += out.matched; agg.written += out.written; agg.unmatched += out.unmatched; agg.skipped += out.skipped;
-      if (out.errors.length) agg.errors.push(...out.errors);
-      url = stop ? null : next;
-      if (url && Date.now() - t0 > 25000) { more = true; break; } // soft time-box; skip-done makes re-clicks cheap
-    }
-    return res.json({ mode, pages, ...agg, errors: agg.errors.slice(0, 10), done: !more, more, hint: scopeHint(agg.errors) });
+    // windowed modes (recent / fulfilled30)
+    const r = await floshipFsidWindow(mode);
+    if (r.error) return res.status(400).json(r);
+    return res.json({ ...r, errors: (r.errors || []).slice(0, 10), hint: scopeHint(r.errors || []) });
   } catch (e) { send500(res, e, 502); }
 });
 
@@ -3208,6 +3215,33 @@ app.get('/api/shopify/metafield-defs', async (req, res) => {
 });
 // modes: 'recent' (7d), 'completed30' (30d completed only), 'single' (one CT order number)
 const SB_WINDOWS = { recent: { days: 7, completed: true }, completed30: { days: 30, completed: true } };
+// self-contained windowed ShipBob ID sync (used by the button and the daily scheduler)
+async function shipbobIdWindow(mode) {
+  const win = SB_WINDOWS[mode];
+  if (!win) return { error: `unknown mode: ${mode}` };
+  const conn = await getConnector('shipbob'); if (!conn) return { error: 'ShipBob not connected' };
+  const sconn = await getConnector('shopify'); if (!sconn) return { error: 'Shopify not connected' };
+  await ensureShipbobOrdersTable();
+  const scfg = sconn.config, cfg = conn.config;
+  await ensureShipbobMetafieldDefs(scfg);
+  const sinceIso = new Date(Date.now() - win.days * 86400000).toISOString();
+  let page = 1, pages = 0, more = false; const agg = { matched: 0, written: 0, unmatched: 0, skipped: 0, errors: [] };
+  const t0 = Date.now();
+  while (page <= 200) {
+    const body = await shipbobRequest(cfg, `/${SHIPBOB_VER}/order?StartDate=${encodeURIComponent(sinceIso)}&SortOrder=Newest&Page=${page}&Limit=250`);
+    const arr = Array.isArray(body) ? body : (body.items || body.data || []);
+    pages++;
+    let rows = arr;
+    if (win.completed) rows = rows.filter(o => /complete|fulfill/i.test(o.status || ''));
+    const out = await pushShipbobPairs(scfg, rows.map(sbPair).filter(p => p.shopify_id && p.sb_order_id), false);
+    agg.matched += out.matched; agg.written += out.written; agg.unmatched += out.unmatched; agg.skipped += out.skipped;
+    if (out.errors.length) agg.errors.push(...out.errors);
+    if (arr.length < 250) break;
+    page++;
+    if (Date.now() - t0 > 25000) { more = true; break; }
+  }
+  return { mode, pages, ...agg, more, done: !more };
+}
 app.post('/api/shipbob/id-sync', async (req, res) => {
   if (!(await isAdminReq(req))) return res.status(403).json({ error: 'admins only' });
   const conn = await getConnector('shipbob');
@@ -3235,25 +3269,10 @@ app.post('/api/shipbob/id-sync', async (req, res) => {
       const out = await pushShipbobPairs(scfg, [pair], true);
       return res.json({ mode, ref, found: true, sb_order_id: pair.sb_order_id, shipment_id: pair.shipment_id, ...out, hint: scopeHint(out.errors) });
     }
-    const win = SB_WINDOWS[mode];
-    if (!win) return res.status(400).json({ error: `unknown mode: ${mode}` });
-    const sinceIso = new Date(Date.now() - win.days * 86400000).toISOString();
-    let page = 1, pages = 0, more = false; const agg = { matched: 0, written: 0, unmatched: 0, skipped: 0, errors: [] };
-    const t0 = Date.now();
-    while (page <= 200) {
-      const body = await shipbobRequest(cfg, `/${SHIPBOB_VER}/order?StartDate=${encodeURIComponent(sinceIso)}&SortOrder=Newest&Page=${page}&Limit=250`);
-      const arr = Array.isArray(body) ? body : (body.items || body.data || []);
-      pages++;
-      let rows = arr;
-      if (win.completed) rows = rows.filter(o => /complete|fulfill/i.test(o.status || ''));
-      const out = await pushShipbobPairs(scfg, rows.map(sbPair).filter(p => p.shopify_id && p.sb_order_id), false);
-      agg.matched += out.matched; agg.written += out.written; agg.unmatched += out.unmatched; agg.skipped += out.skipped;
-      if (out.errors.length) agg.errors.push(...out.errors);
-      if (arr.length < 250) break;
-      page++;
-      if (Date.now() - t0 > 25000) { more = true; break; }
-    }
-    return res.json({ mode, pages, ...agg, errors: agg.errors.slice(0, 10), done: !more, more, hint: scopeHint(agg.errors) });
+    // windowed modes (recent / completed30)
+    const r = await shipbobIdWindow(mode);
+    if (r.error) return res.status(400).json(r);
+    return res.json({ ...r, errors: (r.errors || []).slice(0, 10), hint: scopeHint(r.errors || []) });
   } catch (e) { send500(res, e, 502); }
 });
 
@@ -5309,6 +5328,9 @@ setInterval(async () => {
           await setReportPostedDate('').catch(() => {}); // posting failed → release the claim so it retries next minute
           throw e;
         }
+        // after the report: tag the last 7 days of fulfilled Floship / completed ShipBob orders with their IDs
+        try { const r = await floshipFsidWindow('recent'); console.log('daily floship fsid sync:', JSON.stringify(r)); } catch (e) { console.error('daily floship fsid sync:', e.message); }
+        try { const r = await shipbobIdWindow('recent'); console.log('daily shipbob id sync:', JSON.stringify(r)); } catch (e) { console.error('daily shipbob id sync:', e.message); }
       }
     }
   } catch (e) { console.error('daily report scheduler:', e.message); }
