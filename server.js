@@ -5325,10 +5325,23 @@ setInterval(async () => {
     if (hour >= 18 && hour < 24 && (await reportPostedDate()) !== date) {
       if (await getConnector('slack')) {
         await setReportPostedDate(date); // claim the day first so a slow/overlapping tick can't double-post
-        // run the last-7-day ID syncs first so their counts can go into the report
-        const idSync = {};
-        try { idSync.floship = await floshipFsidWindow('recent'); } catch (e) { idSync.floship = { error: e.message }; }
-        try { idSync.shipbob = await shipbobIdWindow('recent'); } catch (e) { idSync.shipbob = { error: e.message }; }
+        // Run the 7-day ID syncs first so their counts can go into the report — but FULLY isolated:
+        // parallel, each with a 30s timeout and its own catch, so a slow/hanging/failing 3PL API can
+        // never block or break the daily report. The report posts no matter what happens here.
+        const withTimeout = (p, ms, label) => Promise.race([
+          p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${label} timed out after ${ms / 1000}s`)), ms))
+        ]);
+        let idSync = {};
+        try {
+          const [fl, sb] = await Promise.allSettled([
+            withTimeout(floshipFsidWindow('recent'), 30000, 'Floship ID sync'),
+            withTimeout(shipbobIdWindow('recent'), 30000, 'ShipBob ID sync')
+          ]);
+          idSync = {
+            floship: fl.status === 'fulfilled' ? fl.value : { error: fl.reason?.message || String(fl.reason) },
+            shipbob: sb.status === 'fulfilled' ? sb.value : { error: sb.reason?.message || String(sb.reason) }
+          };
+        } catch (e) { idSync = { floship: { error: e.message }, shipbob: { error: e.message } }; }
         console.log('daily id syncs:', JSON.stringify(idSync));
         try {
           await postDailyReport(idSync);
