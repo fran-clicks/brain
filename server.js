@@ -3030,9 +3030,10 @@ async function applyFsidToShopify(scfg, gid, fsid) {
   if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
 }
 // upsert pairs into the cache table, then write matched ones to Shopify (skips already-done unless force)
-async function pushFsidPairs(scfg, pairs, force) {
-  let matched = 0, written = 0, unmatched = 0, skipped = 0; const errors = [];
+async function pushFsidPairs(scfg, pairs, force, deadline) {
+  let matched = 0, written = 0, unmatched = 0, skipped = 0, stoppedEarly = false; const errors = [];
   for (const p of pairs) {
+    if (deadline && Date.now() > deadline) { stoppedEarly = true; break; } // stop gracefully; the rest resume next run
     if (!p.ref || !p.fsid) continue;
     const prev = (await pool.query(`SELECT shopify_done FROM floship_orders WHERE fsid=$1`, [p.fsid])).rows[0];
     await pool.query(`INSERT INTO floship_orders (fsid, order_ref, status, source, fetched_at)
@@ -3051,7 +3052,7 @@ async function pushFsidPairs(scfg, pairs, force) {
       await pool.query(`UPDATE floship_orders SET last_error=$2 WHERE fsid=$1`, [p.fsid, String(e.message).slice(0, 300)]).catch(() => {});
     }
   }
-  return { matched, written, unmatched, skipped, errors };
+  return { matched, written, unmatched, skipped, errors, stoppedEarly };
 }
 // modes: 'recent' (last 7 days, any status), 'fulfilled30' (last 30 days, fulfilled only),
 // 'single' (one CT reference). Each writes the FS tag + floship.id + floship.link metafields.
@@ -3068,18 +3069,19 @@ async function floshipFsidWindow(mode) {
   const cutoff = Date.now() - win.days * 86400000;
   let url = floshipOrdersUrl(cfg), guard = 0, pages = 0, more = false;
   const agg = { matched: 0, written: 0, unmatched: 0, skipped: 0, errors: [] };
-  const t0 = Date.now();
+  const t0 = Date.now(), deadline = t0 + 23000; // leave margin under the scheduler's 30s cap
   while (url && guard++ < 1000) {
     const { results, next } = await floshipGetOrdersPage(auth, cfg.token, url);
     pages++;
     let stop = false;
     let rows = results.filter(o => { const d = Date.parse(o.create_date || o.original_transaction_date || ''); if (d && d < cutoff) { stop = true; return false; } return true; });
     rows = rows.filter(o => !/cancel/i.test(o.status || '')); // sync every order except cancelled
-    const out = await pushFsidPairs(scfg, rows.map(fsPair).filter(p => p.fsid && p.ref), false);
+    const out = await pushFsidPairs(scfg, rows.map(fsPair).filter(p => p.fsid && p.ref), false, deadline);
     agg.matched += out.matched; agg.written += out.written; agg.unmatched += out.unmatched; agg.skipped += out.skipped;
     if (out.errors.length) agg.errors.push(...out.errors);
+    if (out.stoppedEarly) { more = true; break; } // hit the deadline mid-page → resume next run
     url = stop ? null : next;
-    if (url && Date.now() - t0 > 25000) { more = true; break; }
+    if (url && Date.now() > deadline) { more = true; break; }
   }
   return { mode, pages, ...agg, more, done: !more };
 }
@@ -3169,9 +3171,10 @@ async function applyShipbobToShopify(scfg, gid, p) {
   const errs = [...(d.tagsAdd?.userErrors || []), ...(d.metafieldsSet?.userErrors || [])];
   if (errs.length) throw new Error(errs.map(e => e.message).join('; '));
 }
-async function pushShipbobPairs(scfg, pairs, force) {
-  let matched = 0, written = 0, unmatched = 0, skipped = 0; const errors = [];
+async function pushShipbobPairs(scfg, pairs, force, deadline) {
+  let matched = 0, written = 0, unmatched = 0, skipped = 0, stoppedEarly = false; const errors = [];
   for (const p of pairs) {
+    if (deadline && Date.now() > deadline) { stoppedEarly = true; break; } // stop gracefully; the rest resume next run
     if (!p.shopify_id || !p.sb_order_id) continue;
     const prev = (await pool.query(`SELECT shopify_done FROM shipbob_orders WHERE shopify_id=$1`, [p.shopify_id])).rows[0];
     await pool.query(`INSERT INTO shipbob_orders (shopify_id, sb_order_id, shipment_id, order_number, status, fetched_at)
@@ -3190,7 +3193,7 @@ async function pushShipbobPairs(scfg, pairs, force) {
       await pool.query(`UPDATE shipbob_orders SET last_error=$2 WHERE shopify_id=$1`, [p.shopify_id, String(e.message).slice(0, 300)]).catch(() => {});
     }
   }
-  return { matched, written, unmatched, skipped, errors };
+  return { matched, written, unmatched, skipped, errors, stoppedEarly };
 }
 // DIAGNOSTIC (admin): list ORDER metafield definitions with their admin access + pin state,
 // so we can confirm floship.*/shipbob.* are PUBLIC_READ (readable by Gorgias). Also re-runs the
@@ -3226,18 +3229,19 @@ async function shipbobIdWindow(mode) {
   await ensureShipbobMetafieldDefs(scfg);
   const sinceIso = new Date(Date.now() - win.days * 86400000).toISOString();
   let page = 1, pages = 0, more = false; const agg = { matched: 0, written: 0, unmatched: 0, skipped: 0, errors: [] };
-  const t0 = Date.now();
+  const t0 = Date.now(), deadline = t0 + 23000; // leave margin under the scheduler's 30s cap
   while (page <= 200) {
     const body = await shipbobRequest(cfg, `/${SHIPBOB_VER}/order?StartDate=${encodeURIComponent(sinceIso)}&SortOrder=Newest&Page=${page}&Limit=250`);
     const arr = Array.isArray(body) ? body : (body.items || body.data || []);
     pages++;
     let rows = arr.filter(o => !/cancel/i.test(o.status || '')); // sync every order except cancelled
-    const out = await pushShipbobPairs(scfg, rows.map(sbPair).filter(p => p.shopify_id && p.sb_order_id), false);
+    const out = await pushShipbobPairs(scfg, rows.map(sbPair).filter(p => p.shopify_id && p.sb_order_id), false, deadline);
     agg.matched += out.matched; agg.written += out.written; agg.unmatched += out.unmatched; agg.skipped += out.skipped;
     if (out.errors.length) agg.errors.push(...out.errors);
+    if (out.stoppedEarly) { more = true; break; } // hit the deadline mid-page → resume next run
     if (arr.length < 250) break;
     page++;
-    if (Date.now() - t0 > 25000) { more = true; break; }
+    if (Date.now() > deadline) { more = true; break; }
   }
   return { mode, pages, ...agg, more, done: !more };
 }
@@ -4986,7 +4990,8 @@ function fmtIdSync(label, r) {
   const failed = r.errors || [];
   const refs = failed.map(e => String(e).split(':')[0].trim()).filter(Boolean);
   const detail = `${r.written || 0} synced with Shopify · ${failed.length} failed`
-    + (failed.length ? ` (${refs.slice(0, 6).join(', ')}${refs.length > 6 ? '…' : ''})` : '');
+    + (failed.length ? ` (${refs.slice(0, 6).join(', ')}${refs.length > 6 ? '…' : ''})` : '')
+    + (r.more ? ' · more pending (continues next run)' : '');
   return `*${label}*\n${detail}`;
 }
 async function buildDailyReport(idSync) {
